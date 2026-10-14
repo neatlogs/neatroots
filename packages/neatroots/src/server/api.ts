@@ -14,7 +14,7 @@ import { mountAgentsApi } from "./api-agents.js";
 import { importSource, mountExploreApi } from "./api-explore.js";
 import { checkCoverage } from "./coverage.js";
 import { installInfo } from "../util/install.js";
-import { err, body } from "./util.js";
+import { err, body, isTraceIds } from "./util.js";
 import { askRuns } from "../engine/assist.js";
 import { loadTrace } from "../engine/trace.js";
 import type { RunRow } from "../types.js";
@@ -350,14 +350,14 @@ export function mountApi(app: Hono, roots: Roots): void {
   });
 
   app.post("/api/cloud/preview", async (c) => {
-    const b = await body<{ trace_ids?: string[] }>(c);
-    if (!b.trace_ids?.length) return err(c, 400, "trace_ids required");
+    const b = await body<{ trace_ids?: unknown }>(c);
+    if (!isTraceIds(b.trace_ids)) return err(c, 400, "trace_ids must be a non-empty array of run ids");
     return c.json(await roots.relay.preview(b.trace_ids));
   });
 
   app.post("/api/cloud/forward", async (c) => {
-    const b = await body<{ trace_ids?: string[] }>(c);
-    if (!b.trace_ids?.length) return err(c, 400, "trace_ids required");
+    const b = await body<{ trace_ids?: unknown }>(c);
+    if (!isTraceIds(b.trace_ids)) return err(c, 400, "trace_ids must be a non-empty array of run ids");
     const row = await roots.relay.forward(b.trace_ids, "user");
     roots.bus.emit("activity", { kind: "forward", message: row.status });
     return c.json(row, row.status === "ok" ? 200 : 502);

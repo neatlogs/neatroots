@@ -137,6 +137,26 @@ describe("server", () => {
     expect(await r.json()).toEqual({ mode: "unknown", known: false, note: null });
   });
 
+  it("rejects trace_ids that aren't a list of run ids on the cloud routes, without storing anything", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const post = (path: string, trace_ids: unknown) => fetch(`${tb.url}${path}`, { method: "POST", headers, body: JSON.stringify({ trace_ids }) });
+    for (const path of ["/api/cloud/preview", "/api/cloud/forward", "/api/cloud/import"]) {
+      for (const bad of [{ length: 3 }, "notarray", [1, 2], [""], []]) {
+        const r = await post(path, bad);
+        expect(r.status, `${path} ${JSON.stringify(bad)}`).toBe(400); // preview was a 500 for an object, 200 for a string
+        expect(((await r.json()) as { error: string }).error).toMatch(/trace_ids/);
+      }
+    }
+    expect(tb.roots.store.listForwards(10)).toEqual([]); // forward used to save the bad value as a failed send
+    // a real list still works
+    const { t, batches } = sampleRun();
+    tb.roots.ingest(batches);
+    const ok = await post("/api/cloud/preview", [t]);
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { span_count: number }).span_count).toBe(3);
+  });
+
   it("clamps the findings list limit instead of failing on a bad value", async () => {
     const tb = await served();
     const { t, root, batches } = sampleRun();

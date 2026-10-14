@@ -6,7 +6,7 @@ import { listCloudProjects, listCloudTraces, NO_CLOUD_TOKEN } from "../ingest/im
 import { cloudImportAuth, cloudImportBase, ImportError, parseTraceFile } from "../ingest/importers/index.js";
 import { deleteCloudToken, getCloudToken, setCloudToken } from "../relay/keychain.js";
 import { buildChat } from "../semantics/chat-view.js";
-import { body, err } from "./util.js";
+import { body, err, isTraceIds } from "./util.js";
 import { runSummary } from "./api.js";
 
 // Run views (chat, conversation), search, imports, cloud import, replays and the in-app coding
@@ -167,8 +167,8 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
     }
   });
   app.post("/api/cloud/import", async (c) => {
-    const b = await body<{ trace_ids: string[] }>(c);
-    if (!b.trace_ids?.length) return err(c, 400, "trace_ids is required");
+    const b = await body<{ trace_ids?: unknown }>(c);
+    if (!isTraceIds(b.trace_ids)) return err(c, 400, "trace_ids must be a non-empty array of run ids");
     try {
       const { job } = roots.imports.start("neatlogs-cloud", { traceIds: b.trace_ids.join(",") }, { limit: b.trace_ids.length });
       return c.json(job, 202);
