@@ -12,12 +12,13 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger("neatroots_steer")
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+_MAX_MODES = 1000
 
 
 def _default_url() -> str:
@@ -52,7 +53,9 @@ class RootsClient:
         self.url = (url or _default_url()).rstrip("/")
         self.disabled = os.environ.get("NEATROOTS_STEER", "").lower() in {"0", "off", "false", "no"}
         self._mode = "unknown"
-        self._mode_checked = 0.0
+        # neatroots picks the mode per project, so it is remembered per run (trace): mode, checked at.
+        self._modes: Dict[str, Tuple[str, float]] = {}
+        self._steering_off_at = 0.0
         self._pending: Set[str] = set()
         self._sse_connected = False
         self._down_until = 0.0
@@ -121,28 +124,45 @@ class RootsClient:
             if event == "note" and payload.get("trace_id"):
                 self._pending.add(payload["trace_id"])
             elif event == "mode":
-                self._mode_checked = 0.0
+                self._modes = {t: (m, 0.0) for t, (m, _) in self._modes.items()}
+                self._steering_off_at = 0.0
             elif event == "hello" and payload.get("enabled") is False:
-                self._mode = "off"
-                self._mode_checked = time.monotonic()
+                # Steering is off for every project.
+                self._steering_off_at = time.monotonic()
 
     # ---------------------------------------------------------------- notes
 
     @property
     def mode(self) -> str:
+        """The mode of the run claimed last. Use ``mode_for`` for a given run."""
         return self._mode
+
+    def mode_for(self, trace_id: str) -> str:
+        """This run's steering mode as last reported, or "unknown" for a run not seen before."""
+        with self._lock:
+            known = self._modes.get(trace_id)
+        return known[0] if known else "unknown"
 
     def _should_claim(self, trace_id: str) -> bool:
         if self.disabled:
             return False
         now = time.monotonic()
         with self._lock:
-            # A project with steering off is re-checked every 10 s rather than on every call.
-            if self._mode == "off" and now - self._mode_checked < 10.0 and trace_id not in self._pending:
+            if trace_id in self._pending:
+                return True
+            if now - self._steering_off_at < 10.0:
                 return False
-            if self._mode in {"advisory", "self-check"} and self._sse_connected and trace_id not in self._pending:
+            known = self._modes.get(trace_id)
+            if known is None:
+                # A run not seen before asks, whatever other projects' runs were told.
+                return True
+            mode, checked = known
+            # A project with steering off is re-checked every 10 s rather than on every call.
+            if mode == "off" and now - checked < 10.0:
+                return False
+            if mode in {"advisory", "self-check"} and self._sse_connected:
                 # Nothing pending for this run; skip the round trip.
-                return now - self._mode_checked > 10.0
+                return now - checked > 10.0
         return True
 
     def claim(self, trace_id: str, span_id: Optional[str] = None, *, gate_ms: Optional[int] = None) -> Optional[Note]:
@@ -160,7 +180,10 @@ class RootsClient:
             return None
         with self._lock:
             self._mode = res.get("mode") or "unknown"
-            self._mode_checked = time.monotonic()
+            self._modes.pop(trace_id, None)
+            self._modes[trace_id] = (self._mode, time.monotonic())
+            if len(self._modes) > _MAX_MODES:
+                self._modes.pop(next(iter(self._modes)))
             note = res.get("note")
             if not note:
                 self._pending.discard(trace_id)

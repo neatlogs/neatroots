@@ -3,10 +3,11 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { generateText, wrapLanguageModel } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
-import { applyAnthropic, applyMessages, NeatrootsHalt, rootsMiddleware, checkMyWork, configure, handleToolCall, replayInput, wrapOpenAI, type Note } from "../src/index.js";
+import { applyAnthropic, applyMessages, NeatrootsHalt, rootsMiddleware, checkMyWork, configure, guidance, handleToolCall, replayInput, wrapAnthropic, wrapOpenAI, type Note } from "../src/index.js";
 
 const notes: (Note | null)[] = [];
 const claims: any[] = [];
+const modes: Record<string, string> = {};
 let server: http.Server;
 let url = "";
 
@@ -19,7 +20,7 @@ beforeAll(async () => {
       let out: unknown = {};
       if (req.url === "/api/steer/claim") {
         claims.push(b);
-        out = { mode: "advisory", note: notes.shift() ?? null };
+        out = { mode: modes[b.trace_id] ?? "advisory", note: notes.shift() ?? null };
       } else if (req.url === "/api/steer/check") out = { probability: 0.2, answer: "no", evidence_span_ids: ["s1"] };
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(out));
@@ -30,10 +31,24 @@ beforeAll(async () => {
 });
 afterAll(() => server.close());
 beforeEach(() => {
-  configure({ url, traceId: () => "a".repeat(32) });
+  configure({ url, disabled: false, traceId: () => "a".repeat(32) });
   notes.length = 0;
   claims.length = 0;
+  for (const k of Object.keys(modes)) delete modes[k];
 });
+
+// Stands in for the SDKs' APIPromise: a Promise with response helpers of its own.
+class FakeApiPromise<T> extends Promise<T> {
+  static get [Symbol.species]() {
+    return Promise;
+  }
+  withResponse() {
+    return this.then((data) => ({ data, response: "raw" }));
+  }
+  asResponse() {
+    return this.then(() => "raw");
+  }
+}
 
 const note = (text = "Stop retrying.", kind: Note["kind"] = "template"): Note => ({ id: "n1", kind, text, finding_id: "f1" });
 
@@ -78,6 +93,32 @@ describe("neatroots-steer (ts)", () => {
       delete process.env.NEATROOTS_REPLAY_MODEL;
       delete process.env.NEATROOTS_REPLAY_SYSTEM_PROMPT;
     }
+  });
+
+  it("resolves each run's own steering mode", async () => {
+    const off = "c".repeat(32);
+    const gate = "d".repeat(32);
+    modes[off] = "off";
+    modes[gate] = "gate";
+    expect(await guidance(off)).toBeUndefined();
+    notes.push(note());
+    // Another project's run is not skipped because the first project has steering off.
+    expect((await guidance(gate))?.id).toBe("n1");
+    expect(await guidance(off)).toBeUndefined();
+    expect(claims.map((c) => c.trace_id)).toEqual([off, gate]);
+  });
+
+  it("keeps the SDK promise's withResponse and asResponse", async () => {
+    const client = wrapAnthropic({ messages: { create: (p: any) => new FakeApiPromise<any>((r) => r(p)) } });
+    const params = { messages: [{ role: "user", content: "q" }] };
+    notes.push(note());
+    const { data, response } = await client.messages.create(params).withResponse();
+    expect(response).toBe("raw");
+    expect(JSON.stringify(data.messages)).toContain("<neatroots-guidance>");
+    expect(await client.messages.create(params).asResponse()).toBe("raw");
+    expect(await client.messages.create(params)).toEqual(params);
+    configure({ disabled: true });
+    expect(client.messages.create(params)).toBeInstanceOf(FakeApiPromise);
   });
 
   it("raises NeatrootsHalt for halt notes", async () => {

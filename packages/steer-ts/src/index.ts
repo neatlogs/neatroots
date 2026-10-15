@@ -52,16 +52,17 @@ interface State {
   traceIdProvider?: () => string | undefined;
   url: string;
   disabled: boolean;
-  mode: string;
-  modeCheckedAt: number;
+  // neatroots picks the mode per project, so it is remembered per run (trace), not per process.
+  modes: Map<string, { mode: string; at: number }>;
   downUntil: number;
 }
+
+const MAX_MODES = 1000;
 
 const state: State = {
   url: defaultUrl(),
   disabled: typeof process !== "undefined" && ["0", "off", "false", "no"].includes(String(process.env.NEATROOTS_STEER ?? "").toLowerCase()),
-  mode: "unknown",
-  modeCheckedAt: 0,
+  modes: new Map(),
   downUntil: 0,
 };
 
@@ -76,8 +77,7 @@ export function configure(opts: { url?: string; disabled?: boolean; traceId?: ()
   // (ESM vs CommonJS, or a linked install) that would not see the active span.
   if (opts.neatlogs) neatlogsMod = opts.neatlogs as NeatlogsModule;
   if (opts.disabled !== undefined) state.disabled = opts.disabled;
-  state.mode = "unknown";
-  state.modeCheckedAt = 0;
+  state.modes.clear();
   state.downUntil = 0;
 }
 
@@ -215,16 +215,21 @@ export async function guidance(traceId?: string): Promise<Note | undefined> {
     debug("no active trace; pass configure({ neatlogs }) if the SDK is initialized");
     return undefined;
   }
-  if (state.mode === "off" && Date.now() - state.modeCheckedAt < 10_000) return undefined;
+  // A run whose project has steering off is re-checked every 10 s rather than on every call.
+  // A run not seen before is "unknown": it flushes and asks, whatever other runs were told.
+  const known = state.modes.get(traceId);
+  const mode = known?.mode ?? "unknown";
+  if (mode === "off" && Date.now() - known!.at < 10_000) return undefined;
   let gateMs: number | undefined;
-  if (state.mode === "gate" || state.mode === "unknown") {
+  if (mode === "gate" || mode === "unknown") {
     await flushSdk();
     gateMs = 300;
   }
   const res = await post<{ mode: string; note: Note | null }>("/api/steer/claim", { trace_id: traceId, span_id: spanId, gate_ms: gateMs }, gateMs ? gateMs + 500 : 500);
   if (!res) return undefined;
-  state.mode = res.mode || "unknown";
-  state.modeCheckedAt = Date.now();
+  state.modes.delete(traceId);
+  state.modes.set(traceId, { mode: res.mode || "unknown", at: Date.now() });
+  if (state.modes.size > MAX_MODES) state.modes.delete(state.modes.keys().next().value!);
   if (!res.note) return undefined;
   await record(res.note);
   if (res.note.kind === "halt") throw new NeatrootsHalt(res.note.text);
@@ -304,6 +309,38 @@ const overrideAnthropic: Override = (p, o) => ({ ...p, ...(o.model ? { model: o.
 
 // --------------------------------------------------------------------- wrap
 
+/**
+ * What a wrapped call returns: a promise of the SDK's result that also forwards the SDK
+ * promise's own helpers (APIPromise.withResponse and asResponse in the OpenAI and Anthropic SDKs).
+ * The SDK promise travels inside an object because awaiting it directly would unwrap it.
+ */
+class SteeredPromise extends Promise<unknown> {
+  static get [Symbol.species]() {
+    return Promise;
+  }
+
+  readonly #call: Promise<{ sdk: any }>;
+
+  constructor(call: Promise<{ sdk: any }>) {
+    super((resolve) => resolve(undefined));
+    this.#call = call;
+  }
+
+  // Lazy like APIPromise: the result is read when someone awaits it, so using only
+  // withResponse() leaves no second, unawaited promise to reject.
+  override then<A = unknown, B = never>(onfulfilled?: ((v: unknown) => A | PromiseLike<A>) | null, onrejected?: ((e: any) => B | PromiseLike<B>) | null): Promise<A | B> {
+    return this.#call.then((c) => c.sdk).then(onfulfilled, onrejected);
+  }
+
+  withResponse(): Promise<unknown> {
+    return this.#call.then((c) => c.sdk.withResponse());
+  }
+
+  asResponse(): Promise<unknown> {
+    return this.#call.then((c) => c.sdk.asResponse());
+  }
+}
+
 function wrapMethod(
   owner: Record<string, unknown> | undefined,
   name: string,
@@ -313,17 +350,22 @@ function wrapMethod(
   if (!owner) return;
   const original = owner[name] as ((...a: unknown[]) => unknown) & { __neatroots?: boolean };
   if (typeof original !== "function" || original.__neatroots) return;
-  const wrapped = async function (this: unknown, ...args: unknown[]) {
+  const wrapped = function (this: unknown, ...args: unknown[]) {
     const o = replayOverrides();
     const params = o.model || o.system ? override((args[0] ?? {}) as Record<string, unknown>, o) : ((args[0] ?? {}) as Record<string, unknown>);
-    let next = params;
-    try {
-      const note = await guidance();
-      if (note) next = transform({ ...params }, note);
-    } catch (err) {
-      if (err instanceof NeatrootsHalt) throw err;
-    }
-    return original.apply(owner, [next, ...args.slice(1)]);
+    // With steering off there is nothing to wait for: hand back the SDK's own promise.
+    if (state.disabled) return original.apply(owner, [params, ...args.slice(1)]);
+    const call = (async () => {
+      let next = params;
+      try {
+        const note = await guidance();
+        if (note) next = transform({ ...params }, note);
+      } catch (err) {
+        if (err instanceof NeatrootsHalt) throw err;
+      }
+      return { sdk: original.apply(owner, [next, ...args.slice(1)]) };
+    })();
+    return new SteeredPromise(call);
   } as typeof original;
   wrapped.__neatroots = true;
   owner[name] = wrapped;

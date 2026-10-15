@@ -156,7 +156,7 @@ def guidance(trace_id: Optional[str] = None) -> Optional[Note]:
     if not trace_id:
         return None
     gate_ms = None
-    if client.mode in ("gate", "unknown"):
+    if client.mode_for(trace_id) in ("gate", "unknown"):
         # Push finished spans to neatroots first so it can check the latest step (and, the
         # first time, learn which project this run belongs to). neatroots only waits in gate mode.
         _flush_sdk()

@@ -14,6 +14,7 @@ class StubRoots:
     def __init__(self, notes=None, mode="advisory"):
         self.notes = list(notes or [])
         self.mode = mode
+        self.modes = {}
         self.claims = []
         self.checks = []
         stub = self
@@ -31,7 +32,7 @@ class StubRoots:
                 if self.path == "/api/steer/claim":
                     stub.claims.append(body)
                     note = stub.notes.pop(0) if stub.notes else None
-                    out = {"mode": stub.mode, "note": note}
+                    out = {"mode": stub.modes.get(body["trace_id"], stub.mode), "note": note}
                 elif self.path == "/api/steer/check":
                     stub.checks.append(body)
                     out = {"probability": 0.9, "answer": "yes", "evidence_span_ids": ["abc"]}
@@ -113,6 +114,22 @@ def test_halt_note_raises(stub):
     stub.notes[:] = [{"id": "h", "kind": "halt", "text": "Your rule says stop.", "finding_id": None}]
     with pytest.raises(neatroots_steer.NeatrootsHalt):
         neatroots_steer.apply([{"role": "user", "content": "q"}])
+
+
+def test_each_run_resolves_its_own_mode(stub):
+    off, gate = "c" * 32, "d" * 32
+    stub.modes = {off: "off", gate: "gate"}
+    pending = stub.notes[:]
+    stub.notes.clear()
+    assert neatroots_steer.guidance(off) is None
+    stub.notes[:] = pending
+    # Another project's run is not skipped because the first project has steering off,
+    # and as a run not seen before it flushes and waits like any new run.
+    note = neatroots_steer.guidance(gate)
+    assert note is not None and note.id == "n1"
+    assert stub.claims[1]["gate_ms"] == 300
+    assert neatroots_steer.guidance(off) is None
+    assert [c["trace_id"] for c in stub.claims] == [off, gate]
 
 
 def test_check_my_work_and_tool_call(stub):
