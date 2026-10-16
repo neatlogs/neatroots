@@ -195,7 +195,8 @@ export function mountApi(app: Hono, roots: Roots): void {
 
   app.post("/api/runs/:traceId/pin", async (c) => {
     const b = await body<{ pinned?: boolean }>(c);
-    roots.store.setPinned(c.req.param("traceId"), b.pinned !== false);
+    if (typeof b.pinned !== "boolean") return err(c, 400, "pinned must be a boolean");
+    roots.store.setPinned(c.req.param("traceId"), b.pinned);
     return c.json({ ok: true });
   });
 
