@@ -411,6 +411,29 @@ describe("server", () => {
     expect(await r.json()).toEqual({ error: "text is required" });
   });
 
+  it("keeps internal chat state out of the session PATCH API", async () => {
+    const tb = await served();
+    const id = tb.roots.chats.create({ agent: "claude", cwd: os.tmpdir() }).id;
+    const patch = (body: unknown) => fetch(`${tb.url}/api/chat/sessions/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") },
+      body: JSON.stringify(body),
+    });
+
+    const r = await patch({ title: "Renamed", state: "running", agent_session_id: "forged" });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ title: "Renamed", state: "idle", agent_session_id: null });
+    expect(tb.roots.chats.get(id)).toMatchObject({ title: "Renamed", state: "idle", agent_session_id: null });
+
+    for (const bad of [{ allow_edits: "false" }, { allow_commands: "false" }, { title: 5 }]) {
+      expect((await patch(bad)).status, JSON.stringify(bad)).toBe(400);
+    }
+    expect(tb.roots.chats.get(id)).toMatchObject({ title: "Renamed", allow_edits: false, allow_commands: false });
+
+    expect((await patch({ allow_edits: true, allow_commands: true, title: "Editable" })).status).toBe(200);
+    expect(tb.roots.chats.get(id)).toMatchObject({ title: "Editable", allow_edits: true, allow_commands: true });
+  });
+
   it("returns 404 JSON for unknown /api and /v1 routes, not the SPA", async () => {
     const tb = await served();
     for (const path of ["/api/anything-unknown", "/api/imports/abc", "/v1/unknown"]) {
