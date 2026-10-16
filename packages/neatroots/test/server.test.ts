@@ -1,10 +1,13 @@
+import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
+import path from "node:path";
 import zlib from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { encodeTraceRequest, decodeTraceProtobuf } from "../src/otlp/codec.js";
+import { findUiDir } from "../src/server/app.js";
 import { batch, hex, llmSpan, makeRoots, markerSpan, s, span, toolSpan, until } from "./helpers.js";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -279,6 +282,37 @@ describe("server", () => {
     expect((await fetch(`${tb.url}/api/status`, { headers: { origin: tb.url.replace("127.0.0.1", "localhost") } })).status).toBe(200);
     const ui = await fetch(`${tb.url}/runs/some-id`);
     expect(ui.headers.get("content-type")).toMatch(/text\/html/);
+  });
+
+  it("path traversal: a request that escapes uiDir into a sibling folder returns index.html, not the sibling file", async () => {
+    // Use the same uiDir the server resolves at startup (exported so both agree).
+    const uiDir = findUiDir();
+    if (!uiDir) return; // UI not built in this environment; skip rather than false-pass
+
+    // Create a sibling directory whose name starts with the same string as uiDir
+    // (e.g. if uiDir is ".../dist/ui", sibling is ".../dist/ui-x").  The old guard
+    // file.startsWith(uiDir) would pass for a path inside this sibling because the
+    // prefix matches without a separator; the new guard file.startsWith(uiDir + path.sep)
+    // rejects it.
+    const siblingDir = uiDir + "-x";
+    cleanup.push(async () => fs.rmSync(siblingDir, { recursive: true, force: true }));
+    fs.mkdirSync(siblingDir, { recursive: true });
+    fs.writeFileSync(path.join(siblingDir, "secret.txt"), "secret-content");
+
+    const tb = await served();
+
+    // Encode the traversal path: /..%2f<basename(uiDir)>-x%2fsecret.txt
+    // The server decodes it with decodeURIComponent before joining, so the decoded
+    // path would be /../<basename(uiDir)>-x/secret.txt relative to uiDir.
+    const siblingName = path.basename(uiDir) + "-x";
+    const traversalPath = `/..%2f${encodeURIComponent(siblingName)}%2fsecret.txt`;
+
+    const res = await fetch(`${tb.url}${traversalPath}`);
+
+    // Must serve the SPA (index.html), not the secret file
+    expect(res.headers.get("content-type")).toMatch(/text\/html/);
+    const body = await res.text();
+    expect(body).not.toContain("secret-content");
   });
 
   it("gives a helpful error (not a raw fetch failure) when no LLM is reachable", async () => {

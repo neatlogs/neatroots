@@ -13,7 +13,7 @@ import { VERSION } from "../version.js";
 
 export { VERSION };
 
-function findUiDir(): string | undefined {
+export function findUiDir(): string | undefined {
   let dir = path.dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 6; i++) {
     for (const candidate of [path.join(dir, "ui"), path.join(dir, "dist", "ui"), path.join(dir, "..", "ui", "dist")]) {
@@ -104,7 +104,9 @@ export function createApp(roots: Roots): Hono {
     }
     const rel = decodeURIComponent(c.req.path).replace(/^\/+/, "");
     let file = path.join(uiDir, rel);
-    if (!file.startsWith(uiDir) || !rel || !fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(uiDir, "index.html");
+    // Append path.sep before the prefix check so a sibling directory whose name starts
+    // with the same string as uiDir (e.g. ui-x/) cannot be reached via path traversal.
+    if (!file.startsWith(uiDir + path.sep) || !rel || !fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(uiDir, "index.html");
     const ext = path.extname(file);
     const headers: Record<string, string> = { "content-type": MIME[ext] ?? "application/octet-stream" };
     if (rel.startsWith("assets/")) headers["cache-control"] = "public, max-age=31536000, immutable";
