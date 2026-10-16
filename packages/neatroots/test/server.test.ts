@@ -304,6 +304,17 @@ describe("server", () => {
     expect(tb.roots.config.retention).toEqual({ days: 30, maxGb: 2.5 });
   });
 
+  it("rejects non-string replay target fields", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    for (const field of ["command", "cwd", "url"] as const) {
+      const r = await fetch(`${tb.url}/api/projects/shop/rerun`, { method: "POST", headers, body: JSON.stringify({ [field]: 5 }) });
+      expect(r.status).toBe(400);
+      expect(await r.json()).toEqual({ error: `${field} must be a string` });
+    }
+    expect(tb.roots.config.rerun.shop).toBeUndefined();
+  });
+
   it("clamps the findings list limit instead of failing on a bad value", async () => {
     const tb = await served();
     const { t, root, batches } = sampleRun();
