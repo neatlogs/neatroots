@@ -15,6 +15,7 @@ function insights(roots: Roots, key: WindowKey) {
     id: lc.check.id,
     title: checkTitle(lc.check),
     kind: lc.check.kind,
+    applies_to: lc.check.applies_to,
     enabled: lc.check.enabled !== false && (stats[lc.check.id]?.enabled ?? 1) === 1,
   }));
   return computeInsights(roots.store.db, key, checks);
