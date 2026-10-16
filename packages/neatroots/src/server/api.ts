@@ -443,7 +443,7 @@ export function mountApi(app: Hono, roots: Roots): void {
 
   app.post("/api/steer/claim", async (c) => {
     const b = await body<{ trace_id?: string; span_id?: string; gate_ms?: number; project?: string }>(c);
-    if (!b.trace_id) return err(c, 400, "trace_id required");
+    if (typeof b.trace_id !== "string" || !b.trace_id) return err(c, 400, "trace_id required");
     const run = roots.store.getRun(b.trace_id);
     // Before any span of this run has arrived neatroots cannot know its project; say so, so the
     // hook flushes the SDK and asks again instead of caching "off".
@@ -457,7 +457,7 @@ export function mountApi(app: Hono, roots: Roots): void {
   app.post("/api/steer/check", async (c) => {
     if (!engine) return err(c, 503, "engine not running");
     const b = await body<{ trace_id?: string; question?: string; span_ids?: string[] }>(c);
-    if (!b.trace_id || !b.question) return err(c, 400, "trace_id and question required");
+    if (typeof b.trace_id !== "string" || !b.trace_id || !b.question) return err(c, 400, "trace_id and question required");
     if (!roots.store.getRun(b.trace_id)) return c.json({ probability: null, answer: "unknown", reason: "neatroots has not received spans for this run yet", evidence_span_ids: [] });
     try {
       const r = await engine.judge(b.trace_id, b.question, { spanIds: b.span_ids });
@@ -474,6 +474,7 @@ export function mountApi(app: Hono, roots: Roots): void {
 
   app.post("/api/focus", async (c) => {
     const b = await body<{ trace_id?: string; span_id?: string | null }>(c);
+    if (b.trace_id !== undefined && typeof b.trace_id !== "string") return err(c, 400, "trace_id must be a string");
     // A run neatroots doesn't have can't be in focus.
     roots.focus = b.trace_id && roots.store.getRun(b.trace_id) ? { trace_id: b.trace_id, span_id: b.span_id ?? null, at: Date.now() } : null;
     return c.json({ ok: true });

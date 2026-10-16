@@ -285,6 +285,16 @@ describe("server", () => {
     expect(await r.json()).toEqual({ mode: "unknown", known: false, note: null });
   });
 
+  it("rejects non-string trace ids before querying the store", async () => {
+    const tb = await served(false);
+    const headers = { "content-type": "application/json" };
+    for (const path of ["/api/steer/claim", "/api/steer/check", "/api/focus"]) {
+      const r = await fetch(`${tb.url}${path}`, { method: "POST", headers, body: JSON.stringify({ trace_id: {}, question: "Did it fail?", project: "test" }) });
+      expect(r.status, path).toBe(400);
+    }
+    expect((await fetch(`${tb.url}/api/focus`, { method: "POST", headers, body: "{}" })).status).toBe(200);
+  });
+
   it("refuses retention values it can't use instead of answering ok and ignoring them", async () => {
     const tb = await served();
     const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
