@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { makeRoots, type TestRoots } from "./helpers.js";
+import { makeRoots, until, type TestRoots } from "./helpers.js";
 
 // Chats with coding agents inside the app, run against stand-in CLIs that answer like the real ones.
 
@@ -121,5 +121,23 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`,
       const prompt = lines.slice(lines.indexOf("--") + 1).join("\n");
       expect(prompt.endsWith(i === 0 ? "hi" : "- list the files")).toBe(true);
     });
+  });
+});
+
+describe("deleting a running chat", () => {
+  it("ignores the child process's late events and exit", async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
+    process.env.HOME = dir;
+    process.env.NEATROOTS_CODEX_BIN = script("codex", "sleep 30");
+    t = await makeRoots({ noEngine: true });
+    const s = t.roots.chats.create({ agent: "codex", cwd: dir });
+    const sending = t.roots.chats.send(s.id, "keep working");
+    await until(() => t!.roots.chats.get(s.id)?.state === "running");
+
+    t.roots.chats.remove(s.id);
+    await sending;
+
+    expect(t.roots.chats.get(s.id)).toBeUndefined();
+    expect(t.roots.chats.events(s.id)).toEqual([]);
   });
 });
