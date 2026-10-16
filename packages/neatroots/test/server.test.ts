@@ -304,6 +304,19 @@ describe("server", () => {
     expect(tb.roots.config.retention).toEqual({ days: 30, maxGb: 2.5 });
   });
 
+  it("rejects malformed annotation fields before writing them", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const post = (body: unknown) => fetch(`${tb.url}/api/annotations`, { method: "POST", headers, body: JSON.stringify(body) });
+    expect((await post({ trace_id: 5, label: "note" })).status).toBe(400);
+    for (const field of ["span_id", "text", "author"] as const) {
+      const r = await post({ trace_id: "trace", label: "note", [field]: {} });
+      expect(r.status).toBe(400);
+      expect(await r.json()).toEqual({ error: `${field} must be a string or null` });
+    }
+    expect((tb.roots.store.db.prepare("SELECT COUNT(*) AS n FROM annotations").get() as { n: number }).n).toBe(0);
+  });
+
   it("clamps the findings list limit instead of failing on a bad value", async () => {
     const tb = await served();
     const { t, root, batches } = sampleRun();
