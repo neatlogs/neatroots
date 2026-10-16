@@ -304,6 +304,18 @@ describe("server", () => {
     expect(tb.roots.config.retention).toEqual({ days: 30, maxGb: 2.5 });
   });
 
+  it("requires a boolean when enabling or disabling a check", async () => {
+    const tb = await served();
+    const id = tb.roots.checks.all()[0].check.id;
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const save = (enabled: unknown) => fetch(`${tb.url}/api/checks/${id}/enabled`, { method: "POST", headers, body: JSON.stringify({ enabled }) });
+
+    expect((await save("false")).status).toBe(400);
+    expect(tb.roots.store.checkStats()[id].enabled).toBe(1);
+    expect((await save(false)).status).toBe(200);
+    expect(tb.roots.store.checkStats()[id].enabled).toBe(0);
+  });
+
   it("clamps the findings list limit instead of failing on a bad value", async () => {
     const tb = await served();
     const { t, root, batches } = sampleRun();
