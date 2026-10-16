@@ -95,6 +95,20 @@ export function registerDataCommands(program: Command): void {
   });
 
   program
+    .command("export")
+    .argument("<trace-id>")
+    .description("Save a run as an OTLP JSON file, for neatroots check in CI or neatroots import on another machine")
+    .option("-o, --out <file>", "where to write it (default: <trace-id>.json)")
+    .action(async (traceId: string, opts: { out?: string }) => {
+      const p = await needRunning();
+      const doc = await api<{ resourceSpans: { scopeSpans: { spans: unknown[] }[] }[] }>(p, `/api/runs/${encodeURIComponent(traceId)}/otlp`);
+      const out = opts.out ?? `${traceId}.json`;
+      fs.writeFileSync(out, JSON.stringify(doc));
+      const spans = doc.resourceSpans.reduce((n, r) => n + r.scopeSpans.reduce((m, s) => m + s.spans.length, 0), 0);
+      console.log(`✓ ${out}: ${spans} spans. Check it with: neatroots check ${out}`);
+    });
+
+  program
     .command("replay")
     .argument("<trace-id>")
     .description("Replay a run: one LLM call with --span (no agent needed), or the whole agent through its registered rerun command or endpoint")

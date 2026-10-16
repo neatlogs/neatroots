@@ -340,6 +340,13 @@ function spanForEncode(s: OtlpSpan): any {
   };
 }
 
+/** Stored batches as an OTLP/JSON ExportTraceServiceRequest: the file `neatroots check` and `neatroots import` read. */
+export function encodeTraceJson(batches: ResourceSpansBatch[]): { resourceSpans: unknown[] } {
+  return {
+    resourceSpans: batches.map((b) => ({ resource: b.resource, scopeSpans: [{ scope: b.scope, spans: b.spans }] })),
+  };
+}
+
 /** Builds an OTLP/protobuf ExportTraceServiceRequest from stored batches. */
 export function encodeTraceRequest(batches: ResourceSpansBatch[]): Uint8Array {
   const T = type(TRACE_REQ);
