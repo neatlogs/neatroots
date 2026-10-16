@@ -258,6 +258,21 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
             });
           }}
         />
+        {d.annotations.some((a) => !a.span_id) && (
+          <section aria-label="Run annotations" className="rounded-lg border border-border px-5 py-4">
+            <h2 className="mb-3 text-sm font-medium">Run annotations</h2>
+            <div className="flex flex-col gap-3">
+              {d.annotations.filter((a) => !a.span_id).map((a) => (
+                <div key={a.id} className="min-w-0">
+                  <div className="mb-1 text-xs text-muted-foreground">
+                    {a.label} · {new Date(a.created_ms).toLocaleString()}
+                  </div>
+                  <p className="whitespace-pre-wrap break-words text-sm">{a.text}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
         <RunViews traceId={traceId} spans={d.spans} flagged={flagged} view={view} onView={setView} selected={highlighted} onSelect={setOpen} hasSession={!!r.session_id} fork={fork} />
         <ReplaysPanel replays={d.replays} />
         <SteeringNotes notes={d.notes} />

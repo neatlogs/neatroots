@@ -1180,12 +1180,16 @@ export class Store {
 
   // ------------------------------------------------------------- annotations
 
-  insertAnnotation(a: Omit<Annotation, "id" | "created_ms">): Annotation {
+  insertAnnotation(a: Omit<Annotation, "id" | "created_ms">): Annotation;
+  insertAnnotation(a: Omit<Annotation, "id" | "created_ms">, requireRun: true): Annotation | undefined;
+  insertAnnotation(a: Omit<Annotation, "id" | "created_ms">, requireRun = false): Annotation | undefined {
     const row: Annotation = { ...a, id: newId("ann"), created_ms: Date.now() };
-    this.db
-      .prepare("INSERT INTO annotations (id, trace_id, span_id, label, text, author, created_ms) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(row.id, row.trace_id, row.span_id, row.label, row.text, row.author, row.created_ms);
-    return row;
+    const values = [row.id, row.trace_id, row.span_id, row.label, row.text, row.author, row.created_ms];
+    const sql = "INSERT INTO annotations (id, trace_id, span_id, label, text, author, created_ms) ";
+    const result = requireRun
+      ? this.db.prepare(sql + "SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM runs WHERE trace_id = ?)").run(...values, row.trace_id)
+      : this.db.prepare(sql + "VALUES (?, ?, ?, ?, ?, ?, ?)").run(...values);
+    return result.changes ? row : undefined;
   }
 
   annotationsForTrace(traceId: string): Annotation[] {

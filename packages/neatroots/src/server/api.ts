@@ -251,9 +251,11 @@ export function mountApi(app: Hono, roots: Roots): void {
   });
 
   app.post("/api/annotations", async (c) => {
-    const b = await body<{ trace_id?: string; span_id?: string; label?: string; text?: string; author?: string }>(c);
+    const b = await body<{ trace_id?: string; span_id?: string; label?: string; text?: string; author?: string; require_run?: boolean }>(c);
     if (!b.trace_id || !b.label || !["issue", "good", "note"].includes(b.label)) return err(c, 400, "trace_id and label (issue, good or note) are required");
-    const a = roots.store.insertAnnotation({ trace_id: b.trace_id, span_id: b.span_id ?? null, label: b.label as "issue", text: b.text ?? null, author: b.author ?? "user" });
+    const input = { trace_id: b.trace_id, span_id: b.span_id ?? null, label: b.label as "issue", text: b.text ?? null, author: b.author ?? "user" };
+    const a = b.require_run === true ? roots.store.insertAnnotation(input, true) : roots.store.insertAnnotation(input);
+    if (!a) return err(c, 404, "run not found");
     roots.bus.emit("activity", { trace_id: b.trace_id, kind: "annotation", message: a.label });
     return c.json(a);
   });

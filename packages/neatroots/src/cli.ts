@@ -13,6 +13,7 @@ import { registerModelCommands } from "./cli/models.js";
 import { doctorModels } from "./cli/doctor-models.js";
 import { registerServiceCommands } from "./cli/service.js";
 import { registerConnectCommand } from "./cli/connect.js";
+import { registerGitContextCommand } from "./cli/git-context.js";
 import { registerCloudImportCommands, registerDataCommands } from "./cli/data.js";
 import { connectClient, findClient, listClients, serverCommand, CLIENTS } from "./mcp/clients.js";
 import { parseChecks } from "./checks/registry.js";
@@ -452,6 +453,7 @@ registerModelCommands(program);
 registerServiceCommands(program);
 registerConnectCommand(program);
 registerDataCommands(program);
+registerGitContextCommand(program);
 
 program
   .command("mock-llm")

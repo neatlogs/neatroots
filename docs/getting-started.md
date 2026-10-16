@@ -397,3 +397,35 @@ Uninstalling keeps `~/.neatroots`, which holds your runs, settings and Laya. Del
 | Steering notes never arrive | Turn steering on for the project, install the hook, and set `NEATROOTS_STEER_DEBUG=1` in the agent to see what the hook does |
 | Where are the logs? | The terminal running `neatroots start`, or `~/.neatroots/logs/neatroots.log` for the background service. `NEATROOTS_DEBUG=1` adds detail |
 | `~/.neatroots` doesn't get smaller after old runs are removed | That's expected. Past the size cap (Settings → Storage), the oldest unpinned runs are removed until the data is back to 90% of the cap, but the database file keeps its size and reuses the freed space for new runs. So the cap stops it growing; lowering the cap doesn't shrink the folder, and "On disk" can read above the cap |
+
+### Add git context to a run
+
+To keep a checkout reference beside a run:
+
+```bash
+neatroots annotate-git <trace-id> --repo /path/to/your/agent
+```
+
+The command adds a note to an existing run with the checkout's current full commit id,
+observation completion time (UTC), and dirty state (tracked edits, staged edits and untracked files count).
+Add `--include-branch` only if you also want the branch name recorded; it may contain
+customer or ticket details. Commit ids can also identify private work. The note describes
+the checkout **when you annotate it**, not the code that produced an older run. Run it
+while the checkout is still at the version you want to record.
+
+`--repo` is required so a terminal in another project cannot silently label the run with
+its own checkout. No git tags or refs are created. The note contains no repository path,
+remote URL, file names, or diff. It does not record or restore uncommitted edits. An empty
+repository without a commit, a non-repository path, an unreadable status or a changed HEAD
+fails without adding a note. neatroots must be running locally, and the run must still exist
+when the note is inserted. Find it under **Run annotations** on the run page.
+These annotations are stored separately from steering notes and are not delivered to an agent.
+
+This is a best-effort observation, not an atomic git snapshot: files may change while HEAD
+stays fixed, and a commit can change and change back between reads. Only run it on a
+checkout whose local git configuration you trust. Git commands are read-only and bounded
+(three seconds each, ten seconds total for git reads); inherited `GIT_*` overrides and
+fsmonitor hooks are disabled, but this is not a sandbox for hostile git installations or
+configuration. Network waits use the normal CLI timeout. Each successful invocation adds
+a note; it does not retry a failed write. If a request times out, check the run's notes before
+trying again because the server may already have stored it.
