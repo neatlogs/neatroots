@@ -457,7 +457,8 @@ export function mountApi(app: Hono, roots: Roots): void {
     const mode = roots.steering.mode(run?.project ?? b.project);
     const wait = mode === "gate" ? (b.gate_ms ?? roots.config.steering.gateWaitMs) : 0;
     const note = wait > 0 ? await roots.steering.gate(b.trace_id, wait, b.span_id) : roots.steering.claim(b.trace_id, b.span_id);
-    return c.json({ mode, note: note ? { id: note.id, kind: note.kind, text: note.text, finding_id: note.finding_id } : null });
+    const halts = roots.checks.hasHaltRule(run?.project ?? b.project, run?.workflow);
+    return c.json({ mode, halts, note: note ? { id: note.id, kind: note.kind, text: note.text, finding_id: note.finding_id } : null });
   });
 
   app.post("/api/steer/check", async (c) => {

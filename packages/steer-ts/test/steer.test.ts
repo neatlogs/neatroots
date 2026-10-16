@@ -6,6 +6,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import { applyAnthropic, applyMessages, NeatrootsHalt, rootsMiddleware, checkMyWork, configure, handleToolCall, replayInput, wrapOpenAI, type Note } from "../src/index.js";
 
 const notes: (Note | null)[] = [];
+const replies: { mode: string; halts?: boolean; note: Note | null }[] = [];
 const claims: any[] = [];
 /** Milliseconds to hold the next claim replies (a busy neatroots). */
 const slow: number[] = [];
@@ -21,7 +22,7 @@ beforeAll(async () => {
       let out: unknown = {};
       if (req.url === "/api/steer/claim") {
         claims.push(b);
-        out = { mode: "advisory", note: notes.shift() ?? null };
+        out = replies.shift() ?? { mode: "advisory", note: notes.shift() ?? null };
       } else if (req.url === "/api/steer/check") out = { probability: 0.2, answer: "no", evidence_span_ids: ["s1"] };
       setTimeout(() => {
         res.writeHead(200, { "content-type": "application/json" });
@@ -36,6 +37,7 @@ afterAll(() => server.close());
 beforeEach(() => {
   configure({ url, traceId: () => "a".repeat(32) });
   notes.length = 0;
+  replies.length = 0;
   claims.length = 0;
   slow.length = 0;
 });
@@ -89,6 +91,20 @@ describe("neatroots-steer (ts)", () => {
     notes.push(note("Your rule says stop.", "halt"));
     const client = wrapOpenAI({ chat: { completions: { create: async (_p: unknown) => "should not run" } } });
     await expect(client.chat.completions.create({ messages: [{ role: "user", content: "q" }] })).rejects.toBeInstanceOf(NeatrootsHalt);
+  });
+
+  it("keeps checking off-mode runs when a halt rule applies", async () => {
+    replies.push({ mode: "off", halts: true, note: null }, { mode: "off", halts: true, note: note("Stop now.", "halt") });
+    expect(await applyMessages([{ role: "user", content: "first" }])).toEqual([{ role: "user", content: "first" }]);
+    await expect(applyMessages([{ role: "user", content: "again" }])).rejects.toBeInstanceOf(NeatrootsHalt);
+    expect(claims).toHaveLength(2);
+  });
+
+  it("still caches off when no halt rule applies", async () => {
+    replies.push({ mode: "off", halts: false, note: null });
+    await applyMessages([{ role: "user", content: "first" }]);
+    await applyMessages([{ role: "user", content: "again" }]);
+    expect(claims).toHaveLength(1);
   });
 
   it("works as AI SDK 7 middleware", async () => {

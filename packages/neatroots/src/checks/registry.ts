@@ -161,6 +161,20 @@ export class CheckRegistry {
     return this.enabled().filter((c) => isRule(c.check));
   }
 
+  /** Whether one of the user's rules may halt this run, even when steering is off. */
+  hasHaltRule(project: string | null | undefined, workflow: string | null | undefined): boolean {
+    const includes = (value: string | string[] | undefined, actual: string | null | undefined) =>
+      value === undefined || (actual !== null && actual !== undefined && (Array.isArray(value) ? value : [value]).includes(actual));
+    return this.rules().some(
+      ({ check, source }) =>
+        isRule(check) &&
+        check.action === "halt" &&
+        (source === "user" || source === "project") &&
+        includes(check.applies_to?.project, project) &&
+        includes(check.applies_to?.workflow, workflow),
+    );
+  }
+
   questions(): LoadedCheck[] {
     return this.enabled().filter((c) => isQuestion(c.check));
   }

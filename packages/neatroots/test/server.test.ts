@@ -201,6 +201,29 @@ describe("server", () => {
     expect(await r.json()).toEqual({ mode: "unknown", known: false, note: null });
   });
 
+  it("tells an off-mode hook when a halt rule applies to its run", async () => {
+    const tb = await served();
+    tb.roots.checks.save(
+      {
+        id: "halt-delete-loop",
+        kind: "rule",
+        rule: { type: "repeat", span: { tool: "delete_records" }, same: ["tool", "input"], at_least: 3 },
+        action: "halt",
+        applies_to: { project: "test-agent" },
+      },
+      "user",
+    );
+    const { t, batches } = sampleRun();
+    tb.roots.ingest(batches);
+    const claim = async (traceId: string) =>
+      (await fetch(`${tb.url}/api/steer/claim`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ trace_id: traceId }),
+      })).json() as Promise<{ mode: string; halts: boolean }>;
+    expect(await claim(t)).toMatchObject({ mode: "off", halts: true });
+  });
+
   it("refuses retention values it can't use instead of answering ok and ignoring them", async () => {
     const tb = await served();
     const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
