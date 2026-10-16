@@ -262,7 +262,7 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   app.post("/api/chat/sessions/:id/messages", async (c) => {
     const id = c.req.param("id");
     const b = await body<{ text: string }>(c);
-    if (!b.text?.trim()) return err(c, 400, "text is required");
+    if (typeof b.text !== "string" || !b.text.trim()) return err(c, 400, "text is required");
     const s = roots.chats.get(id);
     if (!s) return err(c, 404, "no such chat");
     if (s.state === "running") return err(c, 409, "the agent is still answering");

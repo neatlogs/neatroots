@@ -351,6 +351,18 @@ describe("server", () => {
     expect(await count("?after=abc")).toBe(2); // not a number: from the start; was none
   });
 
+  it("rejects a non-string chat message instead of throwing", async () => {
+    const tb = await served();
+    const id = tb.roots.chats.create({ agent: "claude", cwd: os.tmpdir() }).id;
+    const r = await fetch(`${tb.url}/api/chat/sessions/${id}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") },
+      body: JSON.stringify({ text: 5 }),
+    });
+    expect(r.status).toBe(400);
+    expect(await r.json()).toEqual({ error: "text is required" });
+  });
+
   it("returns 404 JSON for unknown /api and /v1 routes, not the SPA", async () => {
     const tb = await served();
     for (const path of ["/api/anything-unknown", "/api/imports/abc", "/v1/unknown"]) {
