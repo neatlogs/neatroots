@@ -67,6 +67,12 @@ export class Roots {
     this.replays = new Replays(this);
     this.chats = new AgentChats(this);
     this.store.reindexSearch((n) => n && log.info(`search now covers whole inputs and outputs (${n} spans re-indexed)`));
+    // Evict old push requests so the Map doesn't grow unbounded in long-running instances.
+    // A coding agent calling push_to_cloud repeatedly would otherwise accumulate entries forever.
+    setInterval(() => {
+      const cutoff = Date.now() - 24 * 3_600_000;
+      for (const [id, p] of this.pushes) if (p.created_ms < cutoff) this.pushes.delete(id);
+    }, 3_600_000).unref();
     if (!opts.noEngine) {
       const engine = new Engine(this, this.llm, this.decisions, this.checks, this.steering);
       this.engine = engine;

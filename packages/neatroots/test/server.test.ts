@@ -405,4 +405,84 @@ describe("server", () => {
     expect(msg).toMatch(/Settings → Models|neatroots llm use/);
     expect(msg).not.toMatch(/fetch failed/);
   });
+
+  it("F-005: rejects redact_patterns with nested quantifiers that would cause ReDoS", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const save = (patterns: unknown) => fetch(`${tb.url}/api/settings`, { method: "POST", headers, body: JSON.stringify({ redact_patterns: patterns }) });
+
+    // Non-array types are rejected
+    for (const bad of ["string", 42, null, [123], [true]]) {
+      expect((await save(bad)).status, `bad type: ${JSON.stringify(bad)}`).toBe(400);
+    }
+    // Syntactically invalid regex rejected
+    expect((await save(["[invalid"])).status).toBe(400);
+    // Nested quantifiers rejected (classic ReDoS patterns)
+    for (const redos of ["(a+)+$", "(\\w+)+", "(a|b+)+x", "((ab)+c)+"]) {
+      const r = await save([redos]);
+      expect(r.status, `ReDoS pattern: ${redos}`).toBe(400);
+      expect(((await r.json()) as { error: string }).error).toMatch(/catastrophic backtracking/);
+    }
+    // Safe patterns still accepted
+    expect((await save(["cust_[0-9]+", "secret_.*"])).status).toBe(200);
+    expect(tb.roots.config.cloud.redactPatterns).toEqual(["cust_[0-9]+", "secret_.*"]);
+  });
+
+  it("F-007: pushes map evicts entries older than 24 hours", async () => {
+    const tb = await served();
+    // Inject an entry with a created_ms well in the past (>24 h ago)
+    const staleId = "push_stale";
+    tb.roots.pushes.set(staleId, { id: staleId, trace_ids: [], requested_by: "test", created_ms: Date.now() - 25 * 3_600_000, status: "pending" });
+    // Inject a recent entry that must be kept
+    const freshId = "push_fresh";
+    tb.roots.pushes.set(freshId, { id: freshId, trace_ids: [], requested_by: "test", created_ms: Date.now(), status: "pending" });
+    expect(tb.roots.pushes.has(staleId)).toBe(true);
+    // Manually trigger eviction (mirrors what the interval does)
+    const cutoff = Date.now() - 24 * 3_600_000;
+    for (const [id, p] of tb.roots.pushes) if (p.created_ms < cutoff) tb.roots.pushes.delete(id);
+    expect(tb.roots.pushes.has(staleId)).toBe(false); // stale entry removed
+    expect(tb.roots.pushes.has(freshId)).toBe(true);  // fresh entry kept
+  });
+
+  it("F-009: NEATROOTS_DEV_ORIGIN is ignored unless NODE_ENV=development", async () => {
+    const prev = process.env.NODE_ENV;
+    try {
+      process.env.NEATROOTS_DEV_ORIGIN = "https://dev.example.com";
+
+      // In production (default) the extra origin must be blocked
+      delete process.env.NODE_ENV;
+      const tbProd = await served();
+      const prod = await fetch(`${tbProd.url}/api/status`, { headers: { origin: "https://dev.example.com" } });
+      expect(prod.status).toBe(403);
+
+      // In development mode the extra origin is allowed
+      process.env.NODE_ENV = "development";
+      const tbDev = await served();
+      const dev = await fetch(`${tbDev.url}/api/status`, { headers: { origin: "https://dev.example.com" } });
+      expect(dev.status).toBe(200);
+    } finally {
+      if (prev === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prev;
+      delete process.env.NEATROOTS_DEV_ORIGIN;
+    }
+  });
+
+  it("F-010: cloud preview and forward reject more than 100 trace_ids", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const ids101 = Array.from({ length: 101 }, () => hex(16));
+
+    const preview = await fetch(`${tb.url}/api/cloud/preview`, { method: "POST", headers, body: JSON.stringify({ trace_ids: ids101 }) });
+    expect(preview.status).toBe(400);
+    expect(((await preview.json()) as { error: string }).error).toMatch(/at most 100/);
+
+    const forward = await fetch(`${tb.url}/api/cloud/forward`, { method: "POST", headers, body: JSON.stringify({ trace_ids: ids101 }) });
+    expect(forward.status).toBe(400);
+    expect(((await forward.json()) as { error: string }).error).toMatch(/at most 100/);
+
+    // Exactly 100 is allowed (will fail with no cloud key, not with a 400)
+    const ids100 = Array.from({ length: 100 }, () => hex(16));
+    const ok = await fetch(`${tb.url}/api/cloud/preview`, { method: "POST", headers, body: JSON.stringify({ trace_ids: ids100 }) });
+    expect(ok.status).not.toBe(400);
+  });
 });

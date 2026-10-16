@@ -315,7 +315,19 @@ export function mountApi(app: Hono, roots: Roots): void {
     }
     roots.decisions.reset();
     if (b.cloud_endpoint) roots.config.cloud.endpoint = b.cloud_endpoint;
-    if (b.redact_patterns) roots.config.cloud.redactPatterns = b.redact_patterns;
+    if (b.redact_patterns) {
+      if (!Array.isArray(b.redact_patterns) || b.redact_patterns.some((p) => typeof p !== "string"))
+        return err(c, 400, "redact_patterns must be an array of regex strings");
+      for (const p of b.redact_patterns) {
+        try { new RegExp(p); } catch { return err(c, 400, `invalid pattern: ${p}`); }
+        // Reject patterns with nested quantifiers that cause catastrophic backtracking (ReDoS).
+        // A quantifier applied to a group that itself contains a quantifier is the classic trigger,
+        // e.g. (a+)+, (\w+)+, (a|b+)+. The inner-quantifier check catches the common cases.
+        if (/(\([^)]*[+*{][^)]*\)|\))[+*{]/.test(p))
+          return err(c, 400, `pattern may cause catastrophic backtracking: ${p}`);
+      }
+      roots.config.cloud.redactPatterns = b.redact_patterns;
+    }
     if (b.check_dir && !roots.config.checkDirs.includes(b.check_dir)) {
       roots.config.checkDirs.push(b.check_dir);
       roots.checks.reload();
@@ -343,12 +355,14 @@ export function mountApi(app: Hono, roots: Roots): void {
   app.post("/api/cloud/preview", async (c) => {
     const b = await body<{ trace_ids?: string[] }>(c);
     if (!b.trace_ids?.length) return err(c, 400, "trace_ids required");
+    if (b.trace_ids.length > 100) return err(c, 400, "at most 100 trace_ids per request");
     return c.json(await roots.relay.preview(b.trace_ids));
   });
 
   app.post("/api/cloud/forward", async (c) => {
     const b = await body<{ trace_ids?: string[] }>(c);
     if (!b.trace_ids?.length) return err(c, 400, "trace_ids required");
+    if (b.trace_ids.length > 100) return err(c, 400, "at most 100 trace_ids per request");
     const row = await roots.relay.forward(b.trace_ids, "user");
     roots.bus.emit("activity", { kind: "forward", message: row.status });
     return c.json(row, row.status === "ok" ? 200 : 502);

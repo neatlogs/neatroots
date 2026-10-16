@@ -76,7 +76,10 @@ function securityMiddleware(roots: Roots) {
     }
     if (origin) {
       const allowed = new Set([`http://localhost:${port}`, `http://127.0.0.1:${port}`, `http://[::1]:${port}`]);
-      if (process.env.NEATROOTS_DEV_ORIGIN) allowed.add(process.env.NEATROOTS_DEV_ORIGIN);
+      // Only honour the dev-origin override in development. In production the variable is
+      // ignored so a stray .env file or CI config cannot widen the allowlist.
+      if (process.env.NODE_ENV === "development" && process.env.NEATROOTS_DEV_ORIGIN)
+        allowed.add(process.env.NEATROOTS_DEV_ORIGIN);
       if (!allowed.has(origin.toLowerCase())) return c.json({ error: "cross-origin requests are not allowed" }, 403);
     }
     await next();

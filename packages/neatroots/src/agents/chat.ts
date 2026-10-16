@@ -162,6 +162,12 @@ export class AgentChats {
   create(opts: { agent: ChatAgent; cwd?: string; trace_id?: string | null; allow_edits?: boolean; allow_commands?: boolean; title?: string }): ChatSession {
     const cwd = opts.cwd?.trim() || (opts.trace_id ? this.roots.config.rerun[this.roots.store.getRun(opts.trace_id)?.project ?? ""]?.cwd : undefined) || os.homedir();
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error(`no such folder: ${cwd}`);
+    // Restrict the working directory to the user's home tree. A cwd outside of it would give the
+    // coding agent's Read/Grep/Glob tools unintended access to system directories like /etc or /.
+    const home = os.homedir();
+    const absCwd = path.resolve(cwd);
+    if (absCwd !== home && !absCwd.startsWith(home + path.sep))
+      throw new Error(`cwd must be inside your home directory (${home})`);
     const now = Date.now();
     const s: ChatSession = {
       id: `chat_${crypto.randomBytes(6).toString("hex")}`,
@@ -280,9 +286,13 @@ export class AgentChats {
     const port = this.roots.config.port;
     const run = s.trace_id ? this.roots.store.getRun(s.trace_id) : undefined;
     if (s.trace_id) this.roots.focus = { trace_id: s.trace_id, span_id: null, at: Date.now() };
+    // run.project comes from the OTLP service.name attribute, which is attacker-controlled.
+    // Strip control characters (including newlines) so they cannot break out of this line
+    // and inject instructions into the system prompt sent to the coding agent.
+    const project = (run?.project ?? "?").replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, 200);
     const lines = [
       `You are working with neatroots, which records and checks this developer's AI agent runs at http://localhost:${port}. Its MCP tools (get_current_run, explain_run, get_run_outline, get_span, search_in_run, compare_runs, replay, rerun, create_check …) are available to you.`,
-      run ? `The run in question is ${run.trace_id} (project ${run.project ?? "?"}, ${run.status}${run.open_finding_count ? `, ${run.open_finding_count} open problems` : ""}). Start from it.` : "",
+      run ? `The run in question is ${run.trace_id} (project ${project}, ${run.status}${run.open_finding_count ? `, ${run.open_finding_count} open problems` : ""}). Start from it.` : "",
       s.allow_edits ? "" : "You may read files but not edit them in this session; propose changes as diffs.",
       "",
     ];
