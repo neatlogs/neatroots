@@ -1,5 +1,6 @@
 import type { Store } from "../store/db.js";
 import { buildView, isSystemRole, preview, type SpanKind } from "../semantics/view.js";
+import { finalReply, lastMessageText } from "../semantics/langchain.js";
 import { hasRemoteParent, type Plain } from "../otlp/types.js";
 import type { Evidence, EvidenceField, SpanSelector } from "../checks/types.js";
 import type { RunRow, SpanRow } from "../types.js";
@@ -164,7 +165,8 @@ export function runGoal(t: TraceSnapshot): { system?: string; user?: string; roo
     }
   }
   const root = runRoot(t.spans);
-  if (root?.input !== undefined) goal.rootInput = textOf(root.input);
+  // A root whose input is the conversation (a LangGraph state) was asked its last user message.
+  if (root?.input !== undefined) goal.rootInput = lastMessageText(root.input, "user") ?? textOf(root.input);
   return goal;
 }
 
@@ -180,10 +182,15 @@ function replyText(output: Plain | undefined): string | undefined {
   return s && s !== "null" && s.trim() !== "" && s !== '""' ? s : undefined;
 }
 
-/** The run's final answer: the root output, or the text of the last LLM reply. Undefined when empty. */
+/**
+ * The run's final answer: the root output, or the text of the last LLM reply. Undefined when empty.
+ * A root whose output is the conversation (a LangGraph state) answered with its last message, and
+ * only if the assistant spoke last: an empty last reply, or a run that stopped on a tool result,
+ * reads as no answer, the same as an empty root output.
+ */
 export function finalOutput(t: TraceSnapshot): string | undefined {
   const root = runRoot(t.spans);
-  const rootOut = textOf(root?.output);
+  const rootOut = finalReply(root?.output) ?? textOf(root?.output);
   if (rootOut && rootOut !== '""' && rootOut !== "null") return rootOut;
   const llms = t.spans.filter((s) => s.kind === "LLM" && s.output !== undefined);
   const last = llms[llms.length - 1];
