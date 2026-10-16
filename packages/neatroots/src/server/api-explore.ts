@@ -238,6 +238,9 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   app.post("/api/chat/sessions", async (c) => {
     const b = await body<{ agent: "claude" | "codex"; cwd?: string; trace_id?: string; allow_edits?: boolean; allow_commands?: boolean; title?: string }>(c);
     if (b.agent !== "claude" && b.agent !== "codex") return err(c, 400, "agent must be claude or codex");
+    for (const field of ["allow_edits", "allow_commands"] as const) {
+      if (b[field] !== undefined && typeof b[field] !== "boolean") return err(c, 400, `${field} must be a boolean`);
+    }
     try {
       return c.json(roots.chats.create(b), 201);
     } catch (e) {
