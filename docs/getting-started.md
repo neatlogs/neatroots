@@ -171,6 +171,13 @@ In your agent's repository, `neatroots init --project refund-agent --write-env` 
 | OpenTelemetry over HTTP | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4100/v1/traces` (protobuf or JSON) |
 | OpenTelemetry over gRPC | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317`, `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc` |
 
+Browser traces are accepted from pages served on this machine (`localhost`, `127.0.0.1`, `[::1]`, any port). To send from a page on another origin, such as a staging site, list it in `config.yaml`, so no other website you have open can write runs that your coding agent then reads:
+
+```yaml
+ingest:
+  allowedOrigins: ["https://staging.example.com"]   # "*" accepts every website
+```
+
 With OpenTelemetry, `OTEL_SERVICE_NAME` becomes the project. neatroots reads Neatlogs, OpenInference, OpenLLMetry (`traceloop.*`), GenAI semantic-convention and Vercel AI SDK attributes, so LLM messages, tool calls, models and tokens show up whichever instrumentation you use.
 
 ### Import runs

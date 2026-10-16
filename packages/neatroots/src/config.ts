@@ -94,6 +94,15 @@ export interface RootsConfig {
     /** User regexes to redact before forwarding, in addition to the built-ins. */
     redactPatterns: string[];
   };
+  /** Who may write runs to the /v1 collector routes. */
+  ingest: {
+    /**
+     * Web pages allowed to send traces from a browser, as origins (https://staging.example.com).
+     * Pages on this machine (localhost, 127.0.0.1, [::1]) and requests with no Origin (SDKs,
+     * exporters, curl) are always allowed. "*" allows every website.
+     */
+    allowedOrigins: string[];
+  };
   /** How to re-run each project's agent (MCP rerun tool, replays): a command, or an HTTP replay endpoint. */
   rerun: Record<string, { command?: string; cwd?: string; url?: string }>;
   /** Extra directories holding checks (YAML), e.g. <repo>/.neatroots/checks. */
@@ -141,6 +150,7 @@ export function defaultConfig(): RootsConfig {
     retention: { days: 14, maxGb: 5 },
     steering: { enabled: true, maxNotesPerRun: 3, gateWaitMs: 300 },
     cloud: { endpoint: "https://ingest.neatlogs.com", appUrl: "https://app.neatlogs.com", redactPatterns: [] },
+    ingest: { allowedOrigins: [] },
     rerun: {},
     checkDirs: [],
     projects: {},
@@ -194,6 +204,9 @@ export function loadConfig(): RootsConfig {
   if (process.env.NEATROOTS_CLASSIFIER_BACKEND) {
     cfg.classifier.backend = process.env.NEATROOTS_CLASSIFIER_BACKEND as RootsConfig["classifier"]["backend"];
   }
+  // A hand-edited allowedOrigins may be a single string or hold non-strings.
+  const origins: unknown = cfg.ingest.allowedOrigins;
+  cfg.ingest.allowedOrigins = (Array.isArray(origins) ? origins : typeof origins === "string" ? [origins] : []).filter((o): o is string => typeof o === "string");
   // Clamp retention to the same range the settings API enforces, so a stray
   // value in config.yaml (e.g. days: 0) can't delete every unpinned run.
   if (!Number.isFinite(cfg.retention.days) || cfg.retention.days < 1) cfg.retention.days = 14;
