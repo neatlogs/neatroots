@@ -396,6 +396,20 @@ describe("server", () => {
     expect(body).not.toContain("secret-content");
   });
 
+  it("a malformed percent-escape in the path serves the app shell instead of a 500", async () => {
+    const uiDir = findUiDir();
+    if (!uiDir) return; // UI not built in this environment; skip rather than false-pass
+    const tb = await served();
+    for (const p of ["/%zz", "/%e0%a4", "/assets/%", "/%2"]) {
+      const res = await fetch(`${tb.url}${p}`);
+      expect(res.status, p).toBe(200);
+      expect(res.headers.get("content-type"), p).toMatch(/text\/html/);
+    }
+    const ok = await fetch(`${tb.url}/%25zz`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-type")).toMatch(/text\/html/);
+  });
+
   it("gives a helpful error (not a raw fetch failure) when no LLM is reachable", async () => {
     const tb = await served(false); // engine on, but no LLM configured (dead base url)
     const r = await fetch(`${tb.url}/api/ask`, { method: "POST", headers: { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") }, body: JSON.stringify({ question: "what happened?" }) });

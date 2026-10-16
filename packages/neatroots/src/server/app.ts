@@ -112,7 +112,12 @@ export function createApp(roots: Roots): Hono {
         `<!doctype html><title>neatroots</title><body style="font-family:system-ui;padding:2rem"><h1>neatroots is running</h1><p>The app UI is not built. Run <code>pnpm build</code> in the neatroots repo.</p><p>Collector: <code>POST /v1/traces</code></p></body>`,
       );
     }
-    const rel = decodeURIComponent(c.req.path).replace(/^\/+/, "");
+    let rel = "";
+    try {
+      rel = decodeURIComponent(c.req.path).replace(/^\/+/, "");
+    } catch {
+      // A malformed percent-escape is an unknown path, not a server error: the fallback below serves the app shell.
+    }
     let file = path.join(uiDir, rel);
     // Append path.sep before the prefix check so a sibling directory whose name starts
     // with the same string as uiDir (e.g. ui-x/) cannot be reached via path traversal.
