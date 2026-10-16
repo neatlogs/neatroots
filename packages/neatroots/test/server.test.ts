@@ -304,6 +304,26 @@ describe("server", () => {
     expect(tb.roots.config.retention).toEqual({ days: 30, maxGb: 2.5 });
   });
 
+  it("refuses non-boolean settings before applying any of them", async () => {
+    const tb = await served();
+    tb.roots.config.steering.enabled = false;
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const save = (b: unknown) => fetch(`${tb.url}/api/settings`, { method: "POST", headers, body: JSON.stringify(b) });
+    const malformed = { project: "shop", forward: "false", steering_enabled: "false", jev_cloud_enabled: "false", laya_enabled: "false" };
+
+    expect((await save(malformed)).status).toBe(400);
+    expect(tb.roots.config.projects.shop).toBeUndefined();
+    expect(tb.roots.config.steering.enabled).toBe(false);
+    expect(tb.roots.config.classifier.jevCloud.enabled).toBe(false);
+    expect(tb.roots.config.classifier.laya.enabled).toBe(false);
+
+    expect((await save({ project: "shop", forward: true, steering_enabled: true, jev_cloud_enabled: true, laya_enabled: true })).status).toBe(200);
+    expect(tb.roots.config.projects.shop?.forward).toBe(true);
+    expect(tb.roots.config.steering.enabled).toBe(true);
+    expect(tb.roots.config.classifier.jevCloud.enabled).toBe(true);
+    expect(tb.roots.config.classifier.laya.enabled).toBe(true);
+  });
+
   it("clamps the findings list limit instead of failing on a bad value", async () => {
     const tb = await served();
     const { t, root, batches } = sampleRun();

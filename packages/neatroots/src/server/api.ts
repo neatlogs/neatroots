@@ -285,6 +285,9 @@ export function mountApi(app: Hono, roots: Roots): void {
     const inRange = (v: unknown, min: number, max: number, minOpen = false) => typeof v === "number" && Number.isFinite(v) && (minOpen ? v > min : v >= min) && v <= max;
     if (b.retention_days !== undefined && !inRange(b.retention_days, 1, 3650)) return err(c, 400, "Keep runs for must be between 1 and 3650 days");
     if (b.retention_max_gb !== undefined && !inRange(b.retention_max_gb, 0, 10_000, true)) return err(c, 400, "Size cap must be more than 0 GB and at most 10000 GB");
+    for (const field of ["forward", "steering_enabled", "jev_cloud_enabled", "laya_enabled"] as const) {
+      if (b[field] !== undefined && typeof b[field] !== "boolean") return err(c, 400, `${field} must be a boolean`);
+    }
     if (b.project && b.steering !== undefined && !STEERING_MODES.includes(b.steering)) return err(c, 400, `steering must be one of ${STEERING_MODES.join(", ")}`);
     if (b.classifier_backend && !["auto", "laya", "jev", "jev-cloud", "llm"].includes(b.classifier_backend)) return err(c, 400, "classifier_backend must be auto, laya, jev, jev-cloud or llm");
     if (b.cloud_endpoint && !allowedEndpoint(b.cloud_endpoint)) return err(c, 400, "cloud endpoint must be an https://*.neatlogs.com URL (or localhost for testing)");
@@ -298,18 +301,18 @@ export function mountApi(app: Hono, roots: Roots): void {
     if (b.project) {
       const cur = roots.config.projects[b.project] ?? {};
       if (b.steering !== undefined) roots.steering.setMode(b.project, b.steering);
-      if (b.forward !== undefined) roots.config.projects[b.project] = { ...cur, ...roots.config.projects[b.project], forward: !!b.forward };
+      if (b.forward !== undefined) roots.config.projects[b.project] = { ...cur, ...roots.config.projects[b.project], forward: b.forward };
     }
     if (b.retention_days !== undefined) roots.config.retention.days = Math.round(b.retention_days);
     if (b.retention_max_gb !== undefined) roots.config.retention.maxGb = b.retention_max_gb;
-    if (b.steering_enabled !== undefined) roots.config.steering.enabled = !!b.steering_enabled;
+    if (b.steering_enabled !== undefined) roots.config.steering.enabled = b.steering_enabled;
     if (b.llm_model) roots.config.llm.model = b.llm_model;
     if (b.llm_base_url) roots.config.llm.baseUrl = b.llm_base_url;
     if (b.classifier_backend) roots.config.classifier.backend = b.classifier_backend;
     if (b.classifier_url) roots.config.classifier.baseUrl = b.classifier_url;
-    if (b.jev_cloud_enabled !== undefined) roots.config.classifier.jevCloud.enabled = !!b.jev_cloud_enabled;
+    if (b.jev_cloud_enabled !== undefined) roots.config.classifier.jevCloud.enabled = b.jev_cloud_enabled;
     if (b.laya_enabled !== undefined) {
-      roots.config.classifier.laya.enabled = !!b.laya_enabled;
+      roots.config.classifier.laya.enabled = b.laya_enabled;
       if (b.laya_enabled) roots.startModels();
       else roots.laya.stop();
     }
