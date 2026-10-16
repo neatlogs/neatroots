@@ -125,7 +125,7 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   app.post("/api/imports/:id/cancel", (c) => (roots.imports.cancel(c.req.param("id")) ? c.json({ ok: true }) : err(c, 404, "no running import with that id")));
   app.post("/api/imports/file", async (c) => {
     const b = await body<{ name?: string; content?: string; project?: string }>(c);
-    if (!b.content) return err(c, 400, "content is required");
+    if (typeof b.content !== "string" || !b.content) return err(c, 400, "content is required");
     try {
       const batches = parseTraceFile(b.content, b.name ?? "upload.json", b.project || undefined);
       const updates = roots.ingest(batches);

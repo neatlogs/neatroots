@@ -304,6 +304,17 @@ describe("server", () => {
     expect(tb.roots.config.retention).toEqual({ days: 30, maxGb: 2.5 });
   });
 
+  it("rejects non-string trace file content as bad input", async () => {
+    const tb = await served();
+    const r = await fetch(`${tb.url}/api/imports/file`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") },
+      body: JSON.stringify({ name: "trace.json", content: 5 }),
+    });
+    expect(r.status).toBe(400);
+    expect(await r.json()).toEqual({ error: "content is required" });
+  });
+
   it("clamps the findings list limit instead of failing on a bad value", async () => {
     const tb = await served();
     const { t, root, batches } = sampleRun();
