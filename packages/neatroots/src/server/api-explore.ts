@@ -139,6 +139,8 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   // Importing reads Neatlogs Cloud with a service-account token (Keychain) and a chosen project.
   app.post("/api/cloud/import-auth", async (c) => {
     const b = await body<{ token?: string; project_id?: string | null }>(c);
+    if (b.token !== undefined && typeof b.token !== "string") return err(c, 400, "token must be a string");
+    if (b.project_id !== undefined && b.project_id !== null && typeof b.project_id !== "string") return err(c, 400, "project_id must be a string or null");
     const token = b.token?.trim();
     if (token) await setCloudToken(token);
     if (b.project_id !== undefined) {
