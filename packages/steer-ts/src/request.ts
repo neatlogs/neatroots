@@ -7,7 +7,10 @@ interface ResponseRequest {
 export class SteeredRequest extends Promise<unknown> {
   private parsed?: Promise<unknown>;
 
-  constructor(private readonly request: Promise<{ value: unknown }>) {
+  constructor(
+    private readonly request: Promise<{ value: unknown }>,
+    private readonly helpers?: ResponseRequest,
+  ) {
     super((resolve) => resolve(undefined));
   }
 
@@ -30,11 +33,21 @@ export class SteeredRequest extends Promise<unknown> {
     return this.parse().finally(settled);
   }
 
+  /** openai-node's create() calls this on its own promise; parse() helpers call it on the one create() returns. */
+  _thenUnwrap<T>(transform: (value: unknown) => T | PromiseLike<T>): SteeredRequest {
+    return new SteeredRequest(this.parse().then((value) => ({ value: transform(value) })), this);
+  }
+
   asResponse(): Promise<Response> {
+    if (this.helpers) return this.helpers.asResponse();
     return this.request.then(({ value }) => (value as ResponseRequest).asResponse());
   }
 
   withResponse(): Promise<unknown> {
-    return this.request.then(({ value }) => (value as ResponseRequest).withResponse());
+    if (!this.helpers) return this.request.then(({ value }) => (value as ResponseRequest).withResponse());
+    return this.helpers.withResponse().then(async (res) => {
+      const data = await this.parse();
+      return res && typeof res === "object" && "data" in res ? { ...(res as Record<string, unknown>), data } : res;
+    });
   }
 }

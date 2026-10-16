@@ -31,4 +31,26 @@ describe("OpenAI request helpers", () => {
     expect(await request).toBe("ok");
     expect(create).toHaveBeenCalledExactlyOnceWith(params, options);
   });
+
+  it("keeps the _thenUnwrap step of openai-node's parse() helpers, and their response helpers", async () => {
+    const response = new Response("ok");
+    const sdkRequest = Object.assign(Promise.resolve({ text: "raw" }), {
+      asResponse: vi.fn(async () => response),
+      withResponse: vi.fn(async () => ({ data: { text: "raw" }, response })),
+    });
+    const owner = { create: vi.fn((_params: unknown) => sdkRequest) };
+    wrapOpenAI({ chat: { completions: owner } });
+    const request = owner.create({ model: "test" }) as unknown as {
+      _thenUnwrap<T>(transform: (value: unknown) => T): unknown;
+      asResponse(): Promise<Response>;
+      withResponse(): Promise<{ data: unknown }>;
+    };
+    const parsed = request._thenUnwrap((value) => ({ ...(value as object), parsed: true })) as Promise<unknown> & {
+      asResponse(): Promise<Response>;
+      withResponse(): Promise<{ data: unknown }>;
+    };
+    expect(await parsed).toEqual({ text: "raw", parsed: true });
+    expect(await parsed.asResponse()).toBe(response);
+    expect(await parsed.withResponse()).toEqual({ data: { text: "raw", parsed: true }, response });
+  });
 });
