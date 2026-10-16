@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -54,6 +55,33 @@ describe("asking before downloading Laya", () => {
       expect(fs.existsSync(path.join(home, "laya", "install.log"))).toBe(false);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans a failed Python environment and tells Ubuntu how to retry", async () => {
+    const home = tmpHome();
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-laya-bin-"));
+    const python = path.join(bin, "python3.12");
+    fs.writeFileSync(
+      python,
+      `#!${process.execPath}\nconst fs = require("node:fs");\nif (process.argv[2] === "-c") process.exit(0);\nfs.mkdirSync(process.argv.at(-1), { recursive: true });\nprocess.exit(1);\n`,
+      { mode: 0o755 },
+    );
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}/usr/bin${path.delimiter}/bin`;
+    try {
+      const cfg = defaultConfig();
+      cfg.classifier.laya.port = await freePort();
+      const laya = new LayaManager(home, cfg.classifier);
+      await laya.ensure({ install: true });
+      expect(laya.state).toMatchObject({ state: "failed" });
+      expect(laya.state.message).toContain("python3.12-venv");
+      expect(laya.state.message).toContain("install uv");
+      expect(fs.existsSync(path.join(home, "laya", ".venv"))).toBe(false);
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(bin, { recursive: true, force: true });
     }
   });
 

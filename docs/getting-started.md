@@ -379,7 +379,7 @@ Uninstalling keeps `~/.neatroots`, which holds your runs, settings and Laya. Del
 | Runs appear only at the end | Set `flush_interval=0.5` in `neatlogs.init` |
 | An example fails with a connection error | Start the mock LLM (`neatroots mock-llm`) in another terminal |
 | "No LLM" in the sidebar | Start Ollama (`ollama serve`) and pull a model, or turn on a hosted LLM. Rules still run without one |
-| Laya failed to install | Run `neatroots laya install` to see the error (it needs `uv` or Python 3.10+). neatroots works without Laya: the LLM answers instead |
+| Laya failed to install | Run `neatroots laya install` to see the error. It needs `uv`, or Python 3.10+ with its matching `python3.x-venv` package on Ubuntu/Debian. Fix the prerequisite and retry; neatroots removes an incomplete environment automatically. neatroots works without Laya: the LLM answers instead |
 | Hosted LLM errors | `neatroots llm` shows the error. "Rejected the key": run `neatroots llm login <provider>` again. "Model not found": check `neatroots llm models <provider>` |
 | Replay says it doesn't know how to start the agent | Register a command or endpoint: `neatroots rerun add <project> "<command>"`, or Settings → Projects |
 | A file won't import | It must be OTLP JSON, a Neatlogs trace export or Neatlogs HTTP traces (one per line in .jsonl); the error says what didn't parse |

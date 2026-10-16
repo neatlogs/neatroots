@@ -138,15 +138,20 @@ export class LayaManager {
   }
 
   private async install(): Promise<void> {
+    const venv = path.join(this.dir, ".venv");
+    let venvHint = "";
     try {
+      // A failed venv or package install is not usable, and both uv and Python refuse to
+      // recreate it cleanly on the next attempt.
+      if (!this.installed()) fs.rmSync(venv, { recursive: true, force: true });
       const uv = which("uv");
-      const venv = path.join(this.dir, ".venv");
       if (uv) {
         await this.run(uv, ["venv", "--quiet", "--python", "3.12", venv], "Creating Laya's Python environment", 0.05);
         await this.run(uv, ["pip", "install", "--quiet", "--python", this.venvPython(), `laya[serve]==${LAYA_VERSION}`], "Installing Laya and PyTorch (about 0.5 GB)", 0.15);
       } else {
         const py = ["python3.12", "python3.11", "python3.10", "python3"].map(which).find((p) => p && pythonOk(p));
         if (!py) throw new Error("Laya needs Python 3.10 or newer, or uv (https://docs.astral.sh/uv/). Install one and restart neatroots.");
+        venvHint = ` Install ${path.basename(py)}-venv (Ubuntu/Debian), or install uv from https://docs.astral.sh/uv/.`;
         await this.run(py, ["-m", "venv", venv], "Creating Laya's Python environment", 0.05);
         await this.run(this.venvPython(), ["-m", "pip", "install", "--quiet", "--upgrade", "pip"], "Updating pip", 0.1);
         await this.run(this.venvPython(), ["-m", "pip", "install", "--quiet", `laya[serve]==${LAYA_VERSION}`], "Installing Laya and PyTorch (about 0.5 GB)", 0.15);
@@ -161,8 +166,10 @@ export class LayaManager {
       fs.writeFileSync(path.join(this.dir, "installed-version"), LAYA_VERSION);
       this.set({ state: "stopped", message: "Installed", progress: 1 });
     } catch (err) {
-      this.set({ state: "failed", message: (err as Error).message, progress: null });
-      log.warn(`laya install failed: ${(err as Error).message}`);
+      if (!this.installed()) fs.rmSync(venv, { recursive: true, force: true });
+      const message = `${(err as Error).message}${(err as Error).message.startsWith("Creating Laya's Python environment failed") ? venvHint : ""}`;
+      this.set({ state: "failed", message, progress: null });
+      log.warn(`laya install failed: ${message}`);
     }
   }
 
