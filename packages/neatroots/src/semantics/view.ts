@@ -1,4 +1,5 @@
 import { kvToPlain, type KeyValue, type OtlpSpan, type Plain } from "../otlp/types.js";
+import { chainValue, toolInput, toolOutput } from "./langchain.js";
 
 /**
  * Span kinds from the public Neatlogs telemetry schema. The SDKs send them
@@ -308,16 +309,18 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
     }
     case "TOOL":
     case "MCP_TOOL":
-      view.input = maybeJson(first(attrs, ["neatlogs.tool.input", "neatlogs.tool.arguments", ...genericIn, "gen_ai.tool.call.arguments", "ai.toolCall.args", "ai.toolCall.input"]));
-      view.output = maybeJson(first(attrs, ["neatlogs.tool.output", ...genericOut, "gen_ai.tool.call.result", "ai.toolCall.result", "ai.toolCall.output"]));
+      // LangChain tool spans carry the instrumentation's envelope and a serialized ToolMessage;
+      // the view keeps the arguments and the result (see langchain.ts).
+      view.input = toolInput(maybeJson(first(attrs, ["neatlogs.tool.input", "neatlogs.tool.arguments", ...genericIn, "gen_ai.tool.call.arguments", "ai.toolCall.args", "ai.toolCall.input"])));
+      view.output = toolOutput(maybeJson(first(attrs, ["neatlogs.tool.output", ...genericOut, "gen_ai.tool.call.result", "ai.toolCall.result", "ai.toolCall.output"])));
       break;
     case "WORKFLOW":
-      view.input = maybeJson(first(attrs, ["neatlogs.workflow.input", ...genericIn]));
-      view.output = maybeJson(first(attrs, ["neatlogs.workflow.output", ...genericOut]));
+      view.input = chainValue(maybeJson(first(attrs, ["neatlogs.workflow.input", ...genericIn])));
+      view.output = chainValue(maybeJson(first(attrs, ["neatlogs.workflow.output", ...genericOut])));
       break;
     case "AGENT":
-      view.input = maybeJson(first(attrs, ["neatlogs.agent.input", ...genericIn, "ai.prompt"]));
-      view.output = maybeJson(first(attrs, ["neatlogs.agent.output", ...genericOut, "ai.response.text"]));
+      view.input = chainValue(maybeJson(first(attrs, ["neatlogs.agent.input", ...genericIn, "ai.prompt"])));
+      view.output = chainValue(maybeJson(first(attrs, ["neatlogs.agent.output", ...genericOut, "ai.response.text"])));
       break;
     case "RETRIEVER":
       view.input = maybeJson(first(attrs, ["neatlogs.retriever.query", ...genericIn]));
@@ -328,9 +331,10 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
       view.output = maybeJson(first(attrs, genericOut));
       break;
     default: {
+      // A LangGraph graph is a CHAIN span whose output is the graph state, {"messages": [...]}.
       const k = kind.toLowerCase();
-      view.input = maybeJson(first(attrs, [`neatlogs.${k}.input`, ...genericIn]));
-      view.output = maybeJson(first(attrs, [`neatlogs.${k}.output`, ...genericOut]));
+      view.input = chainValue(maybeJson(first(attrs, [`neatlogs.${k}.input`, ...genericIn])));
+      view.output = chainValue(maybeJson(first(attrs, [`neatlogs.${k}.output`, ...genericOut])));
     }
   }
 
