@@ -352,6 +352,19 @@ describe("server", () => {
     expect(tb.roots.config.classifier.laya.enabled).toBe(true);
   });
 
+  it("requires a boolean when pinning a run", async () => {
+    const tb = await served();
+    const { t, batches } = sampleRun();
+    tb.roots.ingest(batches);
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const pin = (pinned: unknown) => fetch(`${tb.url}/api/runs/${t}/pin`, { method: "POST", headers, body: JSON.stringify({ pinned }) });
+
+    expect((await pin("false")).status).toBe(400);
+    expect(tb.roots.store.getRun(t)?.pinned).toBe(0);
+    expect((await pin(true)).status).toBe(200);
+    expect(tb.roots.store.getRun(t)?.pinned).toBe(1);
+  });
+
   it("clamps the findings list limit instead of failing on a bad value", async () => {
     const tb = await served();
     const { t, root, batches } = sampleRun();
