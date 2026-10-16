@@ -27,7 +27,9 @@ export function normalizeOrigin(origin: string): string | undefined {
 export function isLoopbackOrigin(origin: string): boolean {
   const o = normalizeOrigin(origin);
   if (!o || o === "null") return false;
-  return LOOPBACK_HOSTS.has(new URL(o).hostname);
+  const host = new URL(o).hostname;
+  // *.localhost is reserved for loopback (RFC 6761) and browsers resolve it to this machine.
+  return LOOPBACK_HOSTS.has(host) || host.endsWith(".localhost");
 }
 
 /** Whether a /v1 request with this Origin header may write runs. */

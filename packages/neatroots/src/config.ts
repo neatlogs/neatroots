@@ -204,7 +204,8 @@ export function loadConfig(): RootsConfig {
   if (process.env.NEATROOTS_CLASSIFIER_BACKEND) {
     cfg.classifier.backend = process.env.NEATROOTS_CLASSIFIER_BACKEND as RootsConfig["classifier"]["backend"];
   }
-  // A hand-edited allowedOrigins may be a single string or hold non-strings.
+  // A hand edit may put an origin straight under ingest, or make allowedOrigins a single string.
+  if (!cfg.ingest || typeof cfg.ingest !== "object" || Array.isArray(cfg.ingest)) cfg.ingest = { allowedOrigins: [] };
   const origins: unknown = cfg.ingest.allowedOrigins;
   cfg.ingest.allowedOrigins = (Array.isArray(origins) ? origins : typeof origins === "string" ? [origins] : []).filter((o): o is string => typeof o === "string");
   // Clamp retention to the same range the settings API enforces, so a stray
