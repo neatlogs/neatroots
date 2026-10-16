@@ -67,7 +67,11 @@ export const EXPLORE_TOOLS = [
       const byId = new Map(t.spans.map((s) => [s.id, s]));
       const span = byId.get(id)!;
       const ancestors: SpanInfo[] = [];
-      for (let p = span.parentId ? byId.get(span.parentId) : undefined; p; p = p.parentId ? byId.get(p.parentId) : undefined) ancestors.unshift(p);
+      const seen = new Set<string>([id]);
+      for (let p = span.parentId ? byId.get(span.parentId) : undefined; p && !seen.has(p.id); p = p.parentId ? byId.get(p.parentId) : undefined) {
+        seen.add(p.id);
+        ancestors.unshift(p);
+      }
       const siblings = t.spans.filter((s) => s.parentId === span.parentId).sort((x, y) => x.startMs - y.startMs);
       const children = t.spans.filter((s) => s.parentId === id).sort((x, y) => x.startMs - y.startMs);
       const withIo = (s: SpanInfo) => ({ ...brief(s), input: clip(preview(s.input, 300), 300), output: clip(preview(s.output, 300), 300) });
