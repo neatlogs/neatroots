@@ -196,8 +196,10 @@ describe("applyExternalLlm", () => {
     expect(applyExternalLlm(e, { provider: "nope" })).toMatch(/provider must be/);
     expect(applyExternalLlm(e, { redact: "some" })).toMatch(/redact/);
     const c = defaultConfig().llm.external;
+    const before = { ...c };
     expect(applyExternalLlm(c, { provider: "custom", model: "m", enabled: true })).toMatch(/base URL/);
-    expect(applyExternalLlm(c, { base_url: "http://localhost:8080/v1", enabled: true })).toBeUndefined();
+    expect(c).toEqual(before);
+    expect(applyExternalLlm(c, { provider: "custom", model: "m", base_url: "http://localhost:8080/v1", enabled: true })).toBeUndefined();
   });
 });
 
