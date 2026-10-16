@@ -304,6 +304,21 @@ describe("server", () => {
     expect(tb.roots.config.retention).toEqual({ days: 30, maxGb: 2.5 });
   });
 
+  it("rejects non-string and whitespace-only API keys", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    for (const [path, extra] of [
+      ["/api/cloud/key", {}],
+      ["/api/llm/key", { provider: "anthropic" }],
+      ["/api/classifier/jev-key", {}],
+    ] as const) {
+      for (const key of [12345678, "        "]) {
+        const r = await fetch(`${tb.url}${path}`, { method: "POST", headers, body: JSON.stringify({ ...extra, key }) });
+        expect(r.status, `${path}: ${JSON.stringify(key)}`).toBe(400);
+      }
+    }
+  });
+
   it("clamps the findings list limit instead of failing on a bad value", async () => {
     const tb = await served();
     const { t, root, batches } = sampleRun();
