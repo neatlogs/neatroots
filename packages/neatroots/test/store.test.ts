@@ -80,6 +80,45 @@ describe("store", () => {
     expect(st.getRun(t)).toMatchObject({ span_count: 1, llm_calls: 0, tool_calls: 1, error_count: 1, total_tokens: 0 });
   });
 
+  it("reconciles run time bounds when an edge span is updated", () => {
+    const st = store();
+    const t = hex(16);
+    const parent = hex(8);
+    const edge = toolSpan(t, parent, "first", "{}");
+    edge.startTimeUnixNano = "100000000";
+    edge.endTimeUnixNano = "1000000000";
+    const middle = toolSpan(t, parent, "middle", "{}");
+    middle.startTimeUnixNano = "200000000";
+    middle.endTimeUnixNano = "900000000";
+    st.ingest([batch([edge, middle])]);
+    expect(st.getRun(t)).toMatchObject({ started_ms: 100, last_span_ms: 1000 });
+
+    const corrected = { ...edge, startTimeUnixNano: "300000000", endTimeUnixNano: "800000000" };
+    st.ingest([batch([corrected])]);
+
+    expect(st.getRun(t)).toMatchObject({ started_ms: 200, last_span_ms: 900 });
+
+    // Identical and non-edge replacements cannot disturb the bounds.
+    st.ingest([batch([corrected])]);
+    const inner = { ...corrected, startTimeUnixNano: "400000000", endTimeUnixNano: "700000000" };
+    st.ingest([batch([inner])]);
+    expect(st.getRun(t)).toMatchObject({ started_ms: 200, last_span_ms: 900 });
+
+    // Moving the same span outward still uses the normal incremental path.
+    const outer = { ...edge, startTimeUnixNano: "50000000", endTimeUnixNano: "1100000000" };
+    st.ingest([batch([outer])]);
+    expect(st.getRun(t)).toMatchObject({ started_ms: 50, last_span_ms: 1100 });
+
+    // Multiple corrections in one batch leave bounds equal to the final stored set.
+    st.ingest([
+      batch([
+        { ...outer, startTimeUnixNano: "400000000", endTimeUnixNano: "700000000" },
+        { ...middle, startTimeUnixNano: "300000000", endTimeUnixNano: "800000000" },
+      ]),
+    ]);
+    expect(st.getRun(t)).toMatchObject({ started_ms: 300, last_span_ms: 800 });
+  });
+
   it("offloads large payloads to blobs and restores them losslessly", () => {
     const st = store();
     const t = hex(16);

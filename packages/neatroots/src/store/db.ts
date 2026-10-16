@@ -287,7 +287,10 @@ export interface RunFilter {
   includeDoctor?: boolean;
 }
 
-type AggregateSpan = Pick<SpanRow, "is_marker" | "span_kind" | "status_code" | "prompt_tokens" | "completion_tokens" | "total_tokens">;
+type AggregateSpan = Pick<
+  SpanRow,
+  "is_marker" | "span_kind" | "status_code" | "prompt_tokens" | "completion_tokens" | "total_tokens" | "start_ms" | "end_ms"
+>;
 
 interface RunContribution {
   spans: number;
@@ -468,7 +471,7 @@ export class Store {
           const view = buildView(span, b.resource.attributes);
           const previous = this.db
             .prepare(
-              `SELECT is_marker, span_kind, status_code, prompt_tokens, completion_tokens, total_tokens
+              `SELECT is_marker, span_kind, status_code, prompt_tokens, completion_tokens, total_tokens, start_ms, end_ms
                FROM spans WHERE trace_id = ? AND span_id = ?`,
             )
             .get(span.traceId, span.spanId) as AggregateSpan | undefined;
@@ -589,11 +592,23 @@ export class Store {
       flags.created = true;
       run = this.getRun(span.traceId)!;
     }
-    const sets: string[] = ["updated_ms = @now", "last_span_ms = MAX(COALESCE(last_span_ms, 0), @end)"];
+    const sets: string[] = ["updated_ms = @now"];
     const p: Record<string, unknown> = { now, end: row.end_ms, trace: span.traceId };
-    if (!run.started_ms || row.start_ms < run.started_ms) {
-      sets.push("started_ms = @start");
-      p.start = row.start_ms;
+    const replacedStartBoundary = previous && previous.start_ms === run.started_ms && row.start_ms > previous.start_ms;
+    const replacedEndBoundary = previous && previous.end_ms === run.last_span_ms && row.end_ms < previous.end_ms;
+    if (replacedStartBoundary || replacedEndBoundary) {
+      const bounds = this.db
+        .prepare("SELECT MIN(start_ms) AS start, MAX(end_ms) AS end FROM spans WHERE trace_id = ?")
+        .get(span.traceId) as { start: number; end: number };
+      sets.push("started_ms = @start", "last_span_ms = @end");
+      p.start = bounds.start;
+      p.end = bounds.end;
+    } else {
+      sets.push("last_span_ms = MAX(COALESCE(last_span_ms, 0), @end)");
+      if (!run.started_ms || row.start_ms < run.started_ms) {
+        sets.push("started_ms = @start");
+        p.start = row.start_ms;
+      }
     }
     if (view.isMarker) {
       if (!run.complete) {
