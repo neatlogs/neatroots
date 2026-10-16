@@ -27,6 +27,19 @@ describe("decision model", () => {
     expect(sc.score).toBeCloseTo(1.5);
   });
 
+  it("reads a yes/no answer given as probabilities, distribution or scores", () => {
+    const q = { name: "q", type: "yes_no", ask: "?" } as const;
+    expect(parseJevAnswer(q, { probabilities: { yes: 0.9, no: 0.1 } }).probability).toBeCloseTo(0.9);
+    expect(parseJevAnswer(q, { distribution: { yes: 0.8, no: 0.2 } }).probability).toBeCloseTo(0.8);
+    expect(parseJevAnswer(q, { scores: [0.7, 0.3] }).probability).toBeCloseTo(0.7);
+    // A distribution wins over the scalar fields, like the choice and score branches prefer theirs.
+    expect(parseJevAnswer(q, { noul: 0.4, probabilities: { yes: 0.9, no: 0.1 } }).probability).toBeCloseTo(0.9);
+    // A partial map normalizes over what is present, like the choice branch does.
+    expect(parseJevAnswer(q, { probabilities: { yes: 0.6 } }).probability).toBeCloseTo(1);
+    // Nothing usable at all still reads as 0.
+    expect(parseJevAnswer(q, {}).probability).toBe(0);
+  });
+
   it("talks to a Jev-compatible server over POST /v1/systemone", async () => {
     let seen: any;
     const server = http.createServer((req, res) => {
