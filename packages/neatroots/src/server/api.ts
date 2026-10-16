@@ -371,7 +371,7 @@ export function mountApi(app: Hono, roots: Roots): void {
 
   app.post("/api/ask", async (c) => {
     const b = await body<{ question?: string; trace_id?: string }>(c);
-    if (!b.question) return err(c, 400, "question required");
+    if (typeof b.question !== "string" || !b.question.trim()) return err(c, 400, "question required");
     try {
       return c.json(await askRuns(roots, b.question, { traceId: b.trace_id }));
     } catch (e) {

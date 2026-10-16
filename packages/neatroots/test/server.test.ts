@@ -313,6 +313,16 @@ describe("server", () => {
     expect((await fetch(`${tb.url}/api/focus`, { method: "POST", headers, body: "{}" })).status).toBe(200);
   });
 
+  it("rejects malformed ask questions before calling the LLM", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json" };
+    for (const question of [123, "   "]) {
+      const r = await fetch(`${tb.url}/api/ask`, { method: "POST", headers, body: JSON.stringify({ question }) });
+      expect(r.status, JSON.stringify(question)).toBe(400);
+      expect(await r.json()).toEqual({ error: "question required" });
+    }
+  });
+
   it("refuses retention values it can't use instead of answering ok and ignoring them", async () => {
     const tb = await served();
     const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
