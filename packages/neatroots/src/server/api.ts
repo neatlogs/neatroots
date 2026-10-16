@@ -252,7 +252,10 @@ export function mountApi(app: Hono, roots: Roots): void {
 
   app.post("/api/annotations", async (c) => {
     const b = await body<{ trace_id?: string; span_id?: string; label?: string; text?: string; author?: string }>(c);
-    if (!b.trace_id || !b.label || !["issue", "good", "note"].includes(b.label)) return err(c, 400, "trace_id and label (issue, good or note) are required");
+    if (typeof b.trace_id !== "string" || typeof b.label !== "string" || !b.trace_id || !["issue", "good", "note"].includes(b.label)) return err(c, 400, "trace_id and label (issue, good or note) are required");
+    for (const field of ["span_id", "text", "author"] as const) {
+      if (b[field] !== undefined && b[field] !== null && typeof b[field] !== "string") return err(c, 400, `${field} must be a string or null`);
+    }
     const a = roots.store.insertAnnotation({ trace_id: b.trace_id, span_id: b.span_id ?? null, label: b.label as "issue", text: b.text ?? null, author: b.author ?? "user" });
     roots.bus.emit("activity", { trace_id: b.trace_id, kind: "annotation", message: a.label });
     return c.json(a);
