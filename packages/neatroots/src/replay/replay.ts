@@ -250,17 +250,29 @@ export class Replays {
         tail = (await res.text()).slice(-3000);
         if (!res.ok) throw new Error(`replay endpoint answered ${res.status}: ${tail.slice(0, 300)}`);
       } else {
+        // Sanitize values that come from external sources (traceId from OTLP ingest,
+        // input from the MCP caller) before embedding them in environment variables.
+        // Strip newlines, commas (OTEL_RESOURCE_ATTRIBUTES separator), and null bytes
+        // which could be used to inject additional key=value pairs or break the env.
+        const sanitizeEnvVal = (s: string): string => s.replace(/[\0\n\r,]/g, "_");
+
         const env: NodeJS.ProcessEnv = {
           ...process.env,
           NEATLOGS_ENDPOINT: `http://localhost:${this.roots.config.port}`,
           NEATLOGS_API_KEY: process.env.NEATLOGS_API_KEY ?? "neatroots-local",
           NEATROOTS_REPLAY_ID: r.id,
-          NEATROOTS_REPLAY_OF: r.trace_id,
-          NEATROOTS_REPLAY_INPUT: input,
-          OTEL_RESOURCE_ATTRIBUTES: [process.env.OTEL_RESOURCE_ATTRIBUTES, `neatroots.replay.id=${r.id}`, `neatroots.replay.of=${r.trace_id}`].filter(Boolean).join(","),
+          NEATROOTS_REPLAY_OF: sanitizeEnvVal(r.trace_id),
+          NEATROOTS_REPLAY_INPUT: sanitizeEnvVal(input),
+          OTEL_RESOURCE_ATTRIBUTES: [
+            process.env.OTEL_RESOURCE_ATTRIBUTES,
+            `neatroots.replay.id=${r.id}`,
+            // trace_id comes from OTLP ingest (attacker-controlled); sanitize before
+            // embedding as a key=value pair in the comma-separated OTEL attribute string.
+            `neatroots.replay.of=${sanitizeEnvVal(r.trace_id)}`,
+          ].filter(Boolean).join(","),
         };
-        if (o.model) env.NEATROOTS_REPLAY_MODEL = o.model;
-        if (o.system) env.NEATROOTS_REPLAY_SYSTEM_PROMPT = o.system;
+        if (o.model) env.NEATROOTS_REPLAY_MODEL = sanitizeEnvVal(o.model);
+        if (o.system) env.NEATROOTS_REPLAY_SYSTEM_PROMPT = o.system; // passed as a full string, not embedded in a structured format
         const code = await new Promise<number | null>((resolve) => {
           const child = spawn(target.command!, { shell: true, cwd: target.cwd, env });
           const keep = (b: Buffer) => {
