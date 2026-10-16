@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import type { Roots } from "../core.js";
 import { loadTrace } from "../engine/trace.js";
 import { runGoal } from "../engine/trace.js";
+import { encodeTraceJson } from "../otlp/codec.js";
 import { listCloudProjects, listCloudTraces, NO_CLOUD_TOKEN } from "../ingest/importers/neatlogs-cloud.js";
 import { cloudImportAuth, cloudImportBase, ImportError, parseTraceFile } from "../ingest/importers/index.js";
 import { deleteCloudToken, getCloudToken, setCloudToken } from "../relay/keychain.js";
@@ -47,6 +48,14 @@ function sinceMs(v: string | undefined): number | undefined {
 
 export function mountExploreApi(app: Hono, roots: Roots): void {
   // ---------------------------------------------------------------- views
+
+  // The run as an OTLP/JSON file, to keep as a fixture for `neatroots check` or to import elsewhere.
+  app.get("/api/runs/:traceId/otlp", (c) => {
+    const traceId = c.req.param("traceId");
+    if (!roots.store.getRun(traceId)) return err(c, 404, "run not found");
+    c.header("content-disposition", `attachment; filename="${traceId}.json"`);
+    return c.json(encodeTraceJson(roots.store.batchesForTraces([traceId])));
+  });
 
   app.get("/api/runs/:traceId/chat", (c) => {
     const traceId = c.req.param("traceId");

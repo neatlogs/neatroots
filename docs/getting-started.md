@@ -353,6 +353,7 @@ neatroots listens on 127.0.0.1 only. API keys live in the macOS Keychain (on Lin
 | `neatroots steering <mode> --project <name>`, `neatroots steering stop` | Steering |
 | `neatroots checks list`, `neatroots checks validate <file>` | Checks |
 | `neatroots check <files...>` | Rule checks over saved traces: exit 0 when clean, 1 if a rule fires, 2 for invalid input or check configuration (`--only`, `--checks`, `--json`) |
+| `neatroots export <trace> [-o file]` | Save a run as OTLP JSON (`GET /api/runs/<trace>/otlp`); `neatroots check` and `neatroots import` read it back |
 | `neatroots cloud login / forward / auto` | Neatlogs Cloud: send runs |
 | `neatroots cloud token`, `neatroots cloud project` | Neatlogs Cloud: the service-account token and project imports read from |
 | `neatroots connect` | Give coding agents neatroots' MCP tools |
