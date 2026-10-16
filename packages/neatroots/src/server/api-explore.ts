@@ -219,6 +219,9 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   app.post("/api/projects/:project/rerun", async (c) => {
     const project = c.req.param("project");
     const b = await body<{ command?: string; cwd?: string; url?: string }>(c);
+    for (const field of ["command", "cwd", "url"] as const) {
+      if (b[field] !== undefined && typeof b[field] !== "string") return err(c, 400, `${field} must be a string`);
+    }
     const command = b.command?.trim() || undefined;
     const url = b.url?.trim() || undefined;
     if (url && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//.test(url)) return err(c, 400, "the replay endpoint must be on this machine (http://localhost:…/)");
