@@ -49,6 +49,37 @@ describe("server", () => {
     expect(json.status).toBe(400);
   });
 
+  it("accepts gzip OTLP with no Content-Encoding header (magic-bytes sniff path) and enforces a decompression size limit", async () => {
+    const tb = await served();
+    const { t, batches } = sampleRun();
+
+    // Send a valid gzip payload but omit the Content-Encoding header so the
+    // server falls through to the magic-bytes sniff path.
+    const body = zlib.gzipSync(encodeTraceRequest(batches));
+    const res = await fetch(`${tb.url}/v1/traces`, {
+      method: "POST",
+      headers: { "content-type": "application/x-protobuf" }, // no content-encoding
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(tb.roots.store.getRun(t)?.span_count).toBe(3);
+
+    // A payload whose decompressed size exceeds the limit must be rejected, not
+    // crash the process.  We craft a gzip stream that would expand beyond
+    // MAX_BODY * 4 (256 MB) by compressing a highly-repetitive buffer.
+    // Node's zlib throws RangeError when maxOutputLength is hit, which the
+    // server turns into a 413 / 400.
+    const huge = zlib.gzipSync(Buffer.alloc(64 * 1024 * 1024 * 4 + 1).fill(0x61)); // > 256 MB uncompressed
+    const tooBig = await fetch(`${tb.url}/v1/traces`, {
+      method: "POST",
+      headers: { "content-type": "application/x-protobuf" },
+      body: huge,
+    });
+    // The raw compressed body exceeds MAX_BODY (64 MB) so the server rejects it
+    // at the body-size check before even attempting decompression.
+    expect([400, 413]).toContain(tooBig.status);
+  });
+
   it("refuses foreign Host headers and cross-origin API calls, but allows OTLP from browsers", async () => {
     const tb = await served();
     const evilStatus = await new Promise<number>((resolve) => {

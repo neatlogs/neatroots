@@ -23,7 +23,8 @@ async function readBody(c: Context): Promise<Buffer> {
   if (enc === "deflate") return zlib.inflateSync(raw, { maxOutputLength: MAX_BODY * 4 });
   if (enc === "br") return zlib.brotliDecompressSync(raw, { maxOutputLength: MAX_BODY * 4 });
   // Some exporters gzip without the header; sniff the magic bytes.
-  if (raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b) return zlib.gunzipSync(raw);
+  // maxOutputLength prevents a decompression bomb from expanding unbounded in memory.
+  if (raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b) return zlib.gunzipSync(raw, { maxOutputLength: MAX_BODY * 4 });
   return raw;
 }
 
