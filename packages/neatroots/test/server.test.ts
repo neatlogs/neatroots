@@ -351,6 +351,21 @@ describe("server", () => {
     expect(await count("?after=abc")).toBe(2); // not a number: from the start; was none
   });
 
+  it("requires boolean permissions when creating a coding-agent chat", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    for (const field of ["allow_edits", "allow_commands"] as const) {
+      const r = await fetch(`${tb.url}/api/chat/sessions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ agent: "codex", cwd: os.tmpdir(), [field]: "false" }),
+      });
+      expect(r.status).toBe(400);
+      expect(await r.json()).toEqual({ error: `${field} must be a boolean` });
+    }
+    expect(tb.roots.chats.list()).toEqual([]);
+  });
+
   it("returns 404 JSON for unknown /api and /v1 routes, not the SPA", async () => {
     const tb = await served();
     for (const path of ["/api/anything-unknown", "/api/imports/abc", "/v1/unknown"]) {
