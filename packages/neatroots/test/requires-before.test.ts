@@ -31,6 +31,8 @@ interface Call {
   fail?: boolean;
   /** Start together with the previous call instead of after it. */
   parallel?: boolean;
+  unfinished?: boolean;
+  zeroDuration?: boolean;
 }
 
 function run(calls: Call[]) {
@@ -42,6 +44,8 @@ function run(calls: Call[]) {
   const spans = calls.map((c) => (c.fail ? toolSpan(t, root, c.tool, "{}", undefined, "HTTP 500") : toolSpan(t, root, c.tool, "{}", '{"ok":true}')));
   calls.forEach((c, i) => {
     if (c.parallel && i > 0) spans[i].startTimeUnixNano = spans[i - 1].startTimeUnixNano;
+    if (c.unfinished) spans[i].endTimeUnixNano = "0";
+    if (c.zeroDuration) spans[i].endTimeUnixNano = spans[i].startTimeUnixNano;
   });
   st.ingest([batch(spans)]);
   return evaluateRule(check, loadTrace(st, t), false);
@@ -91,8 +95,50 @@ describe("requires_before", () => {
     expect(run([{ tool: "issue_refund" }, { tool: "issue_refund" }])?.params.count).toBe("2");
   });
 
-  it("does not guess when the two calls started together", () => {
-    expect(run([{ tool: "lookup_order" }, { tool: "issue_refund", parallel: true }])).toBeNull();
+  it("fires when the two calls start together and overlap", () => {
+    expect(run([{ tool: "lookup_order" }, { tool: "issue_refund", parallel: true }])?.firing).toBe(true);
+  });
+
+  it("fires when an earlier lookup has not ended", () => {
+    expect(run([{ tool: "lookup_order", unfinished: true }, { tool: "issue_refund" }])?.firing).toBe(true);
+  });
+
+  it("counts a completed zero-duration lookup", () => {
+    expect(run([{ tool: "lookup_order", zeroDuration: true }, { tool: "issue_refund" }])).toBeNull();
+  });
+
+  it("counts a lookup completed exactly when the refund starts", () => {
+    const h = tmpHome();
+    homes.push(h);
+    const st = new Store(path.join(h, "data"));
+    const t = hex(16);
+    const root = hex(8);
+    const lookup = toolSpan(t, root, "lookup_order", "{}", '{"ok":true}');
+    const refund = toolSpan(t, root, "issue_refund", "{}", '{"ok":true}');
+    refund.startTimeUnixNano = lookup.endTimeUnixNano;
+    st.ingest([batch([lookup, refund])]);
+    expect(evaluateRule(check, loadTrace(st, t), false)).toBeNull();
+  });
+
+  it("counts a completed zero-duration lookup at the same start", () => {
+    expect(run([{ tool: "lookup_order", zeroDuration: true }, { tool: "issue_refund", parallel: true }])).toBeNull();
+  });
+
+  it("fires when an unfinished lookup has the same start", () => {
+    expect(run([{ tool: "lookup_order", unfinished: true }, { tool: "issue_refund", parallel: true }])?.firing).toBe(true);
+  });
+
+  it("fires when the refund starts before the earlier lookup finishes", () => {
+    const h = tmpHome();
+    homes.push(h);
+    const st = new Store(path.join(h, "data"));
+    const t = hex(16);
+    const root = hex(8);
+    const lookup = toolSpan(t, root, "lookup_order", "{}", '{"ok":true}');
+    const refund = toolSpan(t, root, "issue_refund", "{}", '{"ok":true}');
+    refund.startTimeUnixNano = (BigInt(lookup.startTimeUnixNano) + 1_000_000n).toString();
+    st.ingest([batch([lookup, refund])]);
+    expect(evaluateRule(check, loadTrace(st, t), false)?.firing).toBe(true);
   });
 
   it("labeled smoke: 120 generated runs, every verdict matches the label", () => {
@@ -106,11 +152,11 @@ describe("requires_before", () => {
       else if (kind === 3) { calls = [{ tool: "issue_refund" }, { tool: "lookup_order" }]; expectFire = true; }
       else if (kind === 4) { calls = [{ tool: "search" }, { tool: "send_email" }]; expectFire = false; }
       else if (kind === 5) { calls = [{ tool: "lookup_order", fail: true }, { tool: "lookup_order" }, { tool: "issue_refund" }]; expectFire = false; }
-      else if (kind === 6) { calls = [{ tool: "lookup_order" }, { tool: "issue_refund", parallel: true }]; expectFire = false; }
+      else if (kind === 6) { calls = [{ tool: "lookup_order" }, { tool: "issue_refund", parallel: true }]; expectFire = true; }
       else { calls = [{ tool: "search" }, { tool: "issue_refund" }, { tool: "lookup_order" }]; expectFire = true; }
       const fired = run(calls)?.firing === true;
       if (expectFire && fired) tp++; else if (expectFire) fn++; else if (fired) fp++; else tn++;
     }
-    expect({ tp, fn, fp, tn }).toEqual({ tp: 60, fn: 0, fp: 0, tn: 60 });
+    expect({ tp, fn, fp, tn }).toEqual({ tp: 75, fn: 0, fp: 0, tn: 45 });
   });
 });

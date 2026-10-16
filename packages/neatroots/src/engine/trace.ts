@@ -13,6 +13,8 @@ export interface SpanInfo {
   kind: SpanKind;
   startMs: number;
   endMs: number;
+  /** The raw OTLP end time is nonzero; endMs alone is normalized for unfinished spans. */
+  ended: boolean;
   durationMs: number;
   status: "ok" | "error" | "unset";
   error?: string;
@@ -84,6 +86,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
       kind: v.kind,
       startMs: row.start_ms,
       endMs: row.end_ms,
+      ended: row.end_ns !== "0",
       durationMs: row.duration_ms,
       status: statusOf(row),
       error: v.error,
