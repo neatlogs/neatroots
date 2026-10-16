@@ -113,8 +113,22 @@ export function signInHelp(agent: ChatAgent, message: string): string | null {
   return `${name} couldn't sign in, so it never reached neatroots. ${how}\n\n${message.trim().slice(0, 600)}`;
 }
 
+/** Ends an agent and everything it started (shell commands, MCP servers): its whole process group. */
+function endAgent(p: ChildProcess, signal: NodeJS.Signals = "SIGTERM"): void {
+  if (p.pid && process.platform !== "win32") {
+    try {
+      process.kill(-p.pid, signal);
+      return;
+    } catch {
+      /* the group is already gone; fall back to the process itself */
+    }
+  }
+  p.kill(signal);
+}
+
 export class AgentChats {
   private readonly running = new Map<string, ChildProcess>();
+  private closed = false;
 
   constructor(private readonly roots: Roots) {
     roots.store.db.exec(SCHEMA);
@@ -201,8 +215,15 @@ export class AgentChats {
   stop(id: string): boolean {
     const p = this.running.get(id);
     if (!p) return false;
-    p.kill("SIGTERM");
+    endAgent(p);
     return true;
+  }
+
+  /** Ends every agent still answering, so none outlives neatroots (Ctrl-C, or the service stopping). */
+  close(): void {
+    this.closed = true;
+    for (const p of this.running.values()) endAgent(p);
+    this.running.clear();
   }
 
   /**
@@ -236,12 +257,14 @@ export class AgentChats {
     this.update(id, { state: "running" });
     const { args } = s.agent === "claude" ? this.claudeArgs(s, prompt) : this.codexArgs(s, prompt);
     log.debug(`chat ${id}: ${bin} ${args.slice(0, -1).join(" ")}`);
-    const child = spawn(bin, args, { cwd: s.cwd, env: { ...process.env, NEATLOGS_ENDPOINT: `http://localhost:${this.roots.config.port}` }, stdio: ["ignore", "pipe", "pipe"] });
+    // Its own process group (outside Windows), so stopping the agent also stops what it started.
+    const child = spawn(bin, args, { cwd: s.cwd, env: { ...process.env, NEATLOGS_ENDPOINT: `http://localhost:${this.roots.config.port}` }, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
     this.running.set(id, child);
     let buf = "";
     let stderr = "";
     let sawResult = false;
     child.stdout!.on("data", (b: Buffer) => {
+      if (this.closed) return;
       buf += b.toString();
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {
@@ -262,6 +285,7 @@ export class AgentChats {
     await new Promise<void>((resolve) => {
       child.on("close", (code, signal) => {
         this.running.delete(id);
+        if (this.closed) return resolve();
         if (signal) this.emit(id, { kind: "status", text: "Stopped" });
         else if (code !== 0 && !sawResult) this.emit(id, { kind: "error", text: this.explainFailure(s.agent, stderr) });
         this.ended(id, code === 0 || signal || sawResult ? "idle" : "error");
@@ -269,6 +293,7 @@ export class AgentChats {
       });
       child.on("error", (err) => {
         this.running.delete(id);
+        if (this.closed) return resolve();
         this.emit(id, { kind: "error", text: err.message });
         this.ended(id, "error");
         resolve();

@@ -76,3 +76,55 @@ echo '{"type":"result","subtype":"success","is_error":true,"result":"${err}","se
     expect(events.find((e) => e.kind === "result")?.text).toBeUndefined();
   });
 });
+
+describe("an agent still answering", () => {
+  // A stand-in agent that starts a command of its own (like a shell tool call) and keeps working.
+  const setup = async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
+    process.env.HOME = dir;
+    const pids = path.join(dir, "pids");
+    process.env.NEATROOTS_CLAUDE_BIN = script("claude", `sleep 30 &\necho "$$ $!" > "${pids}"\nwait`);
+    t = await makeRoots({ noEngine: true });
+    const s = t.roots.chats.create({ agent: "claude", cwd: dir });
+    const turn = t.roots.chats.send(s.id, "keep going");
+    for (let i = 0; i < 100 && !fs.existsSync(pids); i++) await new Promise((r) => setTimeout(r, 20));
+    const [agent, command] = fs.readFileSync(pids, "utf8").trim().split(" ").map(Number);
+    return { s, turn, agent, command };
+  };
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const gone = async (...ids: number[]) => {
+    for (let i = 0; i < 50 && ids.some(alive); i++) await new Promise((r) => setTimeout(r, 20));
+    return ids.map(alive);
+  };
+
+  it("is ended, with what it started, when neatroots stops", async () => {
+    const { agent, command } = await setup();
+    try {
+      expect([alive(agent), alive(command)]).toEqual([true, true]);
+      await t!.close(); // what Ctrl-C and the service stopping do
+      t = undefined;
+      expect(await gone(agent, command)).toEqual([false, false]); // was: both kept running
+    } finally {
+      for (const pid of [agent, command]) if (alive(pid)) process.kill(pid, "SIGKILL");
+    }
+  });
+
+  it("is ended, with what it started, by Stop", async () => {
+    const { s, turn, agent, command } = await setup();
+    try {
+      expect(t!.roots.chats.stop(s.id)).toBe(true);
+      await turn;
+      expect(await gone(agent, command)).toEqual([false, false]); // was: the command it started kept running
+      expect(t!.roots.chats.events(s.id).some((e) => e.kind === "status" && e.text === "Stopped")).toBe(true);
+    } finally {
+      for (const pid of [agent, command]) if (alive(pid)) process.kill(pid, "SIGKILL");
+    }
+  });
+});
