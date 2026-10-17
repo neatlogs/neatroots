@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { collectIndexed } from "../src/semantics/view.js";
+import { buildView, collectIndexed } from "../src/semantics/view.js";
 import { makeRoots, type TestRoots } from "./helpers.js";
 
 let tb: TestRoots | undefined;
@@ -11,22 +11,38 @@ afterEach(async () => {
 const str = (key: string, v: string) => ({ key, value: { stringValue: v } });
 
 describe("OpenInference message contents and tool calls (#219)", () => {
-  it("resolves nested c.function name and JSON arguments when extracting view.toolCalls from output messages", async () => {
-    const { extractSemantic } = await import("../src/semantics/view.js");
-    const view = extractSemantic("LLM", {
-      "neatlogs.llm.output_messages": JSON.stringify([
-        {
-          role: "assistant",
-          tool_calls: [
-            {
-              id: "call_nested_1",
-              type: "function",
-              function: { name: "get_weather", arguments: '{"city":"Istanbul"}' },
-            },
-          ],
-        },
-      ]),
-    });
+  it("resolves nested c.function name and JSON arguments when extracting view.toolCalls from output messages", () => {
+    const view = buildView(
+      {
+        traceId: "11111111111111111111111111111111",
+        spanId: "2222222222222222",
+        name: "ChatCompletion",
+        kind: 1,
+        startTimeUnixNano: "1760600000100000000",
+        endTimeUnixNano: "1760600000900000000",
+        attributes: [
+          str("openinference.span.kind", "LLM"),
+          str(
+            "neatlogs.llm.output_messages",
+            JSON.stringify([
+              {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    id: "call_nested_1",
+                    type: "function",
+                    function: { name: "get_weather", arguments: '{"city":"Istanbul"}' },
+                  },
+                ],
+              },
+            ]),
+          ),
+        ],
+        events: [],
+        status: { code: 1 },
+      },
+      [],
+    );
     expect(view.toolCalls).toEqual([
       {
         id: "call_nested_1",
