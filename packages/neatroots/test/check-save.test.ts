@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { CheckRegistry } from "../src/checks/registry.js";
+import { CheckRegistry, checkToYaml } from "../src/checks/registry.js";
 import type { Check } from "../src/checks/types.js";
 import { Store } from "../src/store/db.js";
 import { makeRoots } from "./helpers.js";
@@ -124,6 +124,28 @@ it("saving with the check's own project dir edits its file there too", () => {
 
   expect(atLeast(r)).toBe(50);
   expect(fs.readdirSync(project)).toEqual(["refunds.yaml"]);
+});
+
+it("deleting a check preserves comments, invalid neighbours and other documents", () => {
+  const file = path.join(project, "refunds.yaml");
+  fs.writeFileSync(file, team);
+  const r = registry();
+
+  expect(r.remove("big-run")).toBe(true);
+
+  expect(read(file)).toBe(team.replace("- id: big-run\n  kind: rule\n  rule: { type: count, span: { type: tool, name: lookup_order }, at_least: 5 }\n", ""));
+  expect(r.get("big-run")).toBeUndefined();
+  expect(r.get("no-refund-loop")?.path).toBe(file);
+  expect(r.errors.some((e) => e.id === "refund-tone")).toBe(true);
+});
+
+it("deleting a check unlinks its file only when nothing else remains", () => {
+  const file = path.join(user, "big-run.yaml");
+  fs.writeFileSync(file, checkToYaml(bigRun(5)));
+  const r = registry();
+
+  expect(r.remove("big-run")).toBe(true);
+  expect(fs.existsSync(file)).toBe(false);
 });
 
 it("new checks and checks moved to another directory still get their own file", () => {
