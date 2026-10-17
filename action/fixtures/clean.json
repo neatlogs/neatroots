@@ -1,0 +1,1 @@
+{"resourceSpans":[{"resource":{"attributes":[]},"scopeSpans":[{"spans":[{"traceId":"0123456789abcdef0123456789abcdef","spanId":"0123456789abcdef","name":"fixture-clean","startTimeUnixNano":"1700000000000000000","endTimeUnixNano":"1700000000010000000","attributes":[],"status":{"code":1}}]}]}]}

@@ -1,0 +1,7 @@
+id: action-fixture-hit
+kind: rule
+title: Fixture finding
+rule:
+  type: match
+  field: name
+  pattern: fixture-fail
