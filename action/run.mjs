@@ -12,6 +12,20 @@ const id = (value, pattern) => typeof value === 'string' && pattern.test(value) 
 const traceId = value => id(value, /^[a-fA-F0-9]{32}$/);
 const spanId = value => id(value, /^[a-fA-F0-9]{16}$/);
 const checkId = value => id(value, /^[a-z0-9][a-z0-9_.-]{0,79}$/);
+const MAX_REPORT_BYTES = 16 * 1024 * 1024;
+
+function readReport(fd) {
+  const size = fs.fstatSync(fd).size;
+  if (size > MAX_REPORT_BYTES) throw new Error('Report too large');
+  const bytes = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const count = fs.readSync(fd, bytes, offset, size - offset, offset);
+    if (!count) throw new Error('Incomplete report');
+    offset += count;
+  }
+  return bytes.toString('utf8');
+}
 
 function noSymlinkStat(file) {
   // Preserve dot/parent components until each preceding component is checked.
@@ -42,6 +56,7 @@ export function filesFor(inputs) {
 
 export function run(env = process.env, execute = spawnSync, write = console.log) {
   let home;
+  let report;
   const summary = ['## neatroots saved-run checks', '', '| Run | Check | Severity | Message |', '| --- | --- | --- | --- |'];
   let status = 2;
   try {
@@ -56,17 +71,21 @@ export function run(env = process.env, execute = spawnSync, write = console.log)
     // -- ends the variadic --checks option and prevents paths becoming flags.
     args.push('--', ...files);
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'neatroots-action-'));
+    // Node drains writes synchronously to a regular file on supported runners,
+    // even when this pinned CLI exits immediately after printing its JSON.
+    report = fs.openSync(path.join(home, 'report.json'), 'wx+', 0o600);
     // The installer's shell wrapper embeds absolute paths. Invoke its built CLI
     // with this action's Node so a cache restored to another temp root relocates.
     const cli = path.join(env.RUNNER_TEMP, 'neatroots-action-install', 'src', 'packages', 'neatroots', 'dist', 'cli.js');
     const result = execute(process.execPath, [cli, ...args], {
-      env: { ...env, NEATROOTS_HOME: home }, encoding: 'utf8',
-      maxBuffer: 16 * 1024 * 1024, timeout: 300_000, shell: false,
+      env: { ...env, NEATROOTS_HOME: home }, stdio: ['ignore', report, 'ignore'],
+      timeout: 300_000, shell: false,
     });
     if (result.error || ![0, 1, 2].includes(result.status)) throw new Error('Check process failed');
     status = result.status;
-    if (result.stdout?.trim()) {
-      const data = JSON.parse(result.stdout);
+    const stdout = readReport(report);
+    if (stdout.trim()) {
+      const data = JSON.parse(stdout);
       if (!Array.isArray(data.runs) || !Array.isArray(data.errors) || !Array.isArray(data.rules)) throw new Error('Invalid result');
       let count = 0;
       for (const run of data.runs) {
@@ -93,6 +112,7 @@ export function run(env = process.env, execute = spawnSync, write = console.log)
     write('::error::neatroots check could not complete; input or diagnostic content withheld.');
     summary.push('', 'Check could not complete (exit 2).');
   } finally {
+    if (report !== undefined) fs.closeSync(report);
     if (home) fs.rmSync(home, { recursive: true, force: true });
   }
   if (env.GITHUB_STEP_SUMMARY) fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `${summary.join('\n')}\n`);

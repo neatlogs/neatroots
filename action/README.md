@@ -37,6 +37,8 @@ The installer environment is controlled; ambient source/bundle/repository settin
 cannot replace the pinned source. Its home, neatroots state and platform/XDG
 directories live inside the cached installation, so legacy installation cleanup
 and the Laya skip preference cannot touch the runner account's files or services.
+Installer subprocess output is discarded without buffering; failures report a
+fixed diagnostic instead of raw Git/build errors. The installer keeps its local log.
 Source is fetched by SHA before invoking the
 installer because its `git clone --branch` mode cannot fetch a raw commit ID.
 
@@ -59,9 +61,13 @@ finding parameters, raw JSON, stdout/stderr diagnostics and configuration error
 text are withheld. IDs must match conservative formats; check IDs should be
 non-sensitive slugs. At most 50 annotations, 200 table rows and 20 span IDs per
 finding are published; the verdict still considers every finding. JSON output
-is limited to 16 MiB and execution to five minutes; excess is exit 2.
+is captured in a private temporary file, so the pinned CLI can finish writing
+before exiting. At most 16 MiB is accepted and read into memory; larger reports
+are exit 2. This is a post-execution size check, not a disk-write cap: the temporary
+file can grow beyond 16 MiB until the CLI exits or reaches the five-minute timeout.
+Stderr is discarded, and the capture and isolated home are removed after the call.
 
-Run the wrapper tests with `node --test action/run.test.mjs`. The repository's
+Run the action tests with `node --test action/*.test.mjs`. The repository's
 action workflow tests known clean and failing traces through the actual composite
 action with its pinned CLI on Linux and macOS. Ambient `NEATROOTS_*`
 installer controls are cleared so they cannot replace the pinned source build or cached installation.

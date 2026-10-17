@@ -3,8 +3,17 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { filesFor, run } from './run.mjs';
+import { filesFor, run as capturedRun } from './run.mjs';
 import { installEnvironment } from './install.mjs';
+
+// Existing result fixtures supply JSON through the actual stdout descriptor.
+function run(env, execute, write) {
+  return capturedRun(env, (binary, args, options) => {
+    const result = execute(binary, args, options);
+    if (result.stdout) fs.writeSync(options.stdio[1], result.stdout);
+    return result;
+  }, write);
+}
 
 test('installer ignores ambient source, bundle, repo and runtime overrides', () => {
   const env = installEnvironment({ RUNNER_TEMP: '/tmp/runner', PATH: '/bin', NEATROOTS_BUNDLE: 'evil', NEATROOTS_FROM_SOURCE: '1', NEATROOTS_GITHUB_REPO: 'evil', NEATROOTS_NODE: 'evil', NEATROOTS_VERSION: 'latest' }, '0.2.8');
@@ -136,3 +145,67 @@ for (const input of ['file', 'directory', 'checks', 'parent traversal']) test(`r
     assert.throws(() => filesFor(path.join(link, 'sub', ...(input === 'file' ? ['run.json'] : []))), /Symbolic links/);
   }
 });
+
+for (const size of [16 * 1024 * 1024 - 1, 16 * 1024 * 1024, 16 * 1024 * 1024 + 1]) {
+  test(`private file capture enforces the accepted byte limit at ${size}`, t => {
+    const { env } = fixture(t);
+    const published = [];
+    let home, fd;
+    const expected = size > 16 * 1024 * 1024 ? 2 : 0;
+    assert.equal(capturedRun(env, (binary, args, opts) => {
+      home = opts.env.NEATROOTS_HOME;
+      fd = opts.stdio[1];
+      assert.equal(opts.stdio[0], 'ignore');
+      assert.equal(opts.stdio[2], 'ignore');
+      assert.equal(opts.timeout, 300_000);
+      assert.equal(opts.shell, false);
+      assert.equal(opts.maxBuffer, undefined);
+      assert.ok(fs.fstatSync(fd).isFile());
+      if (process.platform !== 'win32') {
+        assert.equal(fs.fstatSync(fd).mode & 0o777, 0o600);
+        assert.equal(fs.statSync(home).mode & 0o777, 0o700);
+      }
+      const json = '{"runs":[],"rules":[],"errors":[]}';
+      fs.writeSync(fd, json + ' '.repeat(size - Buffer.byteLength(json)));
+      return { status: 0 };
+    }, x => published.push(x)), expected);
+    assert.ok(!fs.existsSync(home), 'Capture/home must be removed');
+    assert.throws(() => fs.fstatSync(fd), { code: 'EBADF' });
+    assert.ok(!published.join('').includes('{"runs"'));
+  });
+}
+
+for (const failure of ['timeout', 'malformed', 'throw']) test(`file capture cleans up and withholds diagnostics after ${failure}`, t => {
+  const { env } = fixture(t);
+  const output = [];
+  let home, fd;
+  assert.equal(capturedRun(env, (binary, args, opts) => {
+    home = opts.env.NEATROOTS_HOME;
+    fd = opts.stdio[1];
+    fs.writeSync(fd, 'SECRET invalid JSON');
+    if (failure === 'throw') throw new Error('SECRET');
+    return failure === 'timeout' ? { status: null, error: new Error('SECRET timeout') } : { status: 0 };
+  }, x => output.push(x)), 2);
+  assert.ok(!fs.existsSync(home));
+  assert.throws(() => fs.fstatSync(fd), { code: 'EBADF' });
+  assert.ok(!(output.join('') + fs.readFileSync(env.GITHUB_STEP_SUMMARY, 'utf8')).includes('SECRET'));
+});
+
+for (const status of [0, 1, 2]) for (const contents of ['', ' \t\r\n']) {
+  test(`empty or whitespace capture fails closed for child ${status} (${contents ? 'whitespace' : 'empty'})`, t => {
+    const { env } = fixture(t);
+    const output = [];
+    let home, fd;
+    assert.equal(capturedRun(env, (binary, args, opts) => {
+      home = opts.env.NEATROOTS_HOME;
+      fd = opts.stdio[1];
+      if (contents) fs.writeSync(fd, contents);
+      return { status, stderr: 'SECRET private diagnostic' };
+    }, x => output.push(x)), 2);
+    assert.ok(!fs.existsSync(home));
+    assert.throws(() => fs.fstatSync(fd), { code: 'EBADF' });
+    const summary = fs.readFileSync(env.GITHUB_STEP_SUMMARY, 'utf8');
+    assert.ok(!(output.join('') + summary).includes('SECRET'));
+    assert.match(summary, status === 2 ? /Invalid input or configuration/ : /Check could not complete \(exit 2\)/);
+  });
+}

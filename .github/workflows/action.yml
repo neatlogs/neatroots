@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24.14.1
-      - run: node --test action/run.test.mjs
+      - run: node --test action/*.test.mjs
       - name: Clean saved run
         uses: ./action
         with:
@@ -38,3 +38,5 @@ jobs:
         run: test "$OUTCOME" = failure
       - name: Verify real CLI exits 0, 1 and 2
         run: node action/smoke.mjs
+      - name: Verify large pinned CLI reports
+        run: node action/large-smoke.mjs
