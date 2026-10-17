@@ -115,6 +115,7 @@ export function ChecksPage() {
               toast.success(`Deleted check ${id}`);
               setOpenId(undefined);
             },
+            onError: (e) => toast.error(`Couldn't delete the check: ${(e as Error).message}`),
           })
         }
       />
