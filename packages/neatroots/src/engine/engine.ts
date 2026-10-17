@@ -1182,7 +1182,7 @@ ${library}`;
       if (isRule(check)) {
         // A previewed check is a draft someone (or a coding agent) wrote, so its pattern is timed.
         const hit = evaluateRule(check, snap, true, undefined, true);
-        if (hit) hits.push({ trace_id: r.trace_id, probability: null, evidence_span_ids: hit.evidenceSpanIds, root_name: r.root_name });
+        if (hit && !hit.satisfied) hits.push({ trace_id: r.trace_id, probability: null, evidence_span_ids: hit.evidenceSpanIds, root_name: r.root_name });
         continue;
       }
       const targets = check.scope === "span" ? selectSpans(snap.spans, check.evidence?.spans).slice(-5) : [undefined];
