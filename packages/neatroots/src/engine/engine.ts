@@ -592,6 +592,20 @@ export class Engine {
         log.debug(`${check.id}: flag not confirmed on a second look${check2.quote ? ` (quote: ${clip(check2.quote, 80)})` : ""}`);
         return;
       }
+      // Another evaluation may have raised this finding while the model calls above were in
+      // flight. Re-check immediately before the synchronous insert so only one open row wins.
+      const raced = this.findOpen(run.traceId, check.id, spanId) ?? (spanId ? this.roots.store.openFindingFor(run.traceId, check.id) : undefined);
+      if (raced) {
+        if (spanId && !findingSpans(raced).includes(spanId)) {
+          const f = addOccurrence(this.roots.store, raced, spanId, spanIds);
+          if (f) this.roots.bus.emit("finding", f);
+        } else {
+          const spans = spanId && findingSpans(raced).length > 1 ? [...new Set([...raced.evidence_span_ids, ...spanIds])] : spanIds;
+          const f = this.roots.store.updateFinding(raced.id, { probability: Math.max(verdict.probability, raced.probability ?? 0), evidence_span_ids: spans });
+          if (f) this.roots.bus.emit("finding", f);
+        }
+        return;
+      }
       const evidenceSpans = snap.spans.filter((s) => spanIds.includes(s.id));
       const errSpan = [...evidenceSpans].reverse().find((s) => s.status === "error");
       const focus = spanId ? snap.spans.find((s) => s.id === spanId) : undefined;
