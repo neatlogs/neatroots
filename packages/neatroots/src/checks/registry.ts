@@ -300,7 +300,11 @@ export class CheckRegistry {
     return true;
   }
 
-  /** Precision per check from dismissals; noisy checks are suggested for retirement. */
+  /**
+   * Precision per check from dismissals; noisy checks are suggested for retirement. `hits` counts
+   * only findings a person could act on: a check that could not run (a model error or timeout) and
+   * a quieted one do not count, so neither makes a check look kept.
+   */
   precision(id: string): { hits: number; dismissed: number; precision: number | null; noisy: boolean } {
     const s = this.store.checkStats()[id];
     if (!s || s.hits === 0) return { hits: s?.hits ?? 0, dismissed: s?.dismissed ?? 0, precision: null, noisy: false };

@@ -129,6 +129,74 @@ describe("findings that describe one incident", () => {
   });
 });
 
+describe("what counts toward a check's kept ratio", () => {
+  const base = { check_kind: "rule" as const, probability: null, evidence_span_ids: [], detail: {}, model: null, triage_score: null, explanation_id: null };
+
+  /** A check row, the way the registry makes one, plus `n` findings in the given status. */
+  async function withFindings(statuses: ("raised" | "failed" | "quiet" | "dismissed")[], tb: TestRoots) {
+    tb.roots.store.upsertCheckRow({ id: "c", kind: "rule", source: "user", path: null, body: "x" });
+    for (const status of statuses) {
+      tb.roots.store.insertFinding({ ...base, trace_id: hex(16), check_id: "c", title: "F", status });
+    }
+    return tb.roots.checks.precision("c");
+  }
+
+  it("does not count a check that could not run: two model outages are not two findings kept", async () => {
+    const tb = await makeRoots({});
+    cleanup.push(tb.close);
+    const p = await withFindings(["failed", "failed"], tb);
+    expect(p).toMatchObject({ hits: 0, dismissed: 0, precision: null, noisy: false });
+  });
+
+  it("does not count a quiet finding: the product already decided it is not counted here", async () => {
+    const tb = await makeRoots({});
+    cleanup.push(tb.close);
+    const p = await withFindings(["raised", "quiet", "quiet"], tb);
+    expect(p).toMatchObject({ hits: 1, dismissed: 0, precision: 1 });
+  });
+
+  it("still counts a raised finding, and its dismissal moves the ratio", async () => {
+    const tb = await makeRoots({});
+    cleanup.push(tb.close);
+    tb.roots.store.upsertCheckRow({ id: "c", kind: "rule", source: "user", path: null, body: "x" });
+    const f = tb.roots.store.insertFinding({ ...base, trace_id: hex(16), check_id: "c", title: "F", status: "raised" });
+    expect(tb.roots.checks.precision("c")).toMatchObject({ hits: 1, dismissed: 0, precision: 1 });
+    tb.roots.store.updateFinding(f.id, { status: "dismissed" });
+    expect(tb.roots.checks.precision("c")).toMatchObject({ hits: 1, dismissed: 1, precision: 0 });
+    // Reopening puts it back, and neither direction can push the ratio outside 0..1.
+    tb.roots.store.updateFinding(f.id, { status: "raised" });
+    expect(tb.roots.checks.precision("c")).toMatchObject({ hits: 1, dismissed: 0, precision: 1 });
+  });
+
+  it("counts a row inserted already dismissed as dismissed, not as kept", async () => {
+    const tb = await makeRoots({});
+    cleanup.push(tb.close);
+    const p = await withFindings(["dismissed"], tb);
+    expect(p).toMatchObject({ hits: 1, dismissed: 1, precision: 0 });
+  });
+
+  it("keeps a genuinely noisy check flagged once failed and quiet rows arrive", async () => {
+    const tb = await makeRoots({});
+    cleanup.push(tb.close);
+    tb.roots.store.upsertCheckRow({ id: "c", kind: "rule", source: "user", path: null, body: "x" });
+    const insert = (status: "raised" | "dismissed" | "failed" | "quiet") =>
+      tb.roots.store.insertFinding({ ...base, trace_id: hex(16), check_id: "c", title: "F", status });
+    for (let i = 0; i < 20; i++) insert("raised");
+    const raised = tb.roots.store.findingsForTrace(insert("raised").trace_id);
+    // 20 raised, 14 of them dismissed: 0.300 kept, flagged for retirement.
+    const dismissed = tb.roots.store.listFindings({ checkId: "c", limit: 500 }).filter((f) => f.status === "raised").slice(0, 14);
+    for (const f of dismissed) tb.roots.store.updateFinding(f.id, { status: "dismissed" });
+    expect(raised.length).toBe(1);
+    expect(tb.roots.checks.precision("c")).toMatchObject({ hits: 21, dismissed: 14, noisy: true });
+    // The same check plus ten rows that are not findings at all: the ratio must not move.
+    const before = tb.roots.checks.precision("c");
+    for (let i = 0; i < 5; i++) insert("failed");
+    for (let i = 0; i < 5; i++) insert("quiet");
+    expect(tb.roots.checks.precision("c")).toEqual(before);
+    expect(tb.roots.checks.precision("c").noisy).toBe(true);
+  });
+});
+
 describe("a check the person keeps dismissing", () => {
   it("goes quiet in that project after three dismissals: recorded, not counted", async () => {
     const { tb } = await setup();

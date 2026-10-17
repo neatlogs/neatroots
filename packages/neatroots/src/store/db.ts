@@ -336,6 +336,16 @@ function runContribution(span: AggregateSpan): RunContribution {
   };
 }
 
+/**
+ * A finding counts toward its check's kept ratio when a person could have acted on it. A `failed`
+ * row is a check that could not run (a model outage says nothing about the check either way), and
+ * a `quiet` row is one the product already decided not to count. Counting either one makes a check
+ * look better than it is, because `precision` is `1 - dismissed / hits`.
+ */
+function countsAsFinding(status: FindingStatus): boolean {
+  return status !== "failed" && status !== "quiet";
+}
+
 function nsToMs(ns: string): number {
   if (!ns || ns === "0") return 0;
   // Keep sub-millisecond precision without losing the int64.
@@ -954,7 +964,13 @@ export class Store {
           @model, @triage_score, @explanation_id, @created_ms, @updated_ms)`,
       )
       .run({ ...finding, evidence_span_ids: JSON.stringify(finding.evidence_span_ids), detail: JSON.stringify(finding.detail) });
-    this.db.prepare("UPDATE checks SET hits = hits + 1 WHERE id = ?").run(finding.check_id);
+    // Only rows a person could act on move the ratio, so a model outage or a quieted check does not
+    // read as a finding kept. A row inserted already dismissed counts as both, or it would read as
+    // one kept.
+    if (countsAsFinding(finding.status)) {
+      this.db.prepare("UPDATE checks SET hits = hits + 1 WHERE id = ?").run(finding.check_id);
+      if (finding.status === "dismissed") this.db.prepare("UPDATE checks SET dismissed = dismissed + 1 WHERE id = ?").run(finding.check_id);
+    }
     this.refreshFindingCounts(finding.trace_id);
     return finding;
   }
@@ -971,6 +987,13 @@ export class Store {
       )
       .run({ ...next, evidence_span_ids: JSON.stringify(next.evidence_span_ids), detail: JSON.stringify(next.detail) });
     if (patch.status && patch.status !== cur.status) {
+      // The total follows the status in both directions, so a row that stops counting (or starts)
+      // leaves the ratio where it was, and `dismissed` stays a subset of `hits`.
+      const counted = countsAsFinding(cur.status);
+      const counts = countsAsFinding(patch.status);
+      if (counted !== counts) {
+        this.db.prepare("UPDATE checks SET hits = MAX(0, hits + ?) WHERE id = ?").run(counts ? 1 : -1, cur.check_id);
+      }
       if (patch.status === "dismissed") this.db.prepare("UPDATE checks SET dismissed = dismissed + 1 WHERE id = ?").run(cur.check_id);
       if (cur.status === "dismissed") this.db.prepare("UPDATE checks SET dismissed = MAX(0, dismissed - 1) WHERE id = ?").run(cur.check_id);
     }
