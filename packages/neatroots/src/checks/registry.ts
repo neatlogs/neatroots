@@ -147,6 +147,43 @@ function replaceInYaml(text: string, check: Check): string | undefined {
   return out;
 }
 
+/** Removes every check with this id without reformatting its neighbours or comments. */
+function removeFromYaml(text: string, id: string): string | undefined {
+  const isOurs = (n: unknown): n is YAML.YAMLMap => YAML.isMap(n) && n.get("id") === id;
+  const spans: { start: number; end: number }[] = [];
+  for (const doc of YAML.parseAllDocuments(text)) {
+    if (doc.errors.length) continue;
+    const contents = doc.contents;
+    if (isOurs(contents) && contents.range) {
+      spans.push({ start: doc.range[0], end: contents.range[1] });
+      continue;
+    }
+    const wrapped = YAML.isMap(contents) ? contents.get("checks", true) : undefined;
+    const list = YAML.isSeq(contents) ? contents : YAML.isSeq(wrapped) ? wrapped : undefined;
+    if (!list) continue;
+    for (let i = 0; i < list.items.length; i++) {
+      const node = list.items[i];
+      if (!isOurs(node) || !node.range) continue;
+      let start = node.range[0];
+      let end = node.range[1];
+      if (list.flow) {
+        const previous = list.items[i - 1] as { range?: [number, number, number] } | undefined;
+        const next = list.items[i + 1] as { range?: [number, number, number] } | undefined;
+        if (next?.range) end = next.range[0];
+        else if (previous?.range) start = previous.range[1];
+      } else {
+        const lineStart = text.lastIndexOf("\n", start - 1) + 1;
+        if (/^\s*-\s*$/.test(text.slice(lineStart, start))) start = lineStart;
+      }
+      spans.push({ start, end });
+    }
+  }
+  if (!spans.length) return undefined;
+  let out = text;
+  for (const { start, end } of spans.sort((a, b) => b.start - a.start)) out = out.slice(0, start) + out.slice(end);
+  return out;
+}
+
 export function checkToYaml(check: Check): string {
   return YAML.stringify(check, { lineWidth: 100 });
 }
@@ -289,11 +326,9 @@ export class CheckRegistry {
     const lc = this.checks.get(id);
     if (!lc || lc.source === "library") return false;
     if (lc.path && fs.existsSync(lc.path)) {
-      const { checks } = parseChecks(fs.readFileSync(lc.path, "utf8"));
-      if (checks.length <= 1) fs.unlinkSync(lc.path);
-      else {
-        fs.writeFileSync(lc.path, YAML.stringify(checks.filter((c) => c.id !== id)), "utf8");
-      }
+      const next = removeFromYaml(fs.readFileSync(lc.path, "utf8"), id);
+      if (next !== undefined && next.trim()) fs.writeFileSync(lc.path, next, "utf8");
+      else if (next !== undefined) fs.unlinkSync(lc.path);
     }
     this.store.db.prepare("DELETE FROM checks WHERE id = ?").run(id);
     this.reload();
