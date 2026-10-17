@@ -36,6 +36,10 @@ export function checkFiles(files: string[], opts: OfflineOptions = {}): { runs: 
   const store = new Store(dir);
   try {
     if (opts.only && !opts.only.length) throw new Error("--only names no rule ids");
+    for (const directory of opts.dirs ?? []) {
+      if (!fs.existsSync(directory)) throw new Error(`checks directory does not exist: ${directory}`);
+      if (!fs.statSync(directory).isDirectory()) throw new Error(`checks path is not a directory: ${directory}`);
+    }
     const registry = new CheckRegistry(store, path.join(rootsHome(), "checks"), () => opts.dirs ?? []);
     const errors = registry.errors.map((e) => `${e.path}: ${e.message.split("\n")[0]}`);
     const rules = registry
