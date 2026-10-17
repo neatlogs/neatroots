@@ -97,6 +97,17 @@ describe("replay", () => {
     expect(t.roots.replays.get(r.id)?.state).toBe("failed");
   });
 
+  it("reports a failing agent command instead of blaming trace delivery", async () => {
+    t = await makeRoots({ noEngine: true });
+    const x = seed(t);
+    t.roots.config.rerun["support-agent"] = { command: `node -e "console.error('setup exploded'); process.exit(7)"` };
+    const { done } = t.roots.replays.startRun(x.traceId);
+    const r = await done;
+    expect(r).toMatchObject({ state: "failed", new_trace_id: null });
+    expect(r.error).toMatch(/agent command exited with 7.*setup exploded/);
+    expect(r.log_tail).toContain("setup exploded");
+  }, 15_000);
+
   it("refuses to register a rerun command in a folder that doesn't exist", async () => {
     t = await makeRoots({ noEngine: true, serve: true });
     const post = (cwd: string) =>
