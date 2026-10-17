@@ -1,20 +1,37 @@
 import type { AnyValue, KeyValue, ResourceSpansBatch } from "../otlp/types.js";
-import { regexProblem } from "../util/regex.js";
-import { log } from "../util/log.js";
+import { replaceWithin } from "../util/regex.js";
 
 export interface RedactionRule {
   kind: string;
   re: RegExp;
   /** The pattern's first group is a label to keep readable ("Bearer ", "postgres://user:"). */
   keepPrefix?: boolean;
+  /** A pattern someone wrote: it runs under a time limit, since a regex can backtrack for minutes. */
+  timed?: boolean;
 }
 
+/**
+ * A saved redaction pattern can't be applied. Redaction fails closed: whatever was about to leave
+ * the machine isn't sent, so data the pattern should remove never goes out unredacted.
+ */
+export class RedactionPatternError extends Error {}
+
+/** How long one saved pattern may run on one value. */
+const PATTERN_MS = 100;
+
 export const BUILTIN_RULES: RedactionRule[] = [
-  { kind: "private_key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
+  // Up to its END line, or to the end of the value: prompts and SDK attributes are often clipped
+  // before the END line, and the key body must not go out just because its end was cut off.
+  { kind: "private_key", re: /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/g },
   {
     kind: "api_key",
-    re: /\b(sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{22,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|hf_[A-Za-z0-9]{30,}|gsk_[A-Za-z0-9]{40,}|npm_[A-Za-z0-9]{36}|ya29\.[A-Za-z0-9_-]{20,})\b/g,
+    re: /\b(sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{22,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{24,}|hf_[A-Za-z0-9]{30,}|gsk_[A-Za-z0-9]{40,}|npm_[A-Za-z0-9]{36}|ya29\.[A-Za-z0-9_-]{20,}|nlsa_[A-Za-z0-9_-]{16,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b/g,
   },
+  // Tied to the header name, so a plain hex key counts too.
+  { kind: "api_key", re: /\b(x-api-key\\?["']?\s*[:=]\s*\\?["']?)[A-Za-z0-9_-]{16,}/gi, keepPrefix: true },
+  { kind: "slack_webhook", re: /\b(hooks\.slack\.com\/(?:services|workflows|triggers)\/)[A-Za-z0-9/_-]{20,}/g, keepPrefix: true },
+  // Azure storage and Service Bus / Event Hubs connection strings.
+  { kind: "azure_key", re: /\b((?:AccountKey|SharedAccessKey)=)[A-Za-z0-9+/]{40,}={0,2}/g, keepPrefix: true },
   { kind: "bearer_token", re: /\b(Bearer\s+)[A-Za-z0-9._~+/-]{20,}=*/gi, keepPrefix: true },
   // Matches start only where the run of token characters starts (a lookbehind, not \b), so a long
   // run of "a." or "eyJ-" is scanned once instead of from every word boundary.
@@ -27,27 +44,36 @@ export const BUILTIN_RULES: RedactionRule[] = [
   // quotes may be JSON-escaped (\") when the header sits inside a string attribute.
   { kind: "basic_auth", re: /\b(authorization\\?["']?\s*[:=]\s*\\?["']?basic\s+)[A-Za-z0-9+][A-Za-z0-9+/]{3,}={0,2}(?![A-Za-z0-9+/_-])/gi, keepPrefix: true },
   // The whole value, so a longer one isn't left half visible.
-  { kind: "aws_secret", re: /(aws_secret_access_key\\?["']?\s*[=:]\s*\\?["']?)[A-Za-z0-9/+]{40,}/gi, keepPrefix: true },
+  // AWS secret keys and session tokens, as config keys, JSON (SecretAccessKey) or SDK options (secretAccessKey).
+  { kind: "aws_secret", re: /((?:aws_secret_access_key|secret_?access_?key|aws_session_token|session_?token)\\?["']?\s*[=:]\s*\\?["']?)[A-Za-z0-9/+=]{40,}/gi, keepPrefix: true },
+  // A password or client secret given as a JSON field (the key names it, so any value counts).
+  { kind: "password", re: /(\\?["'](?:password|passwd|pwd|client_secret|api_secret)\\?["']\s*:\s*\\?["'])[^"'\\\r\n]{4,}/gi, keepPrefix: true },
   // Before email, which would otherwise take "password@host" as an address (and miss it for a dotless
   // host). ? and # can't appear unencoded in userinfo, so "host:443?email=a@b.com" is a port and a query.
   { kind: "url_password", re: /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/[^\s:/@]*:)[^\s@/?#]+(?=@)/gi, keepPrefix: true },
   { kind: "email", re: /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
-  { kind: "phone", re: /(?<![\w.])\+?(?:\d{1,3}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}(?![\w.])/g },
+  // A trailing "." ends a sentence ("call 415-555-0199."); only ".<digit>" continues a longer number.
+  { kind: "phone", re: /(?<![\w.])\+?(?:\d{1,3}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}(?!\w|\.\d)/g },
 ];
 
 /** Credentials, as opposed to personal data: the hosted LLM always has these removed. */
-export const CREDENTIAL_KINDS = ["private_key", "api_key", "bearer_token", "jwt", "basic_auth", "aws_secret", "url_password"];
+export const CREDENTIAL_KINDS = ["private_key", "api_key", "bearer_token", "jwt", "basic_auth", "aws_secret", "url_password", "slack_webhook", "azure_key", "password"];
 
+/**
+ * The built-in rules plus the user's saved patterns. A saved pattern that doesn't compile throws
+ * (nothing is sent); one that compiles runs with a time limit, including patterns saved before
+ * the app started refusing nested repeats, which keep redacting as they did.
+ */
 export function compileRules(userPatterns: string[]): RedactionRule[] {
   const user: RedactionRule[] = [];
   for (const p of userPatterns) {
-    // Validated when saved in the app; one written into config.yaml by hand is checked here.
-    const problem = regexProblem(p, "g");
-    if (problem) {
-      log.warn(`redaction pattern ${JSON.stringify(p)} skipped: ${problem}`);
-      continue;
+    let re: RegExp;
+    try {
+      re = new RegExp(p, "g");
+    } catch (e) {
+      throw new RedactionPatternError(`redaction pattern ${JSON.stringify(p)} isn't a valid regular expression (${(e as Error).message}), so nothing was sent. Fix or remove it in Settings → Cloud.`);
     }
-    user.push({ kind: "custom", re: new RegExp(p, "g") });
+    user.push({ kind: "custom", re, timed: true });
   }
   return [...BUILTIN_RULES, ...user];
 }
@@ -67,12 +93,21 @@ export function redactString(s: string, rules: RedactionRule[], where: string, h
   let out = s;
   for (const r of rules) {
     r.re.lastIndex = 0;
-    out = out.replace(r.re, (m: string, ...groups: unknown[]) => {
+    const replace = (m: string, ...groups: unknown[]): string => {
       // Keep a captured label ("Bearer ", "postgres://user:") readable; only the secret is masked.
       const prefix = r.keepPrefix && typeof groups[0] === "string" ? (groups[0] as string) : "";
       hits.push({ kind: r.kind, where, sample: mask(m) });
       return `${prefix}[redacted:${r.kind}]`;
-    });
+    };
+    if (!r.timed) {
+      out = out.replace(r.re, replace);
+      continue;
+    }
+    const next = replaceWithin(r.re, out, replace, PATTERN_MS);
+    if (next === undefined) {
+      throw new RedactionPatternError(`redaction pattern ${JSON.stringify(r.re.source)} took longer than ${PATTERN_MS} ms on one value, so nothing was sent. Simplify it in Settings → Cloud.`);
+    }
+    out = next;
   }
   return out;
 }
@@ -102,7 +137,11 @@ export function redactBatches(batches: ResourceSpansBatch[], rules: RedactionRul
   const hits: RedactionHit[] = [];
   const out = batches.map((b) => ({
     resource: { ...b.resource, attributes: redactKvs(b.resource.attributes, rules, "resource", hits) },
-    scope: b.scope.attributes ? { ...b.scope, attributes: redactKvs(b.scope.attributes, rules, "scope", hits) } : b.scope,
+    scope: {
+      ...b.scope,
+      ...(b.scope.name ? { name: redactString(b.scope.name, rules, "scope name", hits) } : {}),
+      ...(b.scope.attributes ? { attributes: redactKvs(b.scope.attributes, rules, "scope", hits) } : {}),
+    },
     spans: b.spans.map((s) => {
       // Span and event names often carry a URL or a tool argument, so they are redacted too,
       // and the hit labels use the redacted name so a preview never echoes the raw value.

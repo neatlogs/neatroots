@@ -252,11 +252,13 @@ export class AgentChats {
    * open chat that refetched on the result can still have read "running"; this tells it to look again.
    */
   private ended(id: string, state: "idle" | "error"): void {
+    if (!this.get(id)) return;
     this.update(id, { state });
     this.roots.bus.emit("chat", { session_id: id, state });
   }
 
-  private emit(id: string, e: Omit<ChatEvent, "seq" | "at">): ChatEvent {
+  private emit(id: string, e: Omit<ChatEvent, "seq" | "at">): ChatEvent | undefined {
+    if (!this.get(id)) return undefined;
     const row = this.roots.store.db.prepare("SELECT COALESCE(MAX(seq), 0) AS n FROM chat_events WHERE session_id = ?").get(id) as { n: number };
     const ev: ChatEvent = { ...e, seq: row.n + 1, at: Date.now() };
     this.roots.store.db.prepare("INSERT INTO chat_events (session_id, seq, json) VALUES (?, ?, ?)").run(id, ev.seq, JSON.stringify(ev));
@@ -284,6 +286,7 @@ export class AgentChats {
     let stderr = "";
     let sawResult = false;
     child.stdout!.on("data", (b: Buffer) => {
+      if (!this.get(id)) return;
       buf += b.toString();
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {

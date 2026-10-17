@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { decodeTraceProtobuf } from "../src/otlp/codec.js";
 import type { AnyValue, KeyValue } from "../src/otlp/types.js";
 import { BUILTIN_RULES, compileRules, CREDENTIAL_KINDS, redactBatches, redactString } from "../src/relay/redact.js";
-import { batch, hex, makeRoots, s, span } from "./helpers.js";
+import { batch, hex, makeRoots, s, span, toolSpan } from "./helpers.js";
 
 const KEY = "sk-proj-abcdefghij1234567890ABCDEFghij";
 const bytes = (value: string | Uint8Array): AnyValue => ({
@@ -230,5 +230,93 @@ describe("built-in credential formats", () => {
     expect(hits.map((h) => h.kind)).toEqual(["basic_auth", "url_password"]);
     expect(JSON.stringify(hits)).not.toContain("S3cretPass99");
     expect(JSON.stringify(hits)).not.toContain("dXNlcjpzM2NyZXRQYXNzd29yZDEyMw");
+  });
+});
+
+describe("redaction gaps found before 0.2.9", () => {
+  const phone = (text: string) => redactString(text, BUILTIN_RULES, "attr", []);
+  it("redacts a phone number at the end of a sentence", () => {
+    for (const t of ["call me on 415-555-0199.", "or +1 415 555 0199.", "fax 415.555.0199.", "office (415) 555-0199. Thanks"]) {
+      expect(phone(t), t).toContain("[redacted:phone]");
+      expect(phone(t), t).not.toMatch(/0199/);
+    }
+  });
+
+  it("still leaves longer dotted numbers alone", () => {
+    for (const t of ["build 1.415.555.0199.2", "10.415.555.0199.12", "id 415-555-01999"]) expect(phone(t), t).toBe(t);
+  });
+
+  it("redacts the instrumentation scope name", () => {
+    const b = batch([toolSpan(hex(16), hex(8), "lookup", "{}", "ok")]);
+    b.scope.name = "tracer for sk-proj-abcdefghijklmnopqrstuvwxyz0123";
+    const { batches } = redactBatches([b], BUILTIN_RULES);
+    expect(batches[0].scope.name).toContain("[redacted:api_key]");
+    expect(batches[0].scope.name).not.toContain("abcdefghijklmnop");
+  });
+});
+
+describe("credential formats found by the 0.2.9 egress audit", () => {
+  const all = (text: string) => redactString(text, BUILTIN_RULES, "attr", []);
+  const credentials = (text: string) => redactString(text, BUILTIN_RULES.filter((r) => CREDENTIAL_KINDS.includes(r.kind)), "llm", []);
+  const b64 = (n: number) => "Ab3+".repeat(Math.ceil(n / 4)).slice(0, n);
+  const body = "MIIEowIBAAKCAQEA1b2c3d4e5f6g7h8i9j0kLmNoPqRsTuVwXyZ";
+
+  it("redacts a private key whose END line was cut off, and PGP and OpenSSH keys", () => {
+    for (const t of [
+      `key: -----BEGIN RSA PRIVATE KEY-----\n${body}\n${body}`,
+      `-----BEGIN OPENSSH PRIVATE KEY-----\n${body}\n-----END OPENSSH PRIVATE KEY----- done`,
+      `-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${body}\n-----END PGP PRIVATE KEY BLOCK-----`,
+    ]) {
+      const out = all(t);
+      expect(out, t.slice(0, 30)).toContain("[redacted:private_key]");
+      expect(out).not.toContain(body);
+    }
+    expect(all("-----BEGIN PUBLIC KEY-----\nMIIBIjAN")).toContain("MIIBIjAN");
+  });
+
+  it("redacts newer credential formats", () => {
+    const secrets = {
+      "AWS temporary key id": "ASIAIOSFODNN7EXAMPLE",
+      "Neatlogs service-account token": "nlsa_Ab12Cd34Ef56Gh78Ij90",
+      "Stripe webhook secret": "whsec_" + "a1B2".repeat(8),
+      "SendGrid key": "SG." + "x".repeat(22) + "." + "y".repeat(43),
+    };
+    for (const [what, s] of Object.entries(secrets)) {
+      const out = credentials(`use ${s} here`);
+      expect(out, what).toContain("[redacted:api_key]");
+      expect(out, what).not.toContain(s);
+    }
+    const hook = "https://hooks.slack.com/services/T00000000/B00000000/" + "X".repeat(24);
+    expect(credentials(`post to ${hook}`)).toMatch(/hooks\.slack\.com\/services\/\[redacted:slack_webhook\]/);
+    const conn = `DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=${b64(86)}==;EndpointSuffix=core.windows.net`;
+    expect(credentials(conn)).toMatch(/AccountKey=\[redacted:azure_key\];EndpointSuffix/);
+    expect(credentials(`x-api-key: ${"0123456789abcdef".repeat(2)}`)).toBe("x-api-key: [redacted:api_key]");
+  });
+
+  it("redacts AWS secrets and session tokens in JSON and SDK forms, and JSON passwords", () => {
+    const secret = b64(40);
+    for (const t of [`{"SecretAccessKey":"${secret}"}`, `secretAccessKey: "${secret}"`, `{"aws_session_token": "${b64(160)}"}`, `{"sessionToken":"${b64(120)}"}`]) {
+      expect(credentials(t), t.slice(0, 20)).toContain("[redacted:aws_secret]");
+      expect(credentials(t)).not.toContain(secret.slice(0, 30));
+    }
+    expect(credentials('{"user":"bob","password":"hunter2!x"}')).toBe('{"user":"bob","password":"[redacted:password]"}');
+    expect(credentials('{\\"client_secret\\": \\"s3cr3t-value\\"}')).toContain("[redacted:password]");
+  });
+
+  it("leaves ordinary text alone", () => {
+    for (const t of ["the password field is required", '{"password_hint":"ask the admin"}', "release SG.1 notes", "AccountKey=short", "Bearer of bad news"]) {
+      expect(all(t), t).toBe(t);
+    }
+  });
+
+  it("stays fast on long inputs aimed at the new patterns", () => {
+    const inputs = ["-----BEGIN RSA PRIVATE KEY-----".repeat(3_300), '"password":"'.repeat(8_000), "AccountKey=".repeat(9_000), "hooks.slack.com/services/".repeat(4_000), "x-api-key: ".repeat(9_000), "SG.".repeat(30_000)];
+    for (const rule of BUILTIN_RULES) {
+      for (const text of inputs) {
+        const started = performance.now();
+        redactString(text, [rule], "x", []);
+        expect(performance.now() - started, `${rule.kind} on ${JSON.stringify(text.slice(0, 12))}…`).toBeLessThan(250);
+      }
+    }
   });
 });
