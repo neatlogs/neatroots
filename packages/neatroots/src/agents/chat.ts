@@ -56,7 +56,8 @@ function candidateDirs(): string[] {
   const h = os.homedir();
   const nvm = path.join(h, ".nvm", "versions", "node");
   const nvmBins = fs.existsSync(nvm) ? fs.readdirSync(nvm).sort().reverse().map((v) => path.join(nvm, v, "bin")) : [];
-  return [path.join(h, ".local", "bin"), path.join(h, ".claude", "local"), "/opt/homebrew/bin", "/usr/local/bin", path.join(h, ".bun", "bin"), path.join(h, ".volta", "bin"), path.join(h, ".npm-global", "bin"), ...nvmBins];
+  const system = process.env.NEATROOTS_TEST_NO_SYSTEM_BINS ? [] : ["/opt/homebrew/bin", "/usr/local/bin"];
+  return [path.join(h, ".local", "bin"), path.join(h, ".claude", "local"), ...nvmBins, path.join(h, ".bun", "bin"), path.join(h, ".volta", "bin"), path.join(h, ".npm-global", "bin"), ...system];
 }
 
 /** CLIs that ship inside a desktop app: ChatGPT's Codex. */

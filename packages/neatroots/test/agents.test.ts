@@ -5,12 +5,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { agentBin, signInHelp } from "../src/agents/chat.js";
 
 let home: string;
-const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, PATH: process.env.PATH, NEATROOTS_CODEX_BIN: process.env.NEATROOTS_CODEX_BIN };
+const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, PATH: process.env.PATH, NEATROOTS_CODEX_BIN: process.env.NEATROOTS_CODEX_BIN, NEATROOTS_TEST_NO_SYSTEM_BINS: process.env.NEATROOTS_TEST_NO_SYSTEM_BINS };
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-agents-"));
   process.env.HOME = home;
   if (process.platform === "win32") process.env.USERPROFILE = home;
   process.env.PATH = "/usr/bin:/bin";
+  process.env.NEATROOTS_TEST_NO_SYSTEM_BINS = "1";
   delete process.env.NEATROOTS_CODEX_BIN;
 });
 afterEach(() => {
