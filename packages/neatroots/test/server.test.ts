@@ -199,6 +199,10 @@ describe("server", () => {
     const text = (r: any) => JSON.parse(r.content[0].text);
     const search = text(await client.callTool({ name: "search_runs", arguments: { text: "4512" } }));
     expect(search.runs[0].trace_id).toBe(t);
+    const searchClean = text(await client.callTool({ name: "search_runs", arguments: { has_finding: false } }));
+    expect(searchClean.runs.map((r: any) => r.trace_id)).toContain(t);
+    const searchWithFinding = text(await client.callTool({ name: "search_runs", arguments: { has_finding: true } }));
+    expect(searchWithFinding.runs.map((r: any) => r.trace_id)).not.toContain(t);
     const outline = text(await client.callTool({ name: "get_run_outline", arguments: { trace_id: t.slice(0, 10) } }));
     expect(outline.outline).toContain("lookup_order");
     const toolId = batches[0].spans[1].spanId;
@@ -225,6 +229,9 @@ describe("server", () => {
     const get = async (q: string) => (await (await fetch(`${tb.url}/api/runs?${q}`, { headers: origin })).json()) as { runs: unknown[]; total: number; matching: number };
     expect(await get("")).toMatchObject({ total: 3, matching: 3 });
     expect(await get("has_finding=1")).toMatchObject({ total: 3, matching: 1 });
+    expect(await get("has_finding=true")).toMatchObject({ total: 3, matching: 1 });
+    expect(await get("has_finding=0")).toMatchObject({ total: 3, matching: 2 });
+    expect(await get("has_finding=false")).toMatchObject({ total: 3, matching: 2 });
     expect(await get("status=error")).toMatchObject({ total: 3, matching: 1 });
     // matching counts every match, not just the page; there was no such count, so with more matches
     // than the page holds (it asks for 150) the runs page read "150 matching" however many matched
