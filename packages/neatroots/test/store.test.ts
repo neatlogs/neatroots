@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Store } from "../src/store/db.js";
 import { traceReadback } from "../src/server/readback.js";
 import { batch, closeTrackedStores, hex, llmSpan, markerSpan, s, span, tmpHome, toolSpan, trackedStore } from "./helpers.js";
@@ -12,6 +12,7 @@ function store(): Store {
   return trackedStore(path.join(h, "data"));
 }
 afterEach(() => {
+  vi.restoreAllMocks();
   closeTrackedStores();
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
@@ -291,6 +292,35 @@ describe("store", () => {
     st.db.prepare("UPDATE runs SET received_ms = 1, ended_ms = 1, updated_ms = ? WHERE trace_id = ?").run(startedMs, traceId);
     expect(st.sweepDetached(14, Number.POSITIVE_INFINITY, startedMs).removed).toBe(0);
     expect(st.getRun(traceId)).toBeDefined();
+  });
+
+  it("gives ingest a gap between detached retention batches", () => {
+    const st = store();
+    const wait = vi.spyOn(Atomics, "wait").mockReturnValue("timed-out");
+    const pragma = vi.spyOn(st.db, "pragma");
+    for (let i = 0; i < 9; i++) st.ingest([batch([span({ traceId: hex(16), name: `old ${i}`, kind: "workflow" })])]);
+    st.db.prepare("UPDATE runs SET received_ms = 1, ended_ms = 1, updated_ms = 1").run();
+    expect(st.sweepDetached(14, Number.POSITIVE_INFINITY, Date.now()).removed).toBe(9);
+    expect(wait).toHaveBeenCalledTimes(3);
+    expect(pragma).toHaveBeenCalledWith("wal_checkpoint(PASSIVE)");
+  });
+
+  it("compacts detached retention in bounded FTS merges", () => {
+    const st = store();
+    const ids: string[] = [];
+    for (let i = 0; i < 40; i++) {
+      const traceId = hex(16);
+      ids.push(traceId);
+      st.ingest([batch([span({ traceId, name: `indexed ${i}`, kind: "workflow", attrs: [s("input.value", `unique-${i} `.repeat(400))] })])]);
+    }
+    st.deleteRuns(ids.slice(0, 20));
+    const prepare = vi.spyOn(st.db, "prepare");
+    const wait = vi.spyOn(Atomics, "wait").mockReturnValue("timed-out");
+    st.sweepDetached(999_999, st.storedBytes() - 1, Date.now() + 1);
+    const sql = prepare.mock.calls.map(([statement]) => statement);
+    expect(sql.some((statement) => statement.includes("span_fts(span_fts, rank)"))).toBe(true);
+    expect(sql.some((statement) => statement.includes("'optimize'"))).toBe(false);
+    expect(wait).toHaveBeenCalled();
   });
 
   it("trims to the size cap by removing the oldest runs, not every run", () => {
