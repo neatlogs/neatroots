@@ -184,7 +184,16 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
         return null;
       }
       const hits = selectSpans(t.spans, r.span).filter((s) => {
-        const v = r.field === "input" ? s.input : r.field === "output" ? s.output : r.field === "error" ? s.error : s.name;
+        const v =
+          r.field === "input"
+            ? s.input
+            : r.field === "output"
+              ? s.output
+              : r.field === "error"
+                ? s.error
+                : r.field === "finish_reason"
+                  ? s.finishReason
+                  : s.name;
         if (v === undefined || v === null) return false;
         return matchTexts(v).some((text) => {
           re.lastIndex = 0;
