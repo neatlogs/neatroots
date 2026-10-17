@@ -340,6 +340,58 @@ describe("store", () => {
     }
   });
 
+  it("evicts clean runs before a run that has open findings", () => {
+    const st = store();
+    const ids: string[] = [];
+    // Runs large enough that their own bytes dominate the store's fixed table overhead, so a
+    // small trim is covered by a couple of runs, not by everything the store holds.
+    for (let i = 0; i < 10; i++) {
+      const t = hex(16);
+      ids.push(t);
+      st.ingest([batch([span({ traceId: t, spanId: hex(8), name: `r${i}`, kind: "workflow", attrs: [s("input.value", `run ${i} ${"x".repeat(20_000)}`)] })])]);
+      st.db.prepare("UPDATE runs SET received_ms = ?, ended_ms = ? WHERE trace_id = ?").run(1_000 + i, 1_000 + i, t);
+    }
+    // The oldest run raised something; the rest are clean, and the next-oldest clean one is pinned.
+    st.insertFinding({ trace_id: ids[0], check_id: "c", check_kind: "rule", title: "F", probability: null, status: "raised", evidence_span_ids: [], detail: {}, model: null, triage_score: null, explanation_id: null });
+    st.setPinned(ids[1], true);
+    expect(st.getRun(ids[0])!.open_finding_count).toBe(1);
+    // Settle the search index first: a sweep compacts before measuring, and an unsettled index
+    // can shrink enough on its own that the size pass never runs.
+    st.db.prepare("INSERT INTO span_fts(span_fts) VALUES('optimize')").run();
+    const cap = Math.floor(st.storedBytes() * 0.9);
+    const removed = st.sweep(999_999, cap);
+    expect(removed).toBeGreaterThan(0);
+    expect(st.getRun(ids[0])).toBeDefined(); // the finding run outlived newer clean runs
+    expect(st.getRun(ids[1])).toBeDefined(); // pinned is still exempt
+    expect(st.getRun(ids[2])).toBeUndefined(); // the oldest clean run went first
+    expect(st.storedBytes()).toBeLessThanOrEqual(cap);
+  });
+
+  it("evicts a run with open findings when clean runs cannot free enough", () => {
+    const st = store();
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const t = hex(16);
+      ids.push(t);
+      st.ingest([batch([span({ traceId: t, spanId: hex(8), name: `r${i}`, kind: "workflow", attrs: [s("input.value", `run ${i} ${"x".repeat(3_000)}`)] })])]);
+      st.db.prepare("UPDATE runs SET received_ms = ?, ended_ms = ? WHERE trace_id = ?").run(1_000 + i, 1_000 + i, t);
+    }
+    st.insertFinding({ trace_id: ids[0], check_id: "c", check_kind: "rule", title: "F", probability: null, status: "raised", evidence_span_ids: [], detail: {}, model: null, triage_score: null, explanation_id: null });
+    // A cap of one byte: nothing but evicting every unpinned run satisfies it, findings included.
+    expect(st.sweep(999_999, 1)).toBe(3);
+    expect(st.getRun(ids[0])).toBeUndefined();
+  });
+
+  it("keeps the age pass value-blind: a run with open findings expires like any other", () => {
+    const st = store();
+    const t = hex(16);
+    st.ingest([batch([span({ traceId: t, spanId: hex(8), name: "r", kind: "workflow", attrs: [s("input.value", "old")] })])]);
+    st.insertFinding({ trace_id: t, check_id: "c", check_kind: "rule", title: "F", probability: null, status: "raised", evidence_span_ids: [], detail: {}, model: null, triage_score: null, explanation_id: null });
+    st.db.prepare("UPDATE runs SET received_ms = 1, ended_ms = 1 WHERE trace_id = ?").run(t);
+    expect(st.sweep(14, Number.POSITIVE_INFINITY)).toBe(1);
+    expect(st.getRun(t)).toBeUndefined();
+  });
+
   it("doesn't compact or trim a store that is under its cap", () => {
     const st = store();
     for (let i = 0; i < 10; i++) st.ingest([batch([span({ traceId: hex(16), spanId: hex(8), name: `r${i}`, kind: "workflow", attrs: [s("input.value", "hello ".repeat(200))] })])]);
