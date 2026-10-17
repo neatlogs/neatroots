@@ -385,11 +385,15 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
       } else if (!view.toolCalls && Array.isArray(view.output)) {
         const calls = (view.output as Record<string, Plain>[]).flatMap((m) =>
           Array.isArray(m?.tool_calls)
-            ? (m.tool_calls as Record<string, Plain>[]).map((c) => ({
-                ...(str(c.id) ? { id: str(c.id) } : {}),
-                name: str(c.name) ?? "tool",
-                arguments: c.arguments ?? null,
-              }))
+            ? (m.tool_calls as Record<string, Plain>[]).map((c) => {
+                const fn = c?.function && typeof c.function === "object" && !Array.isArray(c.function) ? (c.function as Record<string, Plain>) : undefined;
+                const id = str(c?.id);
+                return {
+                  ...(id ? { id } : {}),
+                  name: str(c?.name) ?? str(fn?.name) ?? "tool",
+                  arguments: maybeJson(c?.arguments ?? fn?.arguments) ?? null,
+                };
+              })
             : [],
         );
         if (calls.length) view.toolCalls = calls;

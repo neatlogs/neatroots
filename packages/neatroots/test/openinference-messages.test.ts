@@ -11,6 +11,31 @@ afterEach(async () => {
 const str = (key: string, v: string) => ({ key, value: { stringValue: v } });
 
 describe("OpenInference message contents and tool calls (#219)", () => {
+  it("resolves nested c.function name and JSON arguments when extracting view.toolCalls from output messages", async () => {
+    const { extractSemantic } = await import("../src/semantics/view.js");
+    const view = extractSemantic("LLM", {
+      "neatlogs.llm.output_messages": JSON.stringify([
+        {
+          role: "assistant",
+          tool_calls: [
+            {
+              id: "call_nested_1",
+              type: "function",
+              function: { name: "get_weather", arguments: '{"city":"Istanbul"}' },
+            },
+          ],
+        },
+      ]),
+    });
+    expect(view.toolCalls).toEqual([
+      {
+        id: "call_nested_1",
+        name: "get_weather",
+        arguments: { city: "Istanbul" },
+      },
+    ]);
+  });
+
   it("converts nested numeric-keyed attribute groups into sorted arrays in collectIndexed", () => {
     const rows = collectIndexed(
       {
