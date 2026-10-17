@@ -280,14 +280,23 @@ export class AgentChats {
     this.update(id, { state: "running" });
     const { args } = s.agent === "claude" ? this.claudeArgs(s, prompt) : this.codexArgs(s, prompt);
     log.debug(`chat ${id}: ${bin} ${args.slice(0, -1).join(" ")}`);
-    const child = spawn(bin, args, { cwd: s.cwd, env: { ...process.env, NEATLOGS_ENDPOINT: `http://localhost:${this.roots.config.port}` }, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    let child: ChildProcess;
+    try {
+      child = spawn(bin, args, { cwd: s.cwd, env: { ...process.env, NEATLOGS_ENDPOINT: `http://localhost:${this.roots.config.port}` }, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    } catch (err) {
+      this.emit(id, { kind: "error", text: (err as Error).message });
+      this.ended(id, "error");
+      return;
+    }
     this.running.set(id, child);
     let buf = "";
     let stderr = "";
     let sawResult = false;
-    child.stdout!.on("data", (b: Buffer) => {
+    child.stdout!.setEncoding("utf8");
+    child.stderr!.setEncoding("utf8");
+    child.stdout!.on("data", (chunk: string) => {
       if (!this.get(id)) return;
-      buf += b.toString();
+      buf += chunk;
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, nl).trim();
@@ -301,8 +310,8 @@ export class AgentChats {
         }
       }
     });
-    child.stderr!.on("data", (b: Buffer) => {
-      stderr = (stderr + b.toString()).slice(-4000);
+    child.stderr!.on("data", (chunk: string) => {
+      stderr = (stderr + chunk).slice(-4000);
     });
     await new Promise<void>((resolve) => {
       let done = false;
