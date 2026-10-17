@@ -258,6 +258,23 @@ function exceptionMessage(span: OtlpSpan): string | undefined {
   return undefined;
 }
 
+/**
+ * Anthropic (and Bedrock's Converse API) report input tokens without the prompt-cache reads and
+ * writes, and the Neatlogs SDK sends those apart as cache_read / cache_write. Count them as input
+ * there, so a cache-heavy run isn't undercounted. OpenAI-style providers already include cached
+ * tokens in the prompt count, so they're left alone.
+ */
+function addCachedInput(view: SpanView, attrs: Attrs): void {
+  const cached = (int(attrs["neatlogs.llm.token_count.cache_read"]) ?? 0) + (int(attrs["neatlogs.llm.token_count.cache_write"]) ?? 0);
+  if (cached <= 0) return;
+  const prompt = view.promptTokens ?? 0;
+  const excluded = /anthropic|bedrock|claude/i.test(view.provider ?? "") || prompt < cached;
+  if (!excluded) return;
+  const uncachedTotal = prompt + (view.completionTokens ?? 0);
+  view.promptTokens = prompt + cached;
+  view.totalTokens = Math.max(view.totalTokens ?? 0, uncachedTotal + cached);
+}
+
 export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
   const attrs = kvToPlain(span.attributes);
   const res = kvToPlain(resourceAttrs);
@@ -280,6 +297,7 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
     (view.promptTokens !== undefined || view.completionTokens !== undefined
       ? (view.promptTokens ?? 0) + (view.completionTokens ?? 0)
       : undefined);
+  addCachedInput(view, attrs);
 
   if (kind === "TOOL" || kind === "MCP_TOOL") {
     view.toolName = str(first(attrs, ["neatlogs.tool.name", "tool.name", "gen_ai.tool.name", "ai.toolCall.name", "traceloop.entity.name"])) ?? span.name;
