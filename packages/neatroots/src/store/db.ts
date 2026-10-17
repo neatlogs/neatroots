@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS logs (
   received_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS logs_trace ON logs (trace_id);
+CREATE INDEX IF NOT EXISTS logs_traceless_received ON logs (received_ms, id) WHERE trace_id IS NULL;
 
 CREATE TABLE IF NOT EXISTS plans (
   id TEXT PRIMARY KEY,
@@ -376,6 +377,7 @@ export const SEARCH_LIMIT = { head: 150_000, tail: 50_000 };
 const SEARCH_INDEX_VERSION = 2;
 /** A store over its size cap is trimmed to this share of the cap, so it isn't trimmed every hour. */
 export const RETENTION_LOW_WATER = 0.9;
+const RETENTION_LOG_TRIM_BATCH_SIZE = 256;
 
 /** Free text as an FTS5 query: each word quoted, so operators and punctuation match literally. */
 function ftsQuery(text: string): string {
@@ -1289,6 +1291,7 @@ export class Store {
   /** Deletes the oldest unpinned runs past the age or size limit. Returns how many runs were removed. */
   sweep(maxAgeDays: number, maxBytes: number): number {
     let removed = 0;
+    let removedLogs = 0;
     // Skip the age sweep for a non-positive age: a cutoff of "now" (days = 0)
     // would delete every unpinned run. maxBytes pruning below still runs.
     if (Number.isFinite(maxAgeDays) && maxAgeDays >= 1) {
@@ -1298,26 +1301,74 @@ export class Store {
         .all(cutoff) as { trace_id: string }[];
       this.deleteRuns(old.map((r) => r.trace_id));
       removed += old.length;
+      removedLogs += this.db.prepare("DELETE FROM logs WHERE trace_id IS NULL AND received_ms < ?").run(cutoff).changes;
     }
     // Measure what the database holds, not the file size: SQLite keeps the file (and WAL) at its
     // high-water mark after a delete and reuses the freed pages, so the file size never drops
     // after a delete and measuring it would delete every unpinned run.
-    let size = this.storedBytes();
+    // Age pruning above can remove blobs; log trimming and FTS compaction below cannot.
+    // Read the blob directory once, then measure actual SQLite pages after each bounded batch.
+    const blobBytes = this.blobs.size();
+    let size = this.databaseBytes() + blobBytes;
     if (size > maxBytes) {
       // Deleting from the full-text index leaves "deleted" markers until it is compacted, so the
       // size can read high. Compact (once per sweep, and only when over the cap) before trusting it.
       this.compactSearchIndex();
-      size = this.storedBytes();
+      size = this.databaseBytes() + blobBytes;
     }
     if (size > maxBytes) {
-      // Trim the oldest unpinned runs down to a low-water mark below the cap, so a store sitting
-      // at its cap isn't trimmed (and compacted) again on every hourly sweep.
-      const oldest = this.oldestRunsCovering(size - maxBytes * RETENTION_LOW_WATER, size);
-      this.deleteRuns(oldest);
-      removed += oldest.length;
+      // Trim to a low-water mark below the cap, reclaiming trace-less logs before unrelated runs.
+      // This keeps a store sitting at its cap from being trimmed again on every hourly sweep.
+      const target = maxBytes * RETENTION_LOW_WATER;
+      removedLogs += this.trimTracelessLogs(target, blobBytes);
+      size = this.databaseBytes() + blobBytes;
+      if (size > maxBytes) {
+        const oldest = this.oldestRunsCovering(size - target, size, blobBytes);
+        this.deleteRuns(oldest);
+        removed += oldest.length;
+      }
     }
-    if (removed) this.db.pragma("wal_checkpoint(TRUNCATE)");
+    if (removed || removedLogs) this.db.pragma("wal_checkpoint(TRUNCATE)");
     return removed;
+  }
+
+  /** Removes oldest trace-less logs until storage reaches the low-water target or none remain. */
+  private trimTracelessLogs(target: number, blobBytes: number): number {
+    let removed = 0;
+    let size = this.databaseBytes() + blobBytes;
+    while (size > target) {
+      const oldest = this.oldestTracelessLogsCovering(size - target);
+      if (!oldest.length) break;
+      const deleted = this.db.prepare("DELETE FROM logs WHERE id IN (SELECT value FROM json_each(?))").run(JSON.stringify(oldest)).changes;
+      if (!deleted) break;
+      removed += deleted;
+      size = this.databaseBytes() + blobBytes;
+    }
+    return removed;
+  }
+
+  /** The oldest trace-less logs in one bounded batch, enough to cover estimated `excess`. */
+  private oldestTracelessLogsCovering(excess: number): number[] {
+    // .all() completes the SELECT before trimTracelessLogs issues its DELETE; LIMIT bounds rows held here.
+    // The partial received_ms/id index makes each batch an ordered prefix scan, without sorting
+    // or visiting the remaining logs (including traced logs owned by runs).
+    const rows = this.db
+      .prepare(
+        `SELECT id, octet_length(COALESCE(trace_id, '')) + octet_length(COALESCE(span_id, '')) +
+          octet_length(COALESCE(time_ns, '')) + octet_length(COALESCE(severity, '')) + octet_length(COALESCE(body, '')) +
+          octet_length(COALESCE(attributes, '')) + octet_length(COALESCE(resource_id, '')) AS w
+         FROM logs INDEXED BY logs_traceless_received WHERE trace_id IS NULL ORDER BY received_ms ASC, id ASC LIMIT ?`,
+      )
+      .all(RETENTION_LOG_TRIM_BATCH_SIZE) as { id: number; w: number }[];
+    if (!rows.length) return [];
+    const picked: number[] = [];
+    let freed = 0;
+    for (const row of rows) {
+      picked.push(row.id);
+      freed += Math.max(row.w, 1);
+      if (freed >= excess) break;
+    }
+    return picked;
   }
 
   /**
@@ -1327,7 +1378,7 @@ export class Store {
    * actually frees it: the newest run that references it, and never one a pinned run still uses.
    * Returns at least one run while any unpinned run exists.
    */
-  private oldestRunsCovering(excess: number, stored: number): string[] {
+  private oldestRunsCovering(excess: number, stored: number, blobTotal: number): string[] {
     const rowBytes = `octet_length(s.attributes) + octet_length(s.events) + octet_length(s.links) + IFNULL(octet_length(s.extra), 0) + IFNULL(octet_length(s.input_preview), 0) + IFNULL(octet_length(s.output_preview), 0) + octet_length(s.name)`;
     // A big value lives in a blob file but its text is also in the search index, so the
     // indexed text counts toward the run too.
@@ -1346,7 +1397,6 @@ export class Store {
     const shas = rows.map((r) => (r.b ? [...new Set(r.b.match(/[0-9a-f]{64}/g) ?? [])] : []));
     const lastRef = new Map<string, number>();
     shas.forEach((list, i) => list.forEach((sha) => lastRef.set(sha, rows[i].pinned ? Infinity : Math.max(lastRef.get(sha) ?? -1, i))));
-    const blobTotal = this.blobs.size();
     const rowTotal = rows.reduce((n, r) => n + r.w, 0);
     // Every table and index keeps at least its root page however many runs are deleted.
     const fixed = (this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_schema WHERE rootpage > 0").get() as { n: number }).n * (this.db.pragma("page_size", { simple: true }) as number);
@@ -1370,10 +1420,14 @@ export class Store {
 
   /** Bytes of data actually stored: database pages in use (not free pages) plus payload blobs. */
   storedBytes(): number {
+    return this.databaseBytes() + this.blobs.size();
+  }
+
+  private databaseBytes(): number {
     const pages = this.db.pragma("page_count", { simple: true }) as number;
     const free = this.db.pragma("freelist_count", { simple: true }) as number;
     const pageSize = this.db.pragma("page_size", { simple: true }) as number;
-    return (pages - free) * pageSize + this.blobs.size();
+    return (pages - free) * pageSize;
   }
 
   diskBytes(): number {
