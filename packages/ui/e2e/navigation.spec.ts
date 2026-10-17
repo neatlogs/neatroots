@@ -9,6 +9,7 @@ test.describe("app shell", () => {
       ["runs", "Runs"],
       ["search", "Search"],
       ["checks", "Checks"],
+      ["finding reviews", "Finding reviews"],
       ["coding agents", "Coding agents"],
       ["add data", "Add data"],
       ["settings", "Settings"],

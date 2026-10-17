@@ -25,6 +25,7 @@ const NAV: { href: string; page: string; title: string; icon: IconSvgElement }[]
   { href: "#/runs", page: "runs", title: "runs", icon: BarChartHorizontalIcon },
   { href: "#/search", page: "search", title: "search", icon: Search01Icon },
   { href: "#/checks", page: "checks", title: "checks", icon: SearchAreaIcon },
+  { href: "#/reviews", page: "reviews", title: "finding reviews", icon: SearchAreaIcon },
   { href: "#/agents", page: "agents", title: "coding agents", icon: BubbleChatIcon },
   { href: "#/add-data", page: "add-data", title: "add data", icon: DatabaseImportIcon },
   { href: "#/settings", page: "settings", title: "settings", icon: Settings02Icon },

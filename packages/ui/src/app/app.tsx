@@ -5,6 +5,7 @@ import { PageErrorBoundary } from "@/components/page-error-boundary";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ChecksPage } from "@/features/checks/_components/checks-page";
+import { ReviewsPage } from "@/features/reviews/reviews-page";
 import { HomePage } from "@/features/home/_components/home-page";
 import { RunDetail } from "@/features/runs/_components/run-detail";
 import { RunsPage } from "@/features/runs/_components/runs-page";
@@ -63,6 +64,8 @@ export function App() {
           <PageErrorBoundary key={route.join("/")}>
           {page === "checks" ? (
             <ChecksPage />
+          ) : page === "reviews" ? (
+            <ReviewsPage query={query} />
           ) : page === "search" ? (
             <SearchPage query={query} />
           ) : page === "agents" ? (

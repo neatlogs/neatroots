@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { BlobStore } from "./blobs.js";
+import { initReviews } from "./reviews.js";
 import { sha256, newId } from "../util/ids.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
 import { kvToPlain, type KeyValue, type OtlpResource, type OtlpScope, type OtlpSpan, type Plain, type ResourceSpansBatch } from "../otlp/types.js";
@@ -422,8 +423,10 @@ export class Store {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("busy_timeout = 5000");
+    this.db.pragma("foreign_keys = ON");
     this.db.exec(SCHEMA);
     this.migrate();
+    initReviews(this.db);
     this.blobs = new BlobStore(path.join(dir, "blobs"));
     const row = this.db.prepare("SELECT MAX(seq) AS s FROM spans").get() as { s: number | null };
     this.seq = row.s ?? 0;
