@@ -50,6 +50,10 @@ export class HttpTraceError extends Error {
 // payload becomes a clean validation error instead of a crash.
 const MAX_DEPTH = 256;
 
+// Fields the converter stores as text. Anything else (a JS Error sent as `error: err` arrives as {})
+// would fail the SQLite bind with a 500 or be stored as "[object Object]".
+const STRING_FIELDS = ["kind", "project", "model", "provider", "tool_name", "error", "session_id", "sessionId", "end_user_id", "endUserId", "user_id"] as const;
+
 function validate(node: unknown, path: string, errors: Record<string, string>, depth = 0): void {
   if (!node || typeof node !== "object" || Array.isArray(node)) {
     errors[path || "body"] = "must be an object";
@@ -77,7 +81,7 @@ function validate(node: unknown, path: string, errors: Record<string, string>, d
   if (n.score !== undefined && (typeof n.score !== "number" || !Number.isFinite(n.score))) errors[`${path}score`] = "must be a finite number";
   if (n.duration_ms !== undefined && (typeof n.duration_ms !== "number" || !Number.isFinite(n.duration_ms))) errors[`${path}duration_ms`] = "must be a finite number";
   if (n.status !== undefined && !["OK", "ERROR", "ok", "error"].includes(String(n.status))) errors[`${path}status`] = "must be OK or ERROR";
-  if (n.kind !== undefined && typeof n.kind !== "string") errors[`${path}kind`] = "must be a string";
+  for (const k of STRING_FIELDS) if (n[k] !== undefined && n[k] !== null && typeof n[k] !== "string") errors[`${path}${k}`] = "must be a string";
   if (n.tags !== undefined && (!Array.isArray(n.tags) || n.tags.some((t) => typeof t !== "string"))) errors[`${path}tags`] = "must be an array of strings";
   if (n.logs !== undefined) {
     if (!Array.isArray(n.logs)) errors[`${path}logs`] = "must be an array";
