@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import type { Roots } from "../core.js";
@@ -65,6 +65,19 @@ CREATE INDEX IF NOT EXISTS replays_new ON replays (new_trace_id);
 
 type Row = Omit<Replay, "overrides"> & { overrides: string };
 
+/** Signals a replay command and everything it started outside Windows. */
+function killReplay(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.pid && process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // The process group is already gone; fall back to the shell itself.
+    }
+  }
+  child.kill(signal);
+}
+
 /** Chat messages as neatroots' LLM client takes them; tool turns become plain text. */
 export function toChat(messages: Plain | undefined): ChatMessage[] {
   if (!Array.isArray(messages)) return typeof messages === "string" ? [{ role: "user", content: messages }] : [];
@@ -85,6 +98,9 @@ export function toChat(messages: Plain | undefined): ChatMessage[] {
 }
 
 export class Replays {
+  private readonly running = new Map<string, { replay: Replay; stop: () => void }>();
+  private closed = false;
+
   constructor(private readonly roots: Roots) {
     roots.store.db.exec(SCHEMA);
     // A replay runs in this process (a child command or an HTTP call); it cannot
@@ -153,9 +169,20 @@ export class Replays {
   }
 
   private finish(r: Replay, patch: Partial<Replay>): Replay {
+    if (r.state !== "running") return r;
     Object.assign(r, patch, { finished_ms: Date.now() });
     this.save(r);
     return r;
+  }
+
+  /** Stops every whole-agent replay before neatroots closes its store. */
+  close(): void {
+    this.closed = true;
+    for (const { replay, stop } of this.running.values()) {
+      this.finish(replay, { state: "failed", error: "interrupted because neatroots stopped" });
+      stop();
+    }
+    this.running.clear();
   }
 
   /** Re-sends one LLM span's messages (or edited ones) and stores the answer as a new run. */
@@ -216,6 +243,7 @@ export class Replays {
 
   /** Re-runs the whole agent with overrides. Returns at once; the replay finishes in the background. */
   startRun(traceId: string, overrides: ReplayOverrides = {}): { replay: Replay; done: Promise<Replay> } {
+    if (this.closed) throw new Error("neatroots is stopping");
     const t = loadTrace(this.roots.store, traceId);
     if (!t.run) throw new Error("run not found");
     const project = t.run.project;
@@ -242,11 +270,13 @@ export class Replays {
     try {
       let tail = "";
       if (target.url) {
+        const controller = new AbortController();
+        this.running.set(r.id, { replay: r, stop: () => controller.abort() });
         const res = await fetch(target.url, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ replay_id: r.id, replay_of: r.trace_id, input, model: o.model ?? null, system_prompt: o.system ?? null }),
-          signal: AbortSignal.timeout(15 * 60_000),
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15 * 60_000)]),
         });
         tail = (await res.text()).slice(-3000);
         if (!res.ok) throw new Error(`replay endpoint answered ${res.status}: ${tail.slice(0, 300)}`);
@@ -262,25 +292,43 @@ export class Replays {
         };
         if (o.model) env.NEATROOTS_REPLAY_MODEL = o.model;
         if (o.system) env.NEATROOTS_REPLAY_SYSTEM_PROMPT = o.system;
-        const { code, error } = await new Promise<{ code: number | null; error?: Error }>((resolve) => {
-          const child = spawn(target.command!, { shell: true, cwd: target.cwd, env });
+        const { code, error, timedOut } = await new Promise<{ code: number | null; error?: Error; timedOut: boolean }>((resolve) => {
+          const child = spawn(target.command!, { shell: true, cwd: target.cwd, env, detached: process.platform !== "win32" });
+          let timedOut = false;
+          let killTimer: NodeJS.Timeout | undefined;
+          const stop = (signal: NodeJS.Signals = "SIGTERM") => {
+            killReplay(child, signal);
+            if (signal === "SIGTERM") {
+              killTimer = setTimeout(() => killReplay(child, "SIGKILL"), 2_000);
+              killTimer.unref();
+            }
+          };
+          this.running.set(r.id, { replay: r, stop: () => stop("SIGKILL") });
           const keep = (b: Buffer) => {
             tail = (tail + b.toString()).slice(-6000);
           };
           child.stdout.on("data", keep);
           child.stderr.on("data", keep);
-          const timer = setTimeout(() => child.kill("SIGTERM"), 15 * 60_000);
+          const timer = setTimeout(() => {
+            timedOut = true;
+            stop();
+          }, 15 * 60_000);
+          timer.unref();
           child.on("close", (c) => {
             clearTimeout(timer);
-            resolve({ code: c });
+            if (!timedOut) clearTimeout(killTimer);
+            resolve({ code: c, timedOut });
           });
           // A command that can't start (its folder was deleted, say) emits "error" instead of "close";
           // unhandled, that event would stop the whole neatroots process.
           child.on("error", (e) => {
             clearTimeout(timer);
-            resolve({ code: null, error: e });
+            clearTimeout(killTimer);
+            resolve({ code: null, error: e, timedOut });
           });
         });
+        if (r.state !== "running") return r;
+        if (timedOut) return this.finish(r, { state: "failed", error: "the agent exceeded the 15-minute replay limit", log_tail: tail || null });
         if (error) {
           throw new Error(
             target.cwd && !fs.existsSync(target.cwd)
@@ -292,6 +340,7 @@ export class Replays {
       }
       // Spans arrive on the SDK's flush interval; give the run a moment to land.
       for (let i = 0; i < 20 && !linked; i++) {
+        if (r.state !== "running") return r;
         await new Promise((res) => setTimeout(res, 500));
         if (!linked) {
           const fresh = this.roots.store.listRuns({ project, sinceMs: started - 500, limit: 5 }).filter((x) => x.trace_id !== r.trace_id && !this.originOf(x.trace_id));
@@ -302,6 +351,7 @@ export class Replays {
       const run = this.roots.store.getRun(linked);
       return this.finish(r, { state: "succeeded", new_trace_id: linked, output_preview: run?.output_preview ?? null, log_tail: tail || null });
     } finally {
+      this.running.delete(r.id);
       off();
     }
   }

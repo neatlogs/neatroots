@@ -110,6 +110,7 @@ export class Roots {
 
   close(): void {
     clearInterval(this.sweeper);
+    this.replays.close();
     this.laya.stop();
     this.store.close();
   }
