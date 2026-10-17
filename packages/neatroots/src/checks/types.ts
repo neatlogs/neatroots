@@ -54,6 +54,10 @@ const Base = {
 };
 
 export const RuleSpec = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("cache_reuse"),
+    min_calls: z.number().int().min(3).default(3),
+  }).strict(),
   z
     .object({
       type: z.literal("repeat"),

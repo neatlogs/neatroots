@@ -109,6 +109,62 @@ function matchTexts(v: unknown): string[] {
 export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, untrusted = false): RuleHit | null {
   const r = check.rule;
   switch (r.type) {
+    case "cache_reuse": {
+      // Different providers/models have separate cache lifecycles. Exclude each group's
+      // first chronological call even when its counts are missing (never its first arrival).
+      const groups = new Map<string, SpanInfo[]>();
+      const calls = t.spans.filter((s) => s.kind === "LLM")
+        .sort((a, b) => a.startMs - b.startMs || a.id.localeCompare(b.id));
+      for (const s of calls) {
+        // Unknown identities cannot share a warmup or borrow another model's reads.
+        if (!s.provider?.trim() || !s.model?.trim()) continue;
+        const key = JSON.stringify([s.provider, s.model]);
+        const group = groups.get(key) ?? [];
+        group.push(s);
+        groups.set(key, group);
+      }
+      const evidence: SpanInfo[] = [];
+      const historicalEvidence: SpanInfo[] = [];
+      let writes = 0, reads = 0;
+      let historicalWrites = 0, historicalReads = 0;
+      for (const group of groups.values()) {
+        let measured = 0, write = 0, read = 0, creations = 0;
+        const missed: SpanInfo[] = [];
+        let lastFiring: { count: number; write: number; read: number } | undefined;
+        for (let i = 0; i < group.length; i++) {
+          const s = group[i];
+          if (s.cacheReadTokens === undefined || s.cacheWriteTokens === undefined) continue;
+          measured++;
+          if (i > 0) {
+            write += s.cacheWriteTokens;
+            read += s.cacheReadTokens;
+            // A first creation after uncached calls has not yet had a chance to be reused.
+            if (s.cacheWriteTokens > 0 && s.cacheReadTokens === 0 && creations > 0) missed.push(s);
+          }
+          if (s.cacheWriteTokens > 0) creations++;
+          // Remember a real chronological firing prefix, without copying it on every call.
+          if (measured >= r.min_calls && write > read && missed.length) {
+            lastFiring = { count: missed.length, write, read };
+          }
+        }
+        if (!lastFiring) continue;
+        if (write > read) {
+          writes += write;
+          reads += read;
+          evidence.push(...missed);
+        } else {
+          historicalWrites += lastFiring.write;
+          historicalReads += lastFiring.read;
+          historicalEvidence.push(...missed.slice(0, lastFiring.count));
+        }
+      }
+      const firing = evidence.length > 0;
+      const found = firing ? evidence : historicalEvidence;
+      if (!found.length) return null;
+      found.sort((a, b) => a.startMs - b.startMs || a.id.localeCompare(b.id));
+      return { firing, evidenceSpanIds: found.map((s) => s.id),
+        params: { cache_write: String(firing ? writes : historicalWrites), cache_read: String(firing ? reads : historicalReads) } };
+    }
     case "repeat": {
       const spans = selectSpans(t.spans, r.span).sort((a, b) => a.endMs - b.endMs);
       if (spans.length < r.at_least) return null;
