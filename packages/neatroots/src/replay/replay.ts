@@ -85,6 +85,8 @@ export function toChat(messages: Plain | undefined): ChatMessage[] {
 }
 
 export class Replays {
+  // Overlap is remembered for the entire replay, even if its neighbour finishes first.
+  private readonly replayWindows = new Map<string, { overlapped: boolean }>();
   constructor(private readonly roots: Roots) {
     roots.store.db.exec(SCHEMA);
     // A replay runs in this process (a child command or an HTTP call); it cannot
@@ -148,11 +150,14 @@ export class Replays {
       created_ms: Date.now(),
       finished_ms: null,
     };
+    for (const window of this.replayWindows.values()) window.overlapped = true;
+    this.replayWindows.set(r.id, { overlapped: this.replayWindows.size > 0 });
     this.save(r);
     return r;
   }
 
   private finish(r: Replay, patch: Partial<Replay>): Replay {
+    this.replayWindows.delete(r.id);
     Object.assign(r, patch, { finished_ms: Date.now() });
     this.save(r);
     return r;
@@ -231,11 +236,27 @@ export class Replays {
 
   private async runAgent(r: Replay, project: string, target: { command?: string; cwd?: string; url?: string }, input: string, o: ReplayOverrides): Promise<Replay> {
     let linked: string | null = null;
-    // Only a run carrying this replay's exact resource attribute can be linked.
+    const appeared = new Set<string>();
+    const candidates = new Set<string>();
+    const seenIds = new Map<string, Set<Plain>>();
+    const window = this.replayWindows.get(r.id)!;
+    // Only inspect runs first seen during this replay. A root may arrive after its children.
     const off = this.roots.bus.on("trace", (u) => {
-      if (linked || !u.runCreated) return;
-      const res = u.spans[0] ? this.roots.store.getOtlpSpan(u.traceId, u.spans[0].row.span_id)?.resource : undefined;
-      if (res && attr(res.attributes, "neatroots.replay.id") === r.id) linked = u.traceId;
+      if (linked) return;
+      if (u.runCreated) appeared.add(u.traceId);
+      if (!appeared.has(u.traceId)) return;
+      const run = this.roots.store.getRun(u.traceId);
+      const root = run?.root_span_id ? this.roots.store.getOtlpSpan(u.traceId, run.root_span_id) : undefined;
+      const ids = u.spans.map((s) => this.roots.store.getOtlpSpan(u.traceId, s.row.span_id))
+        .map((s) => attr(s?.resource.attributes, "neatroots.replay.id"));
+      ids.push(attr(root?.span.attributes, "neatroots.replay.id"));
+      const explicit = seenIds.get(u.traceId) ?? new Set<Plain>();
+      for (const id of ids) if (id !== undefined) explicit.add(id);
+      seenIds.set(u.traceId, explicit);
+      if (explicit.size) {
+        candidates.delete(u.traceId);
+        if (explicit.size === 1 && explicit.has(r.id)) linked = u.traceId;
+      } else if (run?.project === project) candidates.add(u.traceId);
     });
     try {
       let tail = "";
@@ -288,10 +309,11 @@ export class Replays {
         }
         if (code !== 0) log.info(`replay ${r.id}: the agent exited with ${code}`);
       }
-      // Spans arrive on the SDK's flush interval; wait for this replay's resource ID.
+      // Prefer an explicit ID throughout the SDK flush window, even after a candidate appears.
       for (let i = 0; i < 20 && !linked; i++) {
         await new Promise((res) => setTimeout(res, 500));
       }
+      if (!linked && !window.overlapped && candidates.size === 1) linked = candidates.values().next().value!;
       if (!linked) return this.finish(r, { state: "failed", error: "the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?", log_tail: tail || null });
       const run = this.roots.store.getRun(linked);
       return this.finish(r, { state: "succeeded", new_trace_id: linked, output_preview: run?.output_preview ?? null, log_tail: tail || null });

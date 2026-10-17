@@ -36,6 +36,8 @@ function accelerateReplayPolling(onPoll: (poll: number) => void) {
 
 function ingestReplayRoot(tr: TestRoots, traceId: string, replayId?: string) {
   const root = batch([span({ traceId, name: "support", kind: "workflow" })], "support-agent");
+  root.spans[0].startTimeUnixNano = String(BigInt(Date.now()) * 1_000_000n);
+  root.spans[0].endTimeUnixNano = String(BigInt(root.spans[0].startTimeUnixNano) + 1_000_000n);
   if (replayId) root.resource.attributes.push(s("neatroots.replay.id", replayId));
   tr.roots.ingest([root]);
 }
@@ -255,7 +257,7 @@ describe("replay", () => {
     }
   });
 
-  it.each(["missing", "wrong"] as const)("does not link an HTTP target with %s replay correlation", async (mode) => {
+  it.each(["missing", "wrong"] as const)("handles an HTTP target with %s resource replay correlation", async (mode) => {
     t = await makeRoots({ noEngine: true, serve: true });
     const x = seed(t);
     const endpoint = await startHttpReplayEndpoint(t, (id) => mode === "wrong" ? "other-" + id : undefined);
@@ -266,7 +268,7 @@ describe("replay", () => {
       const r = await started.done;
       expect(endpoint.request()).toMatchObject({ replay_id: started.replay.id, replay_of: x.traceId });
       expect(endpoint.traceId()).toBeTruthy();
-      expect(r).toMatchObject({
+      expect(r).toMatchObject(mode === "missing" ? { state: "succeeded", new_trace_id: endpoint.traceId(), error: null } : {
         state: "failed",
         new_trace_id: null,
         error: "the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?",
@@ -278,7 +280,7 @@ describe("replay", () => {
       await endpoint.close();
     }
   });
-  it("fails with the existing no-new-run message when only uncorrelated same-project telemetry arrives", async () => {
+  it("links one uncorrelated same-project candidate only after the full polling window", async () => {
     t = await makeRoots({ noEngine: true });
     const x = seed(t);
     const decoy = hex(16);
@@ -288,8 +290,7 @@ describe("replay", () => {
     try {
       t.roots.config.rerun["support-agent"] = { command: "node -e 0" };
       const r = await t.roots.replays.startRun(x.traceId).done;
-      expect(r).toMatchObject({ state: "failed", new_trace_id: null });
-      expect(r.error).toBe("the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?");
+      expect(r).toMatchObject({ state: "succeeded", new_trace_id: decoy, error: null });
       expect(ticks.polls()).toBe(20);
     } finally {
       ticks.restore();
