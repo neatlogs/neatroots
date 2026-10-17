@@ -56,6 +56,32 @@ function runCli(args: string[], home: string) {
 }
 
 describe("reproducible offline checks", () => {
+  it("names the actual working-directory boundary when the CLI runs in a repository subdirectory", () => {
+    const checks = writeCheck("cwd-boundary/checks", "rules.yaml", repoRules);
+    const cwd = path.join(dir, "cwd-boundary", "subdir");
+    fs.mkdirSync(cwd, { recursive: true });
+    const link = path.join(cwd, "linked-checks");
+    fs.symlinkSync(checks, link, process.platform === "win32" ? "junction" : "dir");
+    try {
+      const local = path.join(cwd, "checks");
+      fs.mkdirSync(local);
+      fs.writeFileSync(path.join(local, "rules.yaml"), repoRules);
+      for (const [folder, lock] of [["../checks", "checks.lock.json"], ["linked-checks", "checks.lock.json"], ["checks", "../checks.lock.json"], ["checks", "linked-checks/nested/checks.lock.json"]]) {
+        const result = spawnSync(process.execPath, ["--import", "tsx", path.join(packageRoot, "src/cli.ts"), "check", trace,
+          "--checks", folder, "--reproducible", "--lockfile", lock], {
+          cwd, env: { ...process.env, NEATROOTS_HOME: path.join(dir, "boundary-home") }, encoding: "utf8",
+        });
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain(`must be inside the current working directory (${cwd})`);
+        expect(result.stderr).not.toContain("current repository");
+      }
+      expect(fs.existsSync(path.join(cwd, "checks.lock.json"))).toBe(false);
+      expect(fs.existsSync(path.join(checks, "nested"))).toBe(false);
+    } finally {
+      fs.unlinkSync(link);
+    }
+  });
+
   it.each([false, true])("keeps repository rules under timed evaluation (reproducible=%s)", (reproducible) => {
     const checks = writeCheck(`timed-${reproducible}`, "rules.yaml", repoRules.replace("repo-clean", "repo-z").replace("repo-other", "repo-a"));
     // Observe real evaluation without stubbing it: retaining a rule's source across sorting
@@ -121,7 +147,7 @@ describe("reproducible offline checks", () => {
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-outside-checks-"));
     try {
       fs.writeFileSync(path.join(outside, "rule.yaml"), repoRules);
-      expect(() => checkFiles([trace], { dirs: [outside], reproducible: true })).toThrow(/must be inside the current repository/);
+      expect(() => checkFiles([trace], { dirs: [outside], reproducible: true })).toThrow(`must be inside the current working directory (${path.resolve(process.cwd())})`);
     } finally {
       fs.rmSync(outside, { recursive: true, force: true });
     }
@@ -133,9 +159,9 @@ describe("reproducible offline checks", () => {
     try {
       fs.writeFileSync(path.join(outside, "rule.yaml"), repoRules);
       fs.symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir");
-      expect(() => checkFiles([trace], { dirs: [link], reproducible: true })).toThrow(/must be inside the current repository/);
+      expect(() => checkFiles([trace], { dirs: [link], reproducible: true })).toThrow(`must be inside the current working directory (${path.resolve(process.cwd())})`);
       const manifest = { version: 1 as const, directories: [], checks: [], rules: [] };
-      expect(() => recordOrVerifyCheckManifest(path.join(link, "nested", "checks.lock.json"), manifest)).toThrow(/must be inside the current repository/);
+      expect(() => recordOrVerifyCheckManifest(path.join(link, "nested", "checks.lock.json"), manifest)).toThrow(`must be inside the current working directory (${path.resolve(process.cwd())})`);
       expect(fs.existsSync(path.join(outside, "nested"))).toBe(false);
     } finally {
       if (fs.existsSync(link)) fs.unlinkSync(link);

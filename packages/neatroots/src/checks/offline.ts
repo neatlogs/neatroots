@@ -65,10 +65,10 @@ function repositoryPath(value: string, label: string): { absolute: string; relat
   const absolute = path.resolve(root, value);
   const relative = path.relative(root, absolute);
   if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error(`${label} must be inside the current repository`);
+    throw new Error(`${label} must be inside the current working directory (${root})`);
   }
   // Resolve the nearest existing ancestor too: a lexical child may be a symlink
-  // (or Windows junction) to machine-local files outside the repository.
+  // (or Windows junction) to machine-local files outside the working directory.
   let ancestor = absolute;
   while (!fs.existsSync(ancestor)) {
     const parent = path.dirname(ancestor);
@@ -77,7 +77,7 @@ function repositoryPath(value: string, label: string): { absolute: string; relat
   }
   const realRelative = path.relative(fs.realpathSync(root), fs.realpathSync(ancestor));
   if (realRelative === ".." || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) {
-    throw new Error(`${label} must be inside the current repository`);
+    throw new Error(`${label} must be inside the current working directory (${root})`);
   }
   return { absolute, relative: relative.split(path.sep).join("/") };
 }
