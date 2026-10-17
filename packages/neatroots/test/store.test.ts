@@ -98,6 +98,29 @@ describe("store", () => {
     expect(st.blobs.size()).toBe(0);
   });
 
+  it("reclaims unreferenced and temporary blob files when the store opens", () => {
+    const home = tmpHome();
+    homes.push(home);
+    const dir = path.join(home, "data");
+    const st = trackedStore(dir);
+    const traceId = hex(16);
+    st.ingest([batch([span({ traceId, name: "big", kind: "tool", attrs: [s("payload", "kept".repeat(10_000))] })])]);
+    const row = st.db.prepare("SELECT blobs FROM spans WHERE trace_id = ?").get(traceId) as { blobs: string };
+    const [kept] = JSON.parse(row.blobs) as string[];
+    st.close();
+
+    const orphan = "f".repeat(64);
+    const orphanDir = path.join(dir, "blobs", orphan.slice(0, 2));
+    fs.mkdirSync(orphanDir, { recursive: true });
+    fs.writeFileSync(path.join(orphanDir, orphan.slice(2)), "orphan");
+    fs.writeFileSync(path.join(orphanDir, `${orphan.slice(2)}.123.tmp`), "partial");
+
+    const reopened = trackedStore(dir);
+    expect(reopened.blobs.get(kept)).toBe("kept".repeat(10_000));
+    expect(reopened.blobs.sizeOf(orphan)).toBe(0);
+    expect(fs.existsSync(path.join(orphanDir, `${orphan.slice(2)}.123.tmp`))).toBe(false);
+  });
+
   it("reclaims superseded payloads through repeated updates and run deletion", () => {
     const st = store();
     const traceId = hex(16);
