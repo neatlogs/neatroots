@@ -24,7 +24,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 cp.spawnSync = (cmd, args, options) => {
   const stage = cmd === 'git' ? args.includes('fetch') ? 'fetch' : args.includes('checkout') ? 'checkout' : 'init' : 'installer';
-  fs.appendFileSync(process.env.TEST_CALLS, JSON.stringify({stage, shell: options.shell, stdio: options.stdio}) + String.fromCharCode(10));
+  fs.appendFileSync(process.env.TEST_CALLS, JSON.stringify({stage, args, laya: options.env.NEATROOTS_LAYA, shell: options.shell, stdio: options.stdio}) + String.fromCharCode(10));
   if (process.env.TEST_FAILURE === 'spawn') throw new Error('SECRET spawn exception');
   return { status: stage === process.env.TEST_FAILURE ? 1 : 0, stderr: 'SECRET child stderr', stdout: 'SECRET child stdout' };
 };
@@ -42,6 +42,11 @@ syncBuiltinESMExports();
       assert.deepEqual(stages.map(x => x.stage), ['init','fetch','checkout','installer'].slice(0, failure === 'spawn' ? 1 : failure === 'success' ? 4 : ['init','fetch','checkout','installer'].indexOf(failure)+1));
       assert.ok(stages.every(x => x.shell === false));
       assert.ok(stages.every(x => x.stdio === 'ignore'), 'Discard child output without a pipe buffer or inherited private diagnostics');
+      const installer = stages.find(x => x.stage === 'installer');
+      if (installer) {
+        assert.equal(installer.laya, 'ask');
+        assert.ok(!installer.args.includes('--no-laya'), 'Use the noninteractive read-only choice, not live-service skip');
+      }
     }
   });
 }

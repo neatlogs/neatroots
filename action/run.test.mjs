@@ -16,13 +16,15 @@ function run(env, execute, write) {
 }
 
 test('installer ignores ambient source, bundle, repo and runtime overrides', () => {
-  const env = installEnvironment({ RUNNER_TEMP: '/tmp/runner', PATH: '/bin', NEATROOTS_BUNDLE: 'evil', NEATROOTS_FROM_SOURCE: '1', NEATROOTS_GITHUB_REPO: 'evil', NEATROOTS_NODE: 'evil', NEATROOTS_VERSION: 'latest' }, '0.2.8');
+  const env = installEnvironment({ RUNNER_TEMP: '/tmp/runner', PATH: '/bin', NEATROOTS_BUNDLE: 'evil', NEATROOTS_FROM_SOURCE: '1', NEATROOTS_GITHUB_REPO: 'evil', NEATROOTS_NODE: 'evil', NEATROOTS_VERSION: 'latest', NEATROOTS_PORT: '4321', NEATROOTS_URL: 'http://caller.invalid:4321' }, '0.2.8');
   assert.equal(env.NEATROOTS_VERSION, undefined);
   assert.equal(env.NEATROOTS_REF, '0.2.8');
   assert.equal(env.NEATROOTS_BUNDLE, undefined);
   assert.equal(env.NEATROOTS_FROM_SOURCE, '1');
   assert.equal(env.NEATROOTS_GITHUB_REPO, undefined);
   assert.equal(env.NEATROOTS_NODE, undefined);
+  assert.equal(env.NEATROOTS_URL, undefined);
+  assert.equal(env.NEATROOTS_PORT, undefined);
   assert.equal(env.PATH, '/bin');
 });
 
@@ -39,7 +41,7 @@ test('installer isolates user state and platform home paths inside runner temp',
   }
   assert.equal(env.HOME, env.USERPROFILE);
   assert.equal(env.NEATROOTS_SERVICE, '0');
-  assert.equal(env.NEATROOTS_LAYA, 'no');
+  assert.equal(env.NEATROOTS_LAYA, 'ask');
 });
 
 function fixture(t) {

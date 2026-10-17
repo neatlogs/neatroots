@@ -40,3 +40,5 @@ jobs:
         run: node action/smoke.mjs
       - name: Verify large pinned CLI reports
         run: node action/large-smoke.mjs
+      - name: Verify installer probe isolation
+        run: node action/network-smoke.mjs

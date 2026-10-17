@@ -15,7 +15,7 @@ export function installEnvironment(source, commit) {
     XDG_RUNTIME_DIR: path.join(home, '.run'), NEATROOTS_HOME: path.join(dir, 'state'),
     NEATROOTS_REF: commit, NEATROOTS_FROM_SOURCE: '1', NEATROOTS_SOURCE_DIR: path.join(dir, 'src'), NEATROOTS_INSTALL_DIR: dir,
     NEATROOTS_BIN_DIR: path.join(dir, 'bin'), NEATROOTS_CONNECT: '0',
-    NEATROOTS_LAYA: 'no', NEATROOTS_SERVICE: '0', NEATROOTS_NO_MODIFY_PATH: '1' };
+    NEATROOTS_LAYA: 'ask', NEATROOTS_SERVICE: '0', NEATROOTS_NO_MODIFY_PATH: '1' };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -33,7 +33,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       const git = spawnSync('git', args, { env, stdio: 'ignore', shell: false });
       if (git.error || git.status !== 0) throw new Error('Could not fetch pinned source');
     }
-    const result = spawnSync('sh', [fileURLToPath(new URL('../install.sh', import.meta.url)), '--from-source', '--ref', commit, '--no-connect', '--no-laya', '--no-modify-path'], {
+    // Ignored stdout is not a TTY: the pinned installer selects laya choose
+    // --no-ask, which only explains the choice, without saving it or probing a service.
+    const result = spawnSync('sh', [fileURLToPath(new URL('../install.sh', import.meta.url)), '--from-source', '--ref', commit, '--no-connect', '--no-modify-path'], {
       env, stdio: 'ignore', shell: false,
     });
     if (result.error || result.status !== 0) throw new Error('Installation failed');

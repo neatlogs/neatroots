@@ -36,7 +36,10 @@ in the same job can restore it.
 The installer environment is controlled; ambient source/bundle/repository settings
 cannot replace the pinned source. Its home, neatroots state and platform/XDG
 directories live inside the cached installation, so legacy installation cleanup
-and the Laya skip preference cannot touch the runner account's files or services.
+cannot touch the runner account's files. With ignored (nonterminal) subprocess
+output, the pinned installer runs `laya choose --no-ask`: it explains the choice
+without saving consent, probing a running service or downloading a model.
+Ambient Laya, port and URL settings are cleared before installation.
 Installer subprocess output is discarded without buffering; failures report a
 fixed diagnostic instead of raw Git/build errors. The installer keeps its local log.
 Source is fetched by SHA before invoking the
