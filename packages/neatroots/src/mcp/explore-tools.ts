@@ -212,18 +212,19 @@ export const EXPLORE_TOOLS = [
     name: "replay",
     title: "Replay",
     description:
-      "Fork a run: re-send one LLM span's messages (edited if you pass messages, or with another model or system prompt) to the user's configured LLM, without running the agent. Stores the answer as a new run and returns it. For a whole-agent re-run use rerun.",
+      "Fork a run: re-send one LLM span's messages (edited if you pass messages, or with another model or system prompt) to the user's configured LLM, without running the agent. The call's recorded tool definitions go with it, so a tool-choice decision can be replayed too. Stores the answer as a new run and returns it. For a whole-agent re-run use rerun.",
     input: {
       trace_id: z.string().optional(),
       span_id: z.string().describe("The LLM span to replay"),
       messages: z.array(z.object({ role: z.string(), content: z.string() })).optional(),
       model: z.string().optional(),
       system: z.string().optional(),
+      tools: z.boolean().optional().describe("Send the recorded tool definitions (default true). false replays in text-only mode."),
     },
     run: async (roots, a) => {
       const resolved = resolveTraceNoting(roots, a.trace_id);
       const traceId = resolved.traceId;
-      const r = await roots.replays.replayLlm(traceId, resolveSpan(roots, traceId, a.span_id), { messages: a.messages, model: a.model, system: a.system });
+      const r = await roots.replays.replayLlm(traceId, resolveSpan(roots, traceId, a.span_id), { messages: a.messages, model: a.model, system: a.system, tools: a.tools });
       return { replay_id: r.id, state: r.state, error: r.error, new_trace_id: r.new_trace_id, answer: r.output_preview, ...fallbackNote(resolved) };
     },
   }),

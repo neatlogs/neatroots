@@ -238,3 +238,55 @@ describe("the LLM queue", () => {
     expect(order).not.toContain("cancelled");
   });
 });
+
+describe("tool-call replays", () => {
+  const tools = [{ name: "lookup_order", description: "Look up an order", parameters: { type: "object", properties: { order_id: { type: "string" } } } }];
+  const turns: Parameters<LlmClient["chat"]>[0] = [
+    { role: "user", content: "Please refund order 4512" },
+    { role: "assistant", content: "", tool_calls: [{ id: "call_9", name: "lookup_order", arguments: '{"order_id":"4512"}' }] },
+    { role: "tool", name: "lookup_order", tool_call_id: "call_9", content: '{"status":"delivered"}' },
+  ];
+
+  it("sends tools and structured tool turns on the OpenAI path, and reads a tool-call answer", async () => {
+    const srv = await mock((r) =>
+      r.path.endsWith("/models")
+        ? { json: { data: [{ id: "local-model" }] } }
+        : {
+            json: {
+              choices: [{ message: { content: null, tool_calls: [{ id: "call_1", function: { name: "issue_refund", arguments: '{"order_id":"4512"}' } }] }, finish_reason: "tool_calls" }],
+              model: "local-model",
+              usage: { prompt_tokens: 3, completion_tokens: 2 },
+            },
+          },
+    );
+    closers.push(srv.close);
+    const llm = new LlmClient(cfgWith((c) => Object.assign(c, { baseUrl: `${srv.url}/v1`, enabled: true })), { secret: async () => undefined });
+    const r = await llm.chat(turns, { tools });
+    expect(r.text).toBe("");
+    expect(r.toolCalls).toEqual([{ id: "call_1", name: "issue_refund", arguments: '{"order_id":"4512"}' }]);
+    const req = srv.seen.find((s) => s.path.endsWith("/chat/completions"))!;
+    expect(req.body.tools).toEqual([{ type: "function", function: { name: "lookup_order", description: "Look up an order", parameters: { type: "object", properties: { order_id: { type: "string" } } } } }]);
+    expect(req.body.messages).toEqual([
+      { role: "user", content: "Please refund order 4512" },
+      { role: "assistant", content: "", tool_calls: [{ id: "call_9", type: "function", function: { name: "lookup_order", arguments: '{"order_id":"4512"}' } }] },
+      { role: "tool", content: '{"status":"delivered"}', tool_call_id: "call_9", name: "lookup_order" },
+    ]);
+  });
+
+  it("sends tools and structured tool turns on the Anthropic path, and reads a tool-call answer", async () => {
+    const srv = await mock(() => ({ json: claudeReply("", { content: [{ type: "tool_use", id: "toolu_1", name: "issue_refund", input: { order_id: "4512" } }], stop_reason: "tool_use" }) }));
+    closers.push(srv.close);
+    const llm = new LlmClient(cfgWith((c) => Object.assign(c.external, { enabled: true, provider: "anthropic", baseUrl: srv.url, model: "claude-opus-5-5" })), {
+      secret: async () => "sk-ant-test-key-0000000000000000",
+    });
+    const r = await llm.chat(turns, { tools });
+    expect(r.toolCalls).toEqual([{ id: "toolu_1", name: "issue_refund", arguments: '{"order_id":"4512"}' }]);
+    const req = srv.seen[0];
+    expect(req.body.tools).toEqual([{ name: "lookup_order", description: "Look up an order", input_schema: { type: "object", properties: { order_id: { type: "string" } } } }]);
+    expect(req.body.messages).toEqual([
+      { role: "user", content: "Please refund order 4512" },
+      { role: "assistant", content: [{ type: "tool_use", id: "call_9", name: "lookup_order", input: { order_id: "4512" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call_9", content: '{"status":"delivered"}' }] },
+    ]);
+  });
+});
