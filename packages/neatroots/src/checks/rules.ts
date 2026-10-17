@@ -1,5 +1,5 @@
 import type { RuleCheck } from "./types.js";
-import { finalOutput, selectSpans, type SpanInfo, type TraceSnapshot } from "../engine/trace.js";
+import { finalOutput, runRoot, selectSpans, type SpanInfo, type TraceSnapshot } from "../engine/trace.js";
 import { preview } from "../semantics/view.js";
 import { log } from "../util/log.js";
 import { testWithin } from "../util/regex.js";
@@ -339,7 +339,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
     }
     case "run_end": {
       if (!atEnd || !t.run) return null;
-      const root = t.spans.find((s) => !s.parentId);
+      const root = runRoot(t.spans);
       if (r.when === "error" && t.run.status === "error") {
         return { firing: true, evidenceSpanIds: root ? [root.id] : [], params: { error: clip(root?.error ?? "error", 200) } };
       }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { batch, hex, llmSpan, makeRoots, markerSpan, mockLlm, span, toolSpan, until, type TestRoots } from "./helpers.js";
+import { batch, hex, llmSpan, makeRoots, markerSpan, mockLlm, s, span, toolSpan, until, type TestRoots } from "./helpers.js";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -183,8 +183,43 @@ describe("engine", () => {
   });
 });
 
-describe("planning", () => {
-  it("makes one plan per workflow when runs start together, and always includes baseline questions", async () => {
+describe("a run that ended on a span whose parent had not arrived yet (#157)", () => {
+  /** `until` takes a sync predicate; these assertions need to await the engine's status. */
+  async function untilAsync(fn: () => Promise<boolean>, timeoutMs = 8000, stepMs = 100): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (await fn()) return;
+      if (Date.now() > deadline) throw new Error("untilAsync: timed out");
+      await new Promise((r) => setTimeout(r, stepMs));
+    }
+  }
+
+  it("is live again when the caller's own span arrives, and end work runs on the full trace", async () => {
+    const { tb } = await setup();
+    const t = hex(16);
+    const callerId = hex(8);
+    const live = async () => (await tb.roots.engine!.status()).liveRuns;
+    // The callee exports first because it ended first, and its parent is not here yet, so the run
+    // ends on it. End-of-run work (rules at the end, questions, the summary) sees only this slice.
+    tb.roots.ingest([batch([span({ traceId: t, parent: callerId, name: "tool-service", kind: "workflow", flags: 0x300 })])]);
+    await until(() => tb.roots.store.getRun(t)?.root_ended === 1);
+    await untilAsync(async () => (await live()) === 0);
+
+    // The caller's own span arrives still open: it is the real root, so the run is not over and
+    // there is more to come.
+    const caller = span({ traceId: t, spanId: callerId, name: "caller-agent", kind: "workflow", attrs: [s("neatlogs.workflow.input", '{"q":"hello"}')] });
+    tb.roots.ingest([batch([{ ...caller, endTimeUnixNano: "0" }])]);
+    await untilAsync(async () => (await live()) === 1);
+
+    // It ends on the caller's own span, and the end pass runs again with both spans in the trace.
+    tb.roots.ingest([batch([caller])]);
+    await untilAsync(async () => (await live()) === 0);
+    expect(tb.roots.store.getRun(t)).toMatchObject({ status: "ok", root_span_id: callerId, root_name: "caller-agent", root_ended: 1 });
+    expect(tb.roots.store.getSpans(t, false)).toHaveLength(2);
+  });
+});
+
+describe("planning", () => {  it("makes one plan per workflow when runs start together, and always includes baseline questions", async () => {
     const llm = await mockLlm({ delayMs: 150 });
     const tb = await makeRoots({ llmUrl: llm.url });
     cleanup.push(async () => {

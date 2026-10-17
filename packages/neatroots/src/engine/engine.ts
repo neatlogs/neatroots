@@ -279,6 +279,17 @@ export class Engine {
     }
     const fresh = u.spans.filter((s) => s.isNew && !s.view.isMarker);
     if (fresh.length) this.track(u.traceId, this.handleSpans(run, fresh.map((s) => s.row.span_id)));
+    // The caller's own span arrived after the run ended on a span that only qualified through its
+    // remote parent (#157). End-of-run work already ran on the callee's slice of the trace, so it is
+    // allowed to run again on the full one. While the caller is still open there is more to come, so
+    // the run is running again and the end waits for the next rootEnded.
+    if (u.rootHandedBack) {
+      run.endHandled = false;
+      if (!u.rootEnded && !u.completed && this.roots.store.getRun(u.traceId)?.status === "running") {
+        run.ended = false;
+        clearTimeout(run.endTimer);
+      }
+    }
     if (u.rootEnded || u.completed) {
       run.ended = true;
       // Trailing spans can arrive in the next batch; give them a moment.
