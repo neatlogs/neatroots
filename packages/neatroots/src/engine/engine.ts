@@ -70,6 +70,11 @@ interface LiveRun {
   planning?: Promise<void>;
   used: { plans: number; investigations: number; notes: number; summaries: number };
   deferred: (() => Promise<void>)[];
+  /** Only finding triage jobs: awaiting all jobs here would wait on handleEnd itself. */
+  triages: Set<Promise<unknown>>;
+  /** Triage finishing after the finite end-pass snapshot must not strand more deferred work. */
+  endDrained: boolean;
+  cleanupReady?: boolean;
   spanDone: Set<string>;
   /** Per span-scope check: spans waiting to be asked about, newest last. */
   spanQueue: Map<string, string[]>;
@@ -186,9 +191,11 @@ export class Engine {
         const n = (this.jobs.get(traceId) ?? 1) - 1;
         if (n <= 0) {
           this.jobs.delete(traceId);
-          if (this.live.get(traceId)?.endHandled) this.progress.done(traceId);
+          const run = this.live.get(traceId);
+          if (run?.endHandled) this.progress.done(traceId);
           // A debounced trace question still counts as pending; its flush wakes the waiters.
           if (this.pending(traceId)) return;
+          if (run?.cleanupReady) this.live.delete(traceId);
           for (const fn of this.idleWaiters.get(traceId) ?? []) fn();
           this.idleWaiters.delete(traceId);
         } else this.jobs.set(traceId, n);
@@ -253,6 +260,8 @@ export class Engine {
       workflow: row.workflow ?? row.project ?? "unknown",
       used: { plans: 0, investigations: 0, notes: 0, summaries: 0 },
       deferred: [],
+      triages: new Set(),
+      endDrained: false,
       spanDone: new Set(),
       spanQueue: new Map(),
       spanBusy: new Set(),
@@ -715,7 +724,9 @@ export class Engine {
       });
       this.roots.bus.emit("note", note);
     }
-    void this.track(run.traceId, this.triage(run, f));
+    const triage = this.track(run.traceId, this.triage(run, f));
+    run.triages.add(triage);
+    void triage.then(() => run.triages.delete(triage));
     void snap;
   }
 
@@ -758,6 +769,9 @@ export class Engine {
     const work = () => this.investigate(run.traceId, f.id).then(() => undefined);
     if (run.used.investigations < this.roots.config.budgets.investigationsPerRun) {
       run.used.investigations++;
+      await work();
+    } else if (run.endDrained) {
+      // A late decision belongs to its tracked triage job, not an already-drained queue.
       await work();
     } else {
       run.deferred.push(work);
@@ -1015,45 +1029,65 @@ ${library}`;
   private async handleEnd(run: LiveRun): Promise<void> {
     if (run.endHandled) return;
     run.endHandled = true;
-    // Notes the agent never picked up can no longer help this run.
-    for (const n of this.roots.store.notesForTrace(run.traceId, "pending")) {
-      this.roots.store.updateNote(n.id, { status: "expired" });
-      this.roots.bus.emit("note", { ...n, status: "expired" });
-    }
-    if (run.planning) await run.planning;
-    let snap = loadTrace(this.roots.store, run.traceId);
-    if (!run.plan) this.ensurePlan(run, snap);
-    if (run.planning) await run.planning;
-    snap = loadTrace(this.roots.store, run.traceId);
-    this.applyRules(run, snap, true);
-    // Final pass: end-only questions, and live questions with evidence they have not seen.
-    for (const { check, params } of this.questionsFor(run)) {
-      if (check.scope === "span") {
-        const queue = run.spanQueue.get(check.id) ?? [];
-        for (const s of selectSpans(snap.spans, check.evidence?.spans)) {
-          const key = `${check.id}:${s.id}`;
-          if (run.spanDone.has(key)) continue;
-          run.spanDone.add(key);
-          queue.push(s.id);
+    try {
+      // Notes the agent never picked up can no longer help this run.
+      for (const n of this.roots.store.notesForTrace(run.traceId, "pending")) {
+        this.roots.store.updateNote(n.id, { status: "expired" });
+        this.roots.bus.emit("note", { ...n, status: "expired" });
+      }
+      if (run.planning) await run.planning;
+      let snap = loadTrace(this.roots.store, run.traceId);
+      if (!run.plan) this.ensurePlan(run, snap);
+      if (run.planning) await run.planning;
+      snap = loadTrace(this.roots.store, run.traceId);
+      this.applyRules(run, snap, true);
+      // Final pass: end-only questions, and live questions with evidence they have not seen.
+      for (const { check, params } of this.questionsFor(run)) {
+        if (check.scope === "span") {
+          const queue = run.spanQueue.get(check.id) ?? [];
+          for (const s of selectSpans(snap.spans, check.evidence?.spans)) {
+            const key = `${check.id}:${s.id}`;
+            if (run.spanDone.has(key)) continue;
+            run.spanDone.add(key);
+            queue.push(s.id);
+          }
+          run.spanQueue.set(check.id, queue);
+          await this.drainSpanQueue(run, check, params);
+          await this.retryFailedSpans(run, check, params);
+        } else {
+          await this.askTrace(run, check, params, snap);
         }
-        run.spanQueue.set(check.id, queue);
-        await this.drainSpanQueue(run, check, params);
-        await this.retryFailedSpans(run, check, params);
-      } else {
-        await this.askTrace(run, check, params, snap);
+      }
+      snap = loadTrace(this.roots.store, run.traceId);
+      const findings = this.roots.store.findingsForTrace(run.traceId).filter((f) => f.status !== "failed" && f.status !== "dismissed");
+      // A failed run with no finding still gets triaged as a whole.
+      if (snap.run && (snap.run.status === "error" || snap.run.interrupted) && !findings.some((f) => f.check_id === "run-failed")) {
+        await this.triageRun(run, snap);
+      }
+    } catch (err) {
+      log.warn(`end-of-run checks failed for ${run.traceId.slice(0, 8)}: ${(err as Error).message}`);
+    } finally {
+      try {
+        // A finite snapshot includes triage spawned by the final checks without waiting for
+        // unrelated jobs or repeatedly extending this drain as new spans arrive.
+        await Promise.all([...run.triages]);
+        run.endDrained = true;
+        for (const work of run.deferred.splice(0)) {
+          try {
+            await work();
+          } catch (err) {
+            log.warn(`deferred investigation failed for ${run.traceId.slice(0, 8)}: ${(err as Error).message}`);
+          }
+        }
+        await this.summarize(run, loadTrace(this.roots.store, run.traceId));
+      } finally {
+        run.endDrained = true;
+        setTimeout(() => {
+          run.cleanupReady = true;
+          if (this.live.get(run.traceId) === run && !this.pending(run.traceId)) this.live.delete(run.traceId);
+        }, 60_000);
       }
     }
-    snap = loadTrace(this.roots.store, run.traceId);
-    const findings = this.roots.store.findingsForTrace(run.traceId).filter((f) => f.status !== "failed" && f.status !== "dismissed");
-    // A failed run with no finding still gets triaged as a whole.
-    if (snap.run && (snap.run.status === "error" || snap.run.interrupted) && !findings.some((f) => f.check_id === "run-failed")) {
-      await this.triageRun(run, snap);
-    }
-    for (const work of run.deferred.splice(0)) await work();
-    await this.summarize(run, snap);
-    setTimeout(() => {
-      if (!this.pending(run.traceId)) this.live.delete(run.traceId);
-    }, 60_000);
   }
 
   private async triageRun(run: LiveRun, snap: TraceSnapshot): Promise<void> {
