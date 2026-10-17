@@ -5,6 +5,11 @@ import { preview } from "../semantics/view.js";
 export interface RuleHit {
   /** Whether the condition holds now, looking at the latest spans. */
   firing: boolean;
+  /**
+   * The rule never held: a requires_before whose calls all had their prerequisite. Returned only so
+   * a live finding raised before a late span arrived can resolve; callers that judge a whole run skip it.
+   */
+  satisfied?: boolean;
   evidenceSpanIds: string[];
   params: Record<string, string>;
   title?: string;
@@ -217,7 +222,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       const missed = guarded.filter((g) => !needed.some((n) => n.id !== g.id && n.startMs <= g.startMs));
       // Spans can arrive out of order: once a late prerequisite covers every call, say so,
       // so a finding raised before it arrived resolves.
-      if (!missed.length) return { firing: false, evidenceSpanIds: guarded.map((s) => s.id), params: {} };
+      if (!missed.length) return { firing: false, satisfied: true, evidenceSpanIds: guarded.map((s) => s.id), params: {} };
       const first = missed[0];
       return {
         firing: true,
