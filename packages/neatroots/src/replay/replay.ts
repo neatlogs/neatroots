@@ -230,10 +230,8 @@ export class Replays {
   }
 
   private async runAgent(r: Replay, project: string, target: { command?: string; cwd?: string; url?: string }, input: string, o: ReplayOverrides): Promise<Replay> {
-    const started = Date.now();
     let linked: string | null = null;
-    // The run it produces carries neatroots.replay.id as a resource attribute (via
-    // OTEL_RESOURCE_ATTRIBUTES); failing that, it's the project's first run after the start.
+    // Only a run carrying this replay's exact resource attribute can be linked.
     const off = this.roots.bus.on("trace", (u) => {
       if (linked || !u.runCreated) return;
       const res = u.spans[0] ? this.roots.store.getOtlpSpan(u.traceId, u.spans[0].row.span_id)?.resource : undefined;
@@ -290,13 +288,9 @@ export class Replays {
         }
         if (code !== 0) log.info(`replay ${r.id}: the agent exited with ${code}`);
       }
-      // Spans arrive on the SDK's flush interval; give the run a moment to land.
+      // Spans arrive on the SDK's flush interval; wait for this replay's resource ID.
       for (let i = 0; i < 20 && !linked; i++) {
         await new Promise((res) => setTimeout(res, 500));
-        if (!linked) {
-          const fresh = this.roots.store.listRuns({ project, sinceMs: started - 500, limit: 5 }).filter((x) => x.trace_id !== r.trace_id && !this.originOf(x.trace_id));
-          if (fresh.length && i >= 4) linked = fresh[fresh.length - 1].trace_id;
-        }
       }
       if (!linked) return this.finish(r, { state: "failed", error: "the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?", log_tail: tail || null });
       const run = this.roots.store.getRun(linked);

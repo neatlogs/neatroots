@@ -81,7 +81,13 @@ replay; outside one it changes nothing. Install the hooks from the bundle:
 
 `examples/python-replay` is a complete agent set up this way.
 
-### Linking without the variables
+### Replay correlation requirement
 
-If the agent drops `OTEL_RESOURCE_ATTRIBUTES` (some frameworks set their own resource), neatroots
-links the first new run of that project that starts after the replay began.
+A whole-agent replay links only to a run whose resource attributes contain that replay's exact
+`neatroots.replay.id`. For a command target, preserve the `neatroots.replay.id` entry in
+`OTEL_RESOURCE_ATTRIBUTES` or set it through the SDK's resource configuration. For an HTTP target,
+add the received `replay_id` to the new trace's resource attributes. If an agent or framework replaces
+`OTEL_RESOURCE_ATTRIBUTES`, merge the replay entry into its own resource attributes.
+
+A same-project run without the matching ID, including another concurrent replay, is never attached. If
+no matching run arrives, the replay fails with the existing no new run reached neatroots error.

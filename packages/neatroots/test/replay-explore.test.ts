@@ -1,5 +1,6 @@
+import { createServer } from "node:http";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadTrace } from "../src/engine/trace.js";
 import { EXPLORE_TOOLS } from "../src/mcp/explore-tools.js";
 import { toChat } from "../src/replay/replay.js";
@@ -19,6 +20,102 @@ afterEach(async () => {
 
 const tool = (name: string) => EXPLORE_TOOLS.find((x) => x.name === name)!;
 
+function accelerateReplayPolling(onPoll: (poll: number) => void) {
+  const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
+  let polls = 0;
+  const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => {
+    if (delay !== 500) return nativeSetTimeout(callback, delay, ...args);
+    const poll = ++polls;
+    return nativeSetTimeout(() => {
+      onPoll(poll);
+      callback(...args);
+    }, 0);
+  });
+  return { restore: () => timerSpy.mockRestore(), polls: () => polls };
+}
+
+function ingestReplayRoot(tr: TestRoots, traceId: string, replayId?: string) {
+  const root = batch([span({ traceId, name: "support", kind: "workflow" })], "support-agent");
+  if (replayId) root.resource.attributes.push(s("neatroots.replay.id", replayId));
+  tr.roots.ingest([root]);
+}
+
+function correlatedReplayCommand() {
+  const js = [
+    "const n=BigInt(Date.now())*1000000n;",
+    "const body={resourceSpans:[{resource:{attributes:[{key:'service.name',value:{stringValue:'support-agent'}},{key:'neatroots.replay.id',value:{stringValue:process.env.NEATROOTS_REPLAY_ID}}]},scopeSpans:[{scope:{name:'test'},spans:[{traceId:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',spanId:'bbbbbbbbbbbbbbbb',name:'support',kind:1,startTimeUnixNano:String(n),endTimeUnixNano:String(n+1000000n),attributes:[{key:'neatlogs.span.kind',value:{stringValue:'workflow'}},{key:'neatlogs.workflow.input',value:{stringValue:process.env.NEATROOTS_REPLAY_INPUT}},{key:'neatlogs.workflow.output',value:{stringValue:'model='+(process.env.NEATROOTS_REPLAY_MODEL||'')}}],status:{code:1}}]}]}]};",
+    "fetch(process.env.NEATLOGS_ENDPOINT+'/v1/traces',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(r=>r.text()).then(console.log);",
+  ].join(" ");
+  return "node -e \"" + js + "\"";
+}
+
+
+async function startHttpReplayEndpoint(tr: TestRoots, correlate: (id: string) => string | undefined) {
+  let requestBody: { replay_id: string; replay_of: string; input: string } | undefined;
+  let emittedTraceId: string | undefined;
+  const server = createServer((req, res) => {
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      requestBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as typeof requestBody;
+      if (!requestBody || typeof requestBody.replay_id !== "string") throw new Error("HTTP replay did not send replay_id");
+      const traceId = hex(16);
+      const replayId = correlate(requestBody.replay_id);
+      const resourceAttributes = [
+        { key: "service.name", value: { stringValue: "support-agent" } },
+        { key: "neatroots.replay.of", value: { stringValue: requestBody.replay_of } },
+      ];
+      if (replayId) resourceAttributes.push({ key: "neatroots.replay.id", value: { stringValue: replayId } });
+      const start = BigInt(Date.now()) * 1_000_000n;
+      const payload = {
+        resourceSpans: [{
+          resource: { attributes: resourceAttributes },
+          scopeSpans: [{
+            scope: { name: "http-replay-test" },
+            spans: [{
+              traceId,
+              spanId: hex(8),
+              name: "http replay",
+              kind: 1,
+              startTimeUnixNano: String(start),
+              endTimeUnixNano: String(start + 1_000_000n),
+              attributes: [
+                { key: "neatlogs.span.kind", value: { stringValue: "workflow" } },
+                { key: "neatlogs.workflow.input", value: { stringValue: requestBody.input } },
+                { key: "neatlogs.workflow.output", value: { stringValue: "HTTP replay answer" } },
+              ],
+              status: { code: 1 },
+            }],
+          }],
+        }],
+      };
+      const collector = await fetch(tr.url + "/v1/traces", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!collector.ok) throw new Error("collector returned " + collector.status + ": " + await collector.text());
+      emittedTraceId = traceId;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"accepted":true}');
+    })().catch((error: unknown) => {
+      res.writeHead(500, { "content-type": "text/plain" });
+      res.end(error instanceof Error ? error.message : String(error));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("HTTP replay endpoint has no TCP address");
+  return {
+    url: "http://127.0.0.1:" + address.port + "/replay",
+    request: () => requestBody,
+    traceId: () => emittedTraceId,
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+  };
+}
 /** root agent → LLM (asks for lookup) → tool → LLM (answers); plus a sub-agent with its own LLM call. */
 function seed(tr: TestRoots, session = "conv-1") {
   const traceId = hex(16);
@@ -72,7 +169,7 @@ describe("replay", () => {
     const x = seed(t);
     t.roots.config.rerun["support-agent"] = {
       // A stand-in agent: reads the replay input from the environment and sends a run.
-      command: `node -e "fetch(process.env.NEATLOGS_ENDPOINT + '/v1/trace', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({name:'support', project:'support-agent', input: process.env.NEATROOTS_REPLAY_INPUT, output: 'model=' + (process.env.NEATROOTS_REPLAY_MODEL||'')})}).then(r=>r.text()).then(console.log)"`,
+      command: correlatedReplayCommand(),
     };
     const { replay, done } = t.roots.replays.startRun(x.traceId, { input: "Is order 3003 ok?", model: "small-model" });
     expect(replay.state).toBe("running");
@@ -83,6 +180,121 @@ describe("replay", () => {
     expect(run.output_preview).toContain("model=small-model");
     expect(() => t!.roots.replays.startRun(hex(16))).toThrow(/run not found/);
   }, 30_000);
+
+
+  it("waits for delayed correlated telemetry instead of linking a same-project decoy", async () => {
+    t = await makeRoots({ noEngine: true });
+    const x = seed(t);
+    const decoy = hex(16);
+    const correlated = hex(16);
+    let replayId = "";
+    const ticks = accelerateReplayPolling((poll) => {
+      if (poll === 1) ingestReplayRoot(t!, decoy);
+      // This arrives well after the old i >= 4 same-project fallback.
+      if (poll === 7) ingestReplayRoot(t!, correlated, replayId);
+    });
+    try {
+      t.roots.config.rerun["support-agent"] = { command: "node -e 0" };
+      const started = t.roots.replays.startRun(x.traceId);
+      replayId = started.replay.id;
+      const r = await started.done;
+      expect(r).toMatchObject({ state: "succeeded", new_trace_id: correlated });
+      expect(r.new_trace_id).not.toBe(decoy);
+      expect(ticks.polls()).toBeGreaterThanOrEqual(7);
+    } finally {
+      ticks.restore();
+    }
+  });
+
+  it("keeps concurrent same-project replays linked to their own correlation ids", async () => {
+    t = await makeRoots({ noEngine: true });
+    const first = seed(t, "conv-first");
+    const second = seed(t, "conv-second");
+    const decoy = hex(16);
+    const firstRun = hex(16);
+    const secondRun = hex(16);
+    let firstReplayId = "";
+    let secondReplayId = "";
+    const ticks = accelerateReplayPolling((poll) => {
+      if (poll === 1) ingestReplayRoot(t!, decoy);
+      if (poll === 3) ingestReplayRoot(t!, firstRun, firstReplayId);
+      if (poll === 4) ingestReplayRoot(t!, secondRun, secondReplayId);
+    });
+    try {
+      t.roots.config.rerun["support-agent"] = { command: "node -e 0" };
+      const firstReplay = t.roots.replays.startRun(first.traceId);
+      firstReplayId = firstReplay.replay.id;
+      const secondReplay = t.roots.replays.startRun(second.traceId);
+      secondReplayId = secondReplay.replay.id;
+      const [a, b] = await Promise.all([firstReplay.done, secondReplay.done]);
+      expect(a).toMatchObject({ state: "succeeded", new_trace_id: firstRun });
+      expect(b).toMatchObject({ state: "succeeded", new_trace_id: secondRun });
+      expect(a.new_trace_id).not.toBe(decoy);
+      expect(b.new_trace_id).not.toBe(decoy);
+    } finally {
+      ticks.restore();
+    }
+  });
+
+  it("sends replay_id to an HTTP target and links the exact resource-correlated OTLP run", async () => {
+    t = await makeRoots({ noEngine: true, serve: true });
+    const x = seed(t);
+    const endpoint = await startHttpReplayEndpoint(t, (id) => id);
+    try {
+      t.roots.config.rerun["support-agent"] = { url: endpoint.url };
+      const started = t.roots.replays.startRun(x.traceId, { input: "Is order 4004 ok?" });
+      const r = await started.done;
+      expect(endpoint.request()).toMatchObject({ replay_id: started.replay.id, replay_of: x.traceId, input: "Is order 4004 ok?" });
+      expect(r).toMatchObject({ state: "succeeded", via: "http", new_trace_id: endpoint.traceId() });
+      const run = t.roots.store.getRun(r.new_trace_id!)!;
+      const root = t.roots.store.getOtlpSpan(r.new_trace_id!, run.root_span_id!)!;
+      expect(root.resource.attributes).toContainEqual(s("neatroots.replay.id", started.replay.id));
+      expect(root.resource.attributes).toContainEqual(s("neatroots.replay.of", x.traceId));
+    } finally {
+      await endpoint.close();
+    }
+  });
+
+  it.each(["missing", "wrong"] as const)("does not link an HTTP target with %s replay correlation", async (mode) => {
+    t = await makeRoots({ noEngine: true, serve: true });
+    const x = seed(t);
+    const endpoint = await startHttpReplayEndpoint(t, (id) => mode === "wrong" ? "other-" + id : undefined);
+    const ticks = accelerateReplayPolling(() => {});
+    try {
+      t.roots.config.rerun["support-agent"] = { url: endpoint.url };
+      const started = t.roots.replays.startRun(x.traceId);
+      const r = await started.done;
+      expect(endpoint.request()).toMatchObject({ replay_id: started.replay.id, replay_of: x.traceId });
+      expect(endpoint.traceId()).toBeTruthy();
+      expect(r).toMatchObject({
+        state: "failed",
+        new_trace_id: null,
+        error: "the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?",
+      });
+      expect(t.roots.store.getRun(endpoint.traceId()!)?.project).toBe("support-agent");
+      expect(ticks.polls()).toBe(20);
+    } finally {
+      ticks.restore();
+      await endpoint.close();
+    }
+  });
+  it("fails with the existing no-new-run message when only uncorrelated same-project telemetry arrives", async () => {
+    t = await makeRoots({ noEngine: true });
+    const x = seed(t);
+    const decoy = hex(16);
+    const ticks = accelerateReplayPolling((poll) => {
+      if (poll === 1) ingestReplayRoot(t!, decoy);
+    });
+    try {
+      t.roots.config.rerun["support-agent"] = { command: "node -e 0" };
+      const r = await t.roots.replays.startRun(x.traceId).done;
+      expect(r).toMatchObject({ state: "failed", new_trace_id: null });
+      expect(r.error).toBe("the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?");
+      expect(ticks.polls()).toBe(20);
+    } finally {
+      ticks.restore();
+    }
+  });
 
   it("fails the replay, not the server, when the rerun folder is gone", async () => {
     t = await makeRoots({ noEngine: true });
