@@ -66,7 +66,7 @@ function ReplayDialog({ project, onClose }: { project: ProjectRow; onClose: () =
   );
 }
 
-export function ProjectsSection({ hooks, steerPython, steerTs }: { hooks: number; steerPython?: string | null; steerTs?: string | null }) {
+export function ProjectsSection({ steerPython, steerTs }: { steerPython?: string | null; steerTs?: string | null }) {
   const { data, isLoading } = useProjects();
   const save = useSaveSettings();
   const [replayFor, setReplayFor] = useState<ProjectRow>();
@@ -137,7 +137,7 @@ export function ProjectsSection({ hooks, steerPython, steerTs }: { hooks: number
           </div>
         )}
       </SettingsCard>
-      <SettingsCard title={`Steering hook · ${hooks} connected now`} description="Steering and replay overrides need a small hook in your agent. Wrap the LLM client you already use.">
+      <SettingsCard title="Steering hook" description="Steering and replay overrides need a small hook in your agent. Wrap the LLM client you already use.">
         <SettingField label="Python">
           <CodeLine text={`pip install ${steerPython ?? "~/.neatroots/app/steer/python/neatroots-steer"}\n\nimport neatroots_steer\nclient = neatroots_steer.wrap(OpenAI())`} />
         </SettingField>

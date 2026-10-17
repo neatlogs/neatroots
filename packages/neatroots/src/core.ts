@@ -41,6 +41,8 @@ export class Roots {
   readonly replays: Replays;
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
+  /** Process-local hook contact time; null means none observed since this server started. Resets on restart. */
+  steerSeenMs: number | null = null;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
   /** The run and span the app has in focus, for the MCP get_current_run tool. */

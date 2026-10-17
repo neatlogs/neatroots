@@ -27,6 +27,18 @@ import { log } from "./util/log.js";
 const program = new Command();
 program.name("neatroots").description("neatroots: local, private checks for AI agents while they run").version(VERSION);
 
+function steeringContactSinceStart(lastSeenMs: number | null | undefined): string {
+  if (lastSeenMs === null) return "no contact observed";
+  if (lastSeenMs === undefined) return "unknown";
+  const seconds = Math.max(0, Math.round((Date.now() - lastSeenMs) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
 // ------------------------------------------------------------------- start
 
 program
@@ -210,7 +222,7 @@ program
       console.log(`  decisions ${s.engine.decision.backend ?? "unavailable"}${s.engine.decision.model ? ` (${s.engine.decision.model})` : ""}`);
       console.log(`  live runs ${s.engine.liveRuns} · pending checks ${s.engine.pendingJobs}`);
     }
-    console.log(`  steering ${s.steering.enabled ? "on" : "OFF (global switch)"} · hooks connected ${s.steering.hooks_connected}`);
+    console.log(`  steering ${s.steering.enabled ? "on" : "OFF (global switch)"} · steering hook · last contact since server start ${steeringContactSinceStart(s.steering.last_seen_ms)}`);
     console.log(`  cloud ${s.cloud.has_key ? "key stored" : "no key"} → ${s.cloud.endpoint}`);
   });
 
@@ -259,6 +271,7 @@ program
       }
       const s = await api<any>(p, "/api/status");
       line(s.check_errors.length === 0 ? true : "warn", s.check_errors.length ? `${s.check_errors.length} check file problem(s)` : "all checks load");
+
     }
     console.log(`\nTo test the SDK path end to end:  NEATLOGS_API_KEY=neatroots-local NEATLOGS_ENDPOINT=http://localhost:${p} python -m neatlogs doctor --probe`);
     process.exitCode = ok ? 0 : 1;
