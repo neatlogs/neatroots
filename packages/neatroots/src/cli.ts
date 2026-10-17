@@ -18,6 +18,7 @@ import { connectClient, findClient, listClients, serverCommand, CLIENTS } from "
 import { parseChecks } from "./checks/registry.js";
 import { checkWarnings } from "./checks/lint.js";
 import { checkFiles } from "./checks/offline.js";
+import { formatJUnit } from "./checks/junit.js";
 import { hardwareTier } from "./models/llm.js";
 import { setCloudKey, deleteCloudKey, getCloudKey, getCloudToken } from "./relay/keychain.js";
 import { LAYA_DOWNLOAD_MB } from "./models/laya.js";
@@ -391,11 +392,17 @@ program
   .option("--checks <dir...>", "extra checks folders")
   .option("--only <ids>", "only these rule ids, comma-separated")
   .option("--json", "print the result as JSON")
-  .action((files: string[], opts: { checks?: string[]; only?: string; json?: boolean }) => {
+  .option("--junit", "print the result as JUnit XML (redirect stdout to a report file)")
+  .action((files: string[], opts: { checks?: string[]; only?: string; json?: boolean; junit?: boolean }) => {
+    if (opts.json && opts.junit) {
+      console.error("--json and --junit cannot be used together");
+      process.exit(2);
+    }
     try {
       const r = checkFiles(files, { dirs: opts.checks, only: opts.only?.split(",").map((s) => s.trim()).filter(Boolean) });
       const failed = r.runs.filter((x) => x.findings.length);
-      if (opts.json) console.log(JSON.stringify({ runs: r.runs, rules: r.rules, errors: r.errors }, null, 2));
+      if (opts.junit) console.log(formatJUnit(r));
+      else if (opts.json) console.log(JSON.stringify({ runs: r.runs, rules: r.rules, errors: r.errors }, null, 2));
       else {
         for (const e of r.errors) console.log(`! ${e}`);
         for (const x of r.runs) {
@@ -405,10 +412,17 @@ program
         }
         console.log(`\n${r.runs.length} run${r.runs.length === 1 ? "" : "s"}, ${failed.length} with findings, ${r.rules.length} rules`);
       }
-      process.exit(r.errors.length ? 2 : failed.length ? 1 : 0);
+      process.exitCode = r.errors.length ? 2 : failed.length ? 1 : 0;
     } catch (e) {
+      process.exitCode = 2;
       console.error(`✗ ${(e as Error).message}`);
-      process.exit(2);
+      if (opts.junit) {
+        try {
+          console.log(formatJUnit({ runs: [], rules: [], errors: [(e as Error).message] }));
+        } catch (reportError) {
+          console.error(`Could not write JUnit report: ${(reportError as Error).message}`);
+        }
+      }
     }
   });
 

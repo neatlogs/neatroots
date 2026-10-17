@@ -21,6 +21,15 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - name: Agent checks as JUnit (offline, no API keys)
+        env:
+          NEATROOTS_HOME: ${{ runner.temp }}/neatroots-check-home
+        run: node packages/neatroots/dist/cli.js check examples/import-files/otlp-trace.json --only secret-in-output --junit > agent-checks.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-checks-${{ matrix.runner }}
+          path: agent-checks.xml
       - run: pnpm typecheck
       - run: pnpm test
       - uses: actions/setup-python@v5

@@ -254,7 +254,7 @@ can read) and never in the database.
 | `neatroots llm`, `neatroots models`, `neatroots jev` | Where LLM and decision-model work runs |
 | `neatroots steering <mode> --project <name>` | Steering per project; `neatroots steering stop` turns it off everywhere |
 | `neatroots checks list`, `neatroots checks validate <file>` | Checks in force, and YAML validation |
-| `neatroots check <files...>` | Run the rule checks over saved traces with no server or model. Exits 0 when clean, 1 if a rule fires, 2 for invalid input or check configuration |
+| `neatroots check <files...>` | Run the rule checks over saved traces with no server or model. `--junit` emits a CI test report; `--json` emits JSON. Exits 0 when clean, 1 if a rule fires, 2 for invalid input or check configuration |
 | `neatroots cloud login`, `neatroots cloud forward <trace>` | Neatlogs Cloud: send runs (project API key) |
 | `neatroots cloud token`, `neatroots cloud project` | Neatlogs Cloud: import traces (service-account token) |
 | `neatroots service install`, `neatroots update` | Run at login; update to the latest release |
