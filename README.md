@@ -187,6 +187,11 @@ neatlogs.init(workflow_name="refund-agent", flush_interval=0.5, instrumentations
   strings and parameter-map keys still redact. Pattern matching cannot guarantee detection of every
   transformed sensitive value, and source/creator markers are not a cryptographic authorship proof.
   Aliases use fresh randomness rather than content hashes, and cannot collide with original IDs.
+  At exact OTLP schema positions, matching trace/span IDs use correlated fixed-width hex aliases
+  across parents, links and exported evidence references. Matching or invalid int64/nanosecond
+  strings become decimal zero; byte values retain base64 encoding. This keeps accepted exports
+  reimportable while sacrificing matched timing/value fidelity. Identically named user data still
+  undergoes ordinary redaction. Scalar preparation shares the export's node/work budgets.
   Exports above a conservative 2 MiB source-data budget or 4 MiB compact JSON budget are refused before
   large payloads are hydrated or a response is serialized. Redaction additionally refuses more than
   10,000 matches, 64 MiB of cumulative intermediate UTF-8 output, or 50,000 visited nodes/depth 64

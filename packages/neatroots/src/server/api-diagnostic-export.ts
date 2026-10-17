@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import { randomBytes } from "node:crypto";
 import type { Roots } from "../core.js";
+import { DiagnosticOtlpScalars } from "./diagnostic-export-otlp.js";
 import { exportDefinition, exportDetail } from "./diagnostic-export-provenance.js";
 import { dataMap, fixedString, structuralKey } from "./diagnostic-export-schema.js";
 import type { ResourceSpansBatch } from "../otlp/types.js";
@@ -30,10 +31,10 @@ export interface DiagnosticExportResponse {
   preview: { span_count: number; finding_count: number; check_count: number };
 }
 
-function redactTree(value: unknown, rules: RedactionRule[], path: string, budget: DiagnosticRedactionBudget, safeAliases: Set<string>, depth = 0): unknown {
+function redactTree(value: unknown, rules: RedactionRule[], path: string, budget: DiagnosticRedactionBudget, safeAliases: Set<string>, scalars: DiagnosticOtlpScalars, depth = 0): unknown {
   budget.node(depth);
-  if (typeof value === "string") return (safeAliases.has(value) || fixedString(path, value)) ? value : redactString(value, rules, "", [], budget);
-  if (Array.isArray(value)) return value.map((item, index) => redactTree(item, rules, `${path}[${index}]`, budget, safeAliases, depth + 1));
+  if (typeof value === "string") return scalars.redact(path, value) ?? ((safeAliases.has(value) || fixedString(path, value)) ? value : redactString(value, rules, "", [], budget));
+  if (Array.isArray(value)) return value.map((item, index) => redactTree(item, rules, `${path}[${index}]`, budget, safeAliases, scalars, depth + 1));
   if (!value || typeof value !== "object") return value;
 
   const output: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
@@ -42,7 +43,7 @@ function redactTree(value: unknown, rules: RedactionRule[], path: string, budget
     let safeKey = proposed;
     let collision = 1;
     while (Object.hasOwn(output, safeKey)) safeKey = `${proposed} [${++collision}]`;
-    output[safeKey] = redactTree(item, rules, `${path}.${dataMap(path) ? "*" : key}`, budget, safeAliases, depth + 1);
+    output[safeKey] = redactTree(item, rules, `${path}.${dataMap(path) ? "*" : key}`, budget, safeAliases, scalars, depth + 1);
   }
   return output;
 }
@@ -204,12 +205,12 @@ export function prepareDiagnosticExport(roots: Roots, traceId: string): Diagnost
     redactions: {
       applied: true as const,
       rule_source: "cloud_forwarding" as const,
-      scope: "Check IDs use consistent opaque aliases within this bundle. Existing built-in and configured custom cloud-forwarding patterns apply to other matching strings and non-structural keys. Stored run previews, question titles, finding parameters, verification quotes and finding error messages are omitted because already-clipped values cannot be reliably redacted. Investigation cause/fix prose is omitted because it may echo that clipped evidence. Explanation evidence IDs, grounding, model and timestamp remain. Only library definition bodies and explicitly user-created plan parameter values are retained with redaction. Non-library bodies, finding prose/detail outside safe metadata, and decision answers are omitted because durable human authorship is unavailable. Full trace evidence remains with redaction. This cannot guarantee every sensitive value is detected.",
+      scope: "Check IDs use consistent opaque aliases within this bundle. Existing built-in and configured custom cloud-forwarding patterns apply to other matching strings and non-structural keys. Stored run previews, question titles, finding parameters, verification quotes and finding error messages are omitted because already-clipped values cannot be reliably redacted. Investigation cause/fix prose is omitted because it may echo that clipped evidence. Explanation evidence IDs, grounding, model and timestamp remain. Only library definition bodies and explicitly user-created plan parameter values are retained with redaction. Non-library bodies, finding prose/detail outside safe metadata, and decision answers are omitted because durable human authorship is unavailable. Matching OTLP IDs use correlated hex aliases; matching integer/nanosecond strings become zero, and bytes retain base64 encoding. These substitutions can lose timing and value fidelity. Full trace evidence remains with redaction. This cannot guarantee every sensitive value is detected.",
       matches: [] as { kind: string; count: number }[],
     },
   };
 
-  const sanitized = redactTree(rawBundle, rules, "bundle", budget, new Set(aliases.values())) as typeof rawBundle;
+  const sanitized = redactTree(rawBundle, rules, "bundle", budget, new Set(aliases.values()), new DiagnosticOtlpScalars(rawBundle, rules, budget)) as typeof rawBundle;
   sanitized.redactions.matches = [...budget.counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([kind, count]) => ({ kind, count }));
 
   const response = {

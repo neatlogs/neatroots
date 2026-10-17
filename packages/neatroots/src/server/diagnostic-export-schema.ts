@@ -34,6 +34,8 @@ export function dataMap(path: string): boolean {
   return path.endsWith(".params") || path.endsWith(".options") || path.startsWith("bundle.checks.historical.params.");
 }
 export function structuralKey(path: string, key: string): boolean {
+  if (key === "historical") return path === "bundle.checks";
+  if (key === "occurrences") return path.replace(/\[\d+\]/g, "[]") === "bundle.findings[].detail";
   if (Object.hasOwn(METADATA_KEYS, key)) return path.replace(/\[\d+\]/g, "[]") === METADATA_KEYS[key];
   return !dataMap(path) && STRUCTURAL_KEYS.has(key);
 }

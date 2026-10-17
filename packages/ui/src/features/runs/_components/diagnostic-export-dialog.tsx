@@ -64,7 +64,7 @@ export function DiagnosticExportDialog({ traceId, open, onOpenChange }: { traceI
         <DialogHeader className="min-w-0 text-left">
           <DialogTitle>Prepare diagnostic export</DialogTitle>
           <DialogDescription className="min-w-0 max-w-3xl text-left leading-relaxed">
-            This local JSON retains redacted traces, library checks and metadata. Unverifiable check bodies, generated text and answers are omitted. Only user-created plan parameter values are included, with redaction. Check IDs use opaque aliases. Nothing is uploaded. Patterns may miss sensitive values. Limits: 2 MiB source data and 4 MiB JSON.
+            This local JSON retains redacted traces, library checks and metadata. Unverifiable check bodies, generated text and answers are omitted. Only user-created plan parameter values are included, with redaction. Check IDs use opaque aliases. Matching trace/span IDs also use aliases; matching OTLP integers and times become zero. Nothing is uploaded. Patterns may miss sensitive values. Limits: 2 MiB source data and 4 MiB JSON.
           </DialogDescription>
         </DialogHeader>
 
