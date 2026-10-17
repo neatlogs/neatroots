@@ -9,27 +9,54 @@ import type { RuleCheck } from "../src/checks/types.js";
 import { batch, hex, llmSpan, s, span, tmpHome, toolSpan } from "./helpers.js";
 
 const homes: string[] = [];
+const stores: Store[] = [];
 afterEach(() => {
+  for (const st of stores.splice(0)) st.close();
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 function store(): Store {
   const h = tmpHome();
   homes.push(h);
-  return new Store(path.join(h, "data"));
+  const st = new Store(path.join(h, "data"));
+  stores.push(st);
+  return st;
 }
 const lib = parseChecks(fs.readFileSync(new URL("../library/rules.yaml", import.meta.url), "utf8")).checks as RuleCheck[];
 const check = lib.find((c) => c.id === "unrecovered-tool-failure")!;
 
+interface Ancestor {
+  name: string;
+  kind: "agent" | "llm" | "task";
+}
 interface Step {
   tool: string;
   fail?: boolean;
+  /** Shorthand for a direct agent parent, used by the existing root/worker cases. */
+  parent?: string;
+  /** Ancestors from the root's child down to the tool's direct parent. */
+  ancestors?: Ancestor[];
 }
 /** One run: the given tool calls in order, then a final answer (or none), then the root. */
 function run(st: Store, steps: Step[], opts: { answer?: string | null; rootError?: string } = {}): string {
   const t = hex(16);
   const root = hex(8);
   const spans = [llmSpan(t, root, { user: "do the task", out: "ok" })];
-  for (const x of steps) spans.push(x.fail ? toolSpan(t, root, x.tool, '{"a":1}', undefined, "HTTP 503 upstream timeout") : toolSpan(t, root, x.tool, '{"a":1}', '{"ok":true}'));
+  const parents = new Map<string, string>();
+  for (const x of steps) {
+    let parent = root;
+    const ancestors = x.ancestors ?? (x.parent ? [{ name: x.parent, kind: "agent" as const }] : []);
+    for (const ancestor of ancestors) {
+      const key = JSON.stringify([parent, ancestor.kind, ancestor.name]);
+      let id = parents.get(key);
+      if (!id) {
+        id = hex(8);
+        parents.set(key, id);
+        spans.push(span({ traceId: t, spanId: id, parent, name: ancestor.name, kind: ancestor.kind }));
+      }
+      parent = id;
+    }
+    spans.push(x.fail ? toolSpan(t, parent, x.tool, '{"a":1}', undefined, "HTTP 503 upstream timeout") : toolSpan(t, parent, x.tool, '{"a":1}', '{"ok":true}'));
+  }
   const answer = opts.answer === undefined ? "All done, it worked." : opts.answer;
   spans.push(
     span({
@@ -56,6 +83,7 @@ describe("unrecovered_error rule", () => {
   it("fires when a tool failed and the run still answered", () => {
     const st = store();
     const t = run(st, [{ tool: "lookup_order" }, { tool: "issue_refund", fail: true }]);
+    expect(st.getRun(t)).toMatchObject({ status: "ok", error_count: 1 });
     const h = hit(st, t)!;
     expect(h.firing).toBe(true);
     expect(h.evidenceSpanIds).toHaveLength(1);
@@ -68,6 +96,81 @@ describe("unrecovered_error rule", () => {
     const st = store();
     const t = run(st, [{ tool: "issue_refund", fail: true }, { tool: "issue_refund" }]);
     expect(hit(st, t)).toBeNull();
+  });
+
+  it("uses the enclosing agent or root scope across missing and cyclic ancestry", () => {
+    const st = store();
+    const sameAgent = run(st, [
+      { tool: "issue_refund", fail: true, parent: "worker-a" },
+      { tool: "issue_refund", parent: "worker-a" },
+    ]);
+    expect(hit(st, sameAgent)).toBeNull();
+
+    const rootScope = run(st, [
+      { tool: "issue_refund", fail: true, ancestors: [{ name: "turn-1", kind: "llm" }] },
+      { tool: "issue_refund", ancestors: [{ name: "turn-2", kind: "llm" }] },
+    ]);
+    expect(hit(st, rootScope)).toBeNull();
+
+    const missing = run(st, [
+      { tool: "issue_refund", fail: true, ancestors: [{ name: "turn-1", kind: "llm" }] },
+      { tool: "issue_refund", ancestors: [{ name: "turn-2", kind: "llm" }] },
+    ]);
+    const missingTrace = loadTrace(st, missing);
+    missingTrace.spans.find((s) => s.name === "turn-1")!.parentId = "missing-parent-a";
+    missingTrace.spans.find((s) => s.name === "turn-2")!.parentId = "missing-parent-b";
+    expect(evaluateRule(check, missingTrace, true)).toBeNull();
+
+    const cyclic = run(st, [
+      { tool: "issue_refund", fail: true, ancestors: [{ name: "turn-1", kind: "llm" }] },
+      { tool: "issue_refund", ancestors: [{ name: "turn-2", kind: "llm" }] },
+    ]);
+    const cyclicTrace = loadTrace(st, cyclic);
+    const turn1 = cyclicTrace.spans.find((s) => s.name === "turn-1")!;
+    const turn2 = cyclicTrace.spans.find((s) => s.name === "turn-2")!;
+    turn1.parentId = turn2.id;
+    turn2.parentId = turn1.id;
+    expect(evaluateRule(check, cyclicTrace, true)).toBeNull();
+  });
+
+  it("stays quiet when a retry crosses turn parents inside the same agent", () => {
+    const st = store();
+    const t = run(st, [
+      { tool: "issue_refund", fail: true, ancestors: [{ name: "worker-a", kind: "agent" }, { name: "turn-1", kind: "llm" }] },
+      { tool: "issue_refund", ancestors: [{ name: "worker-a", kind: "agent" }, { name: "turn-2", kind: "llm" }] },
+    ]);
+    const trace = loadTrace(st, t);
+    expect(trace.spans.find((s) => s.name === "worker-a")?.kind).toBe("AGENT");
+    expect(trace.spans.find((s) => s.name === "turn-1")?.kind).toBe("LLM");
+    expect(trace.spans.find((s) => s.name === "turn-2")?.kind).toBe("LLM");
+    expect(hit(st, t)).toBeNull();
+
+    const nested = run(st, [
+      { tool: "issue_refund", fail: true, ancestors: [{ name: "outer", kind: "agent" }, { name: "inner", kind: "agent" }, { name: "turn-1", kind: "llm" }] },
+      { tool: "issue_refund", ancestors: [{ name: "outer", kind: "agent" }, { name: "inner", kind: "agent" }, { name: "turn-2", kind: "llm" }] },
+    ]);
+    const nestedTrace = loadTrace(st, nested);
+    expect(nestedTrace.spans.find((s) => s.name === "inner")?.kind).toBe("AGENT");
+    expect(nestedTrace.spans.find((s) => s.name === "turn-1")?.kind).toBe("LLM");
+    expect(hit(st, nested)).toBeNull();
+  });
+
+  it("does not recover across different or nested agent scopes", () => {
+    const st = store();
+    const t = run(st, [
+      { tool: "issue_refund", fail: true, parent: "worker-a" },
+      { tool: "issue_refund", parent: "worker-b" },
+    ]);
+    const h = hit(st, t)!;
+    expect(h.firing).toBe(true);
+    expect(h.evidenceSpanIds).toHaveLength(1);
+    expect(h.params.tool).toBe("issue_refund");
+
+    const nested = run(st, [
+      { tool: "issue_refund", fail: true, ancestors: [{ name: "outer", kind: "agent" }, { name: "inner", kind: "agent" }, { name: "turn-1", kind: "llm" }] },
+      { tool: "issue_refund", ancestors: [{ name: "outer", kind: "agent" }, { name: "turn-2", kind: "llm" }] },
+    ]);
+    expect(hit(st, nested)?.firing).toBe(true);
   });
 
   it("still fires when a different tool succeeded after the failure", () => {

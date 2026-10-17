@@ -4,18 +4,20 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { rootsHome } from "../src/config.js";
 
-// rootsHome() reads HOME through os.homedir(); each test gets its own.
+// os.homedir() reads HOME on POSIX and USERPROFILE on Windows; each test gets its own.
 let home: string;
-const saved = { HOME: process.env.HOME, NEATROOTS_HOME: process.env.NEATROOTS_HOME };
+const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, NEATROOTS_HOME: process.env.NEATROOTS_HOME };
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-home-"));
   process.env.HOME = home;
+  if (process.platform === "win32") process.env.USERPROFILE = home;
   delete process.env.NEATROOTS_HOME;
 });
 afterEach(() => {
-  process.env.HOME = saved.HOME;
-  if (saved.NEATROOTS_HOME === undefined) delete process.env.NEATROOTS_HOME;
-  else process.env.NEATROOTS_HOME = saved.NEATROOTS_HOME;
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   fs.rmSync(home, { recursive: true, force: true });
 });
 const dir = (...p: string[]) => fs.mkdirSync(path.join(home, ...p), { recursive: true });

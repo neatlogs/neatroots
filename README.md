@@ -191,9 +191,12 @@ neatlogs.init(workflow_name="refund-agent", flush_interval=0.5, instrumentations
   large payloads are hydrated or a response is serialized. Redaction additionally refuses more than
   10,000 matches, 64 MiB of cumulative intermediate UTF-8 output, or 50,000 visited nodes/depth 64
   across trace and metadata passes; these conservative work limits can refuse smaller inputs too.
-  Matching is incremental and retains counts rather than per-match samples. These limits do not
-  time-limit an individual regex evaluation. Refusal produces no partial bundle. The preview renders at most 32 Ki
-  characters; downloading an accepted export retains its complete sanitized JSON.
+  Matching is incremental and retains counts rather than per-match samples. Custom patterns also
+  run under cloud forwarding's 100 ms limit on each value. Invalid or timed-out
+  saved patterns refuse the entire export with a settings error. Built-in rules remain unchanged;
+  these are work limits, not a total request-duration guarantee. Refusal produces no partial bundle.
+  The preview renders at most 32 Ki characters; downloading an accepted export retains its complete
+  sanitized JSON.
   It does not gather extra environment or machine state. Nothing is uploaded
   automatically, and pattern matches cannot guarantee every sensitive value is removed. Currently
   enabled rules that apply to the run
@@ -254,7 +257,8 @@ client = neatroots_steer.wrap(OpenAI())      # or Anthropic(); sync or async
 ```
 
 Modes: `advisory` (a note on the next LLM call), `gate` (each call waits up to 300 ms for pending
-checks), `self-check` (the agent gets `check_my_work`), and `halt` from rules you write. At most one
+checks), and `self-check` (the agent gets `check_my_work`). In any of them, rules you write with
+`action: halt` stop the run; with steering `off`, nothing is sent, halts included. At most one
 note per call and three per run. See [docs/steering.md](docs/steering.md).
 
 ## What leaves your machine
@@ -263,7 +267,7 @@ note per call and three per run. See [docs/steering.md](docs/steering.md).
 | --- | --- | --- |
 | Collector, checks, Laya, local LLM, store, app, MCP | On | Nothing |
 | Hosted LLM | Off | The run content each LLM task needs, minus secrets, to the provider you pick |
-| Jev cloud | Off | Span content a question needs, to api.typesafe.ai |
+| Jev cloud | Off | Span content a question needs, credentials removed, to api.typesafe.ai |
 | Neatlogs Cloud forward | Off | Runs you send, redacted first, to ingest.neatlogs.com |
 | Neatlogs Cloud import | Off | Requests to app.neatlogs.com with your service-account token |
 | Coding agents in the app | Off | Whatever Claude Code or Codex sends to their own providers |

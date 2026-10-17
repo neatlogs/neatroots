@@ -193,8 +193,21 @@ function normSpan(s: any): OtlpSpan | null {
       }),
     ),
     droppedLinksCount: num(g(s, "droppedLinksCount", "dropped_links_count")) || undefined,
-    status: { code: normStatusCode(status.code), message: status.message || undefined },
+    status: { code: normStatusCode(status.code), message: normStatusMessage(status.message) },
   };
+}
+
+function normStatusMessage(msg: unknown): string | undefined {
+  if (msg === undefined || msg === null) return undefined;
+  if (typeof msg === "string") return msg || undefined;
+  if (typeof msg === "object") {
+    try {
+      return JSON.stringify(msg);
+    } catch {
+      return String(msg);
+    }
+  }
+  return String(msg);
 }
 
 /**

@@ -22,6 +22,64 @@ export interface CheckLoadError {
   message: string;
 }
 
+/** Whether anything sits at this path, a link that points nowhere included (existsSync follows links). */
+function entryExists(p: string): boolean {
+  try {
+    fs.lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The nearest path above `dir` that something occupies without being a directory, if one stands
+ * between it and creation. A link that points nowhere counts: nothing can be created through it.
+ */
+function ancestorInTheWay(dir: string): string | undefined {
+  let cur = path.resolve(dir);
+  for (;;) {
+    const parent = path.dirname(cur);
+    if (parent === cur) return undefined; // the root itself, which is always there
+    if (entryExists(parent)) {
+      try {
+        if (fs.statSync(parent).isDirectory()) return undefined;
+      } catch {
+        // A link whose target is gone: it is in the way all the same.
+      }
+      return parent;
+    }
+    cur = parent;
+  }
+}
+
+/**
+ * How a checks directory reads on disk. `missing` separates the normal case (a project with no
+ * checks yet) from a path that is there but unusable, such as a file where a directory belongs.
+ * `creatable` is the separate save-time question: the path isn't there and nothing but directories
+ * stands above it, so `CheckRegistry.save()` can make it. `reason` reads after the path, the way
+ * the Checks page prints a load error.
+ */
+export function checkDirState(dir: string): { ok: true } | { ok: false; missing: boolean; creatable: boolean; reason: string } {
+  try {
+    if (!fs.statSync(dir).isDirectory()) return { ok: false, missing: false, creatable: false, reason: "is a file, not a directory" };
+    fs.readdirSync(dir);
+    return { ok: true };
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    const detail = code ?? (e as Error).message;
+    // There but unreadable (a file, a link that points nowhere, a folder without permission): nothing
+    // to create, so a save can't rescue it.
+    if (entryExists(dir)) return { ok: false, missing: false, creatable: false, reason: `can't be read as a directory (${detail})` };
+    // Not there. A save can make it unless a file stands in the way: Windows answers ENOENT where
+    // other platforms answer ENOTDIR for exactly that shape, so ask the ancestors, not the code.
+    const blocking = ancestorInTheWay(dir);
+    return blocking
+      ? { ok: false, missing: false, creatable: false, reason: `sits under ${blocking}, which is a file, not a directory` }
+      : { ok: false, missing: true, creatable: true, reason: "does not exist" };
+  }
+}
+
 /** Parses YAML holding one check, a list of checks, or `{checks: [...]}`. */
 export function parseChecks(text: string): { checks: Check[]; errors: { id?: string; message: string }[] } {
   const checks: Check[] = [];
@@ -115,11 +173,29 @@ export class CheckRegistry {
     const next = new Map<string, LoadedCheck>();
     const errors: CheckLoadError[] = [];
     const loadDir = (dir: string, source: CheckSource) => {
-      if (!fs.existsSync(dir)) return;
+      const state = checkDirState(dir);
+      // A directory that isn't there is the normal case (a project without checks yet). Anything
+      // else is reported on the Checks page instead of throwing out of the constructor: a config
+      // holding a path that turned into a file used to stop `neatroots start` before it listened.
+      if (!state.ok) {
+        if (!state.missing) errors.push({ path: dir, message: state.reason });
+        return;
+      }
       for (const f of fs.readdirSync(dir).sort()) {
         if (!/\.ya?ml$/i.test(f)) continue;
         const p = path.join(dir, f);
-        const { checks, errors: errs } = parseChecks(fs.readFileSync(p, "utf8"));
+        // One bad entry is one bad check file, not a reason to abandon the whole load. A name that
+        // matches the filter but isn't a readable file (a directory called draft.yaml, a broken
+        // symlink, a file the user can't read) used to throw EISDIR or EACCES out of the
+        // constructor here, which took `neatroots start` down before it listened (#224).
+        let text: string;
+        try {
+          text = fs.readFileSync(p, "utf8");
+        } catch (e) {
+          errors.push({ path: p, message: (e as NodeJS.ErrnoException).code ?? (e as Error).message });
+          continue;
+        }
+        const { checks, errors: errs } = parseChecks(text);
         for (const e of errs) errors.push({ path: p, ...e });
         for (const c of checks) next.set(c.id, { check: c, source, path: p });
       }
@@ -177,6 +253,7 @@ export class CheckRegistry {
    */
   save(check: Check, target: "user" | "db" | { dir: string }, source: CheckSource = "user"): LoadedCheck {
     const parsed = AnyCheck.parse(check) as Check;
+    if (source === "mcp") assertNoHaltFromAgent(parsed, this.checks.get(parsed.id)?.check);
     let p: string | null = null;
     if (target === "db") {
       this.store.upsertCheckRow({ id: parsed.id, kind: parsed.kind === "rule" ? "rule" : "question", source, path: null, body: checkToYaml(parsed) });
@@ -230,4 +307,14 @@ export class CheckRegistry {
     const precision = 1 - s.dismissed / s.hits;
     return { hits: s.hits, dismissed: s.dismissed, precision, noisy: s.hits >= 5 && precision < 0.4 };
   }
+}
+
+/**
+ * A halt rule stops the user's agent with the user's authority, so a coding agent (MCP) may not
+ * create one, turn a check into one, or change one the user made (#256).
+ */
+function assertNoHaltFromAgent(next: Check, current: Check | undefined): void {
+  const halts = (c: Check | undefined) => !!c && isRule(c) && c.action === "halt";
+  if (halts(next)) throw new Error("halt rules must be created or enabled by you in the app or CLI; save it with action: flag, and the user can switch it to halt in the app");
+  if (halts(current)) throw new Error(`"${next.id}" is a halt rule; halt rules must be created or changed by you in the app or CLI`);
 }

@@ -20,17 +20,21 @@ function fires(calls: Call[]): boolean {
   const h = tmpHome();
   homes.push(h);
   const st = new Store(path.join(h, "data"));
-  const t = hex(16);
-  const root = hex(8);
-  const spans = calls.map(([n, i, o], k) => {
-    const sp = toolSpan(t, root, n, i, o);
-    sp.startTimeUnixNano = String(BigInt(1_700_000_000_000 + k * 1000) * 1_000_000n);
-    sp.endTimeUnixNano = String(BigInt(1_700_000_000_500 + k * 1000) * 1_000_000n);
-    return sp;
-  });
-  st.ingest([batch(spans)]);
-  const hit = evaluateRule(rule, loadTrace(st, t)!, false);
-  return !!hit?.firing;
+  try {
+    const t = hex(16);
+    const root = hex(8);
+    const spans = calls.map(([n, i, o], k) => {
+      const sp = toolSpan(t, root, n, i, o);
+      sp.startTimeUnixNano = String(BigInt(1_700_000_000_000 + k * 1000) * 1_000_000n);
+      sp.endTimeUnixNano = String(BigInt(1_700_000_000_500 + k * 1000) * 1_000_000n);
+      return sp;
+    });
+    st.ingest([batch(spans)]);
+    const hit = evaluateRule(rule, loadTrace(st, t)!, false);
+    return !!hit?.firing;
+  } finally {
+    st.close();
+  }
 }
 
 const TOOLS = ["search", "fetch", "read_file", "edit_file", "run_tests", "list_dir"];

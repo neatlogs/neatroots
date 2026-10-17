@@ -3,15 +3,16 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Store } from "../src/store/db.js";
 import { traceReadback } from "../src/server/readback.js";
-import { batch, hex, llmSpan, markerSpan, s, span, tmpHome, toolSpan } from "./helpers.js";
+import { batch, closeTrackedStores, hex, llmSpan, markerSpan, s, span, tmpHome, toolSpan, trackedStore } from "./helpers.js";
 
 const homes: string[] = [];
 function store(): Store {
   const h = tmpHome();
   homes.push(h);
-  return new Store(path.join(h, "data"));
+  return trackedStore(path.join(h, "data"));
 }
 afterEach(() => {
+  closeTrackedStores();
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 
@@ -95,6 +96,121 @@ describe("store", () => {
     expect(back.resource).toEqual(b.resource);
     st.deleteRun(t);
     expect(st.blobs.size()).toBe(0);
+  });
+
+  it("reclaims superseded payloads through repeated updates and run deletion", () => {
+    const st = store();
+    const traceId = hex(16);
+    const spanId = hex(8);
+    const oldPayload = `old payload ${"o".repeat(40_000)}`;
+    const newPayload = `new payload ${"n".repeat(40_000)}`;
+    const latestPayload = `latest payload ${"z".repeat(40_000)}`;
+    const write = (payload: string) => span({ traceId, spanId, name: "replace", kind: "tool", attrs: [s("payload", payload)] });
+
+    st.ingest([batch([write(oldPayload)])]);
+    const readSha = () => {
+      const raw = st.db.prepare("SELECT blobs FROM spans WHERE trace_id = ? AND span_id = ?").get(traceId, spanId) as { blobs: string };
+      return (JSON.parse(raw.blobs) as string[])[0];
+    };
+    const oldSha = readSha();
+    expect(st.blobs.sizeOf(oldSha)).toBe(Buffer.byteLength(oldPayload, "utf8"));
+    st.ingest([batch([write(oldPayload)])]); // an identical retry still references the same content
+    expect(readSha()).toBe(oldSha);
+    expect(st.blobs.sizeOf(oldSha)).toBe(Buffer.byteLength(oldPayload, "utf8"));
+
+    st.ingest([batch([write(newPayload)])]);
+    const newSha = readSha();
+    expect(st.blobs.sizeOf(oldSha)).toBe(0);
+    expect(st.blobs.sizeOf(newSha)).toBe(Buffer.byteLength(newPayload, "utf8"));
+
+    st.ingest([batch([write(latestPayload)])]);
+    const latestSha = readSha();
+    expect(st.blobs.sizeOf(newSha)).toBe(0);
+    expect(st.blobs.sizeOf(latestSha)).toBe(Buffer.byteLength(latestPayload, "utf8"));
+    const [roundTrip] = st.batchesForTraces([traceId]);
+    expect(roundTrip.spans[0].attributes.find((attribute) => attribute.key === "payload")?.value).toEqual({ stringValue: latestPayload });
+    expect(st.blobs.size()).toBe(Buffer.byteLength(latestPayload, "utf8"));
+
+    const smallPayload = "small replacement";
+    st.ingest([batch([write(smallPayload)])]);
+    expect(st.blobs.sizeOf(latestSha)).toBe(0);
+    expect(st.blobs.size()).toBe(0);
+    const [smallRoundTrip] = st.batchesForTraces([traceId]);
+    expect(smallRoundTrip.spans[0].attributes.find((attribute) => attribute.key === "payload")?.value).toEqual({ stringValue: smallPayload });
+
+    st.deleteRun(traceId);
+    expect(st.blobs.size()).toBe(0);
+  });
+
+  it("keeps shared payloads across spans and pinned runs during retention", () => {
+    const st = store();
+    const pinnedTrace = hex(16);
+    const unpinnedTrace = hex(16);
+    const pinnedSpanA = hex(8);
+    const pinnedSpanB = hex(8);
+    const unpinnedSpan = hex(8);
+    const shared = `shared prompt ${"s".repeat(40_000)}`;
+    const replacementA = `replacement A ${"a".repeat(40_000)}`;
+    const replacementB = `replacement B ${"b".repeat(40_000)}`;
+    const blobSha = (traceId: string, spanId: string) => {
+      const row = st.db.prepare("SELECT blobs FROM spans WHERE trace_id = ? AND span_id = ?").get(traceId, spanId) as { blobs: string };
+      return (JSON.parse(row.blobs) as string[])[0];
+    };
+
+    st.ingest([
+      batch([
+        span({ traceId: pinnedTrace, spanId: pinnedSpanA, name: "pinned-a", kind: "tool", attrs: [s("payload", shared)] }),
+        span({ traceId: pinnedTrace, spanId: pinnedSpanB, name: "pinned-b", kind: "tool", attrs: [s("payload", shared)] }),
+      ]),
+      batch([span({ traceId: unpinnedTrace, spanId: unpinnedSpan, name: "unpinned", kind: "tool", attrs: [s("payload", shared)] })]),
+    ]);
+    const sharedSha = blobSha(pinnedTrace, pinnedSpanA);
+    expect(blobSha(pinnedTrace, pinnedSpanB)).toBe(sharedSha);
+    expect(blobSha(unpinnedTrace, unpinnedSpan)).toBe(sharedSha);
+    expect(st.blobs.size()).toBe(Buffer.byteLength(shared, "utf8"));
+
+    st.setPinned(pinnedTrace, true);
+    st.db.prepare("UPDATE runs SET received_ms = 1, ended_ms = 1 WHERE trace_id IN (?, ?)").run(pinnedTrace, unpinnedTrace);
+    expect(st.sweep(14, Number.POSITIVE_INFINITY)).toBe(1);
+    expect(st.getRun(pinnedTrace)).toBeDefined();
+    expect(st.getRun(unpinnedTrace)).toBeUndefined();
+    expect(st.blobs.sizeOf(sharedSha)).toBe(Buffer.byteLength(shared, "utf8"));
+
+    st.ingest([batch([span({ traceId: pinnedTrace, spanId: pinnedSpanA, name: "pinned-a", kind: "tool", attrs: [s("payload", replacementA)] })])]);
+    expect(st.blobs.sizeOf(sharedSha)).toBe(Buffer.byteLength(shared, "utf8")); // the second span in the pinned run still references it
+    st.ingest([batch([span({ traceId: pinnedTrace, spanId: pinnedSpanB, name: "pinned-b", kind: "tool", attrs: [s("payload", replacementB)] })])]);
+    expect(st.blobs.sizeOf(sharedSha)).toBe(0);
+    expect(st.getRun(pinnedTrace)).toBeDefined();
+    expect(st.blobs.size()).toBe(Buffer.byteLength(replacementA, "utf8") + Buffer.byteLength(replacementB, "utf8"));
+  });
+
+  it("keeps the old payload when the span update transaction rolls back", () => {
+    const st = store();
+    const traceId = hex(16);
+    const spanId = hex(8);
+    const oldPayload = `committed payload ${"c".repeat(40_000)}`;
+    const failedPayload = `rolled back payload ${"r".repeat(40_000)}`;
+    const write = (payload: string) => span({ traceId, spanId, name: "transaction", kind: "tool", attrs: [s("payload", payload)] });
+    st.ingest([batch([write(oldPayload)])]);
+    const before = st.db.prepare("SELECT attributes, blobs FROM spans WHERE trace_id = ? AND span_id = ?").get(traceId, spanId) as { attributes: string; blobs: string };
+    const [oldSha] = JSON.parse(before.blobs) as string[];
+
+    const prepare = st.db.prepare.bind(st.db);
+    st.db.prepare = ((sql: string) => {
+      if (sql.includes("INSERT INTO span_fts")) throw new Error("injected failure after blob write");
+      return prepare(sql);
+    }) as typeof st.db.prepare;
+    try {
+      expect(() => st.ingest([batch([write(failedPayload)])])).toThrow("injected failure after blob write");
+    } finally {
+      st.db.prepare = prepare;
+    }
+
+    const after = st.db.prepare("SELECT attributes, blobs FROM spans WHERE trace_id = ? AND span_id = ?").get(traceId, spanId) as { attributes: string; blobs: string };
+    expect(after).toEqual(before);
+    expect(st.blobs.sizeOf(oldSha)).toBe(Buffer.byteLength(oldPayload, "utf8"));
+    const [roundTrip] = st.batchesForTraces([traceId]);
+    expect(roundTrip.spans[0].attributes.find((attribute) => attribute.key === "payload")?.value).toEqual({ stringValue: oldPayload });
   });
 
   it("searches span content and keeps pinned runs through retention", () => {
@@ -191,7 +307,7 @@ describe("store", () => {
     for (const [label, attrs] of Object.entries(payloads)) {
       const h = tmpHome();
       homes.push(h);
-      const st = new Store(path.join(h, "data"));
+      const st = trackedStore(path.join(h, "data"));
       const ids: string[] = [];
       for (let i = 0; i < 60; i++) {
         const t = hex(16);
@@ -221,7 +337,6 @@ describe("store", () => {
       for (const t of ids.slice(1, 1 + removed)) expect(st.getRun(t), label).toBeUndefined(); // exactly the oldest went
       for (const t of ids.slice(1 + removed)) expect(st.getRun(t), label).toBeDefined();
       expect(st.sweep(999_999, cap), label).toBe(0); // the next sweep has nothing to do
-      st.close();
     }
   });
 

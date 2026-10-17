@@ -58,7 +58,7 @@ describe("asking before downloading Laya", () => {
     }
   });
 
-  it("cleans a failed Python environment and tells Ubuntu how to retry", async () => {
+  it.skipIf(process.platform === "win32")("cleans a failed Python environment and tells Ubuntu how to retry", async () => {
     const home = tmpHome();
     const bin = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-laya-bin-"));
     const python = path.join(bin, "python3.12");

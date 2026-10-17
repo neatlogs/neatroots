@@ -4,7 +4,7 @@ import type { Roots } from "../core.js";
 import { exportDefinition, exportDetail } from "./diagnostic-export-provenance.js";
 import { dataMap, fixedString, structuralKey } from "./diagnostic-export-schema.js";
 import type { ResourceSpansBatch } from "../otlp/types.js";
-import { compileRules, redactBatches, redactString, type RedactionRule } from "../relay/redact.js";
+import { RedactionPatternError, compileRules, redactBatches, redactString, type RedactionRule } from "../relay/redact.js";
 import type { Finding } from "../types.js";
 import { VERSION } from "../version.js";
 import { err } from "./util.js";
@@ -229,7 +229,12 @@ export function mountDiagnosticExportApi(app: Hono, roots: Roots): void {
     c.header("Cache-Control", "no-store");
     let prepared: DiagnosticExportResponse | undefined;
     try { prepared = prepareDiagnosticExport(roots, c.req.param("traceId")); }
-    catch (error) { if (error instanceof DiagnosticExportTooLarge) return err(c, 413, error.message); throw error; }
+    catch (error) {
+      if (error instanceof DiagnosticExportTooLarge) return err(c, 413, error.message);
+      // A saved pattern may itself contain private data: report refusal without echoing it.
+      if (error instanceof RedactionPatternError) return err(c, 400, "Diagnostic export could not apply a configured redaction pattern. Review redaction settings and try again.");
+      throw error;
+    }
     if (!prepared) return err(c, 404, "run not found");
     c.header("Cache-Control", "no-store");
     return c.json(prepared);

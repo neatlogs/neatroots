@@ -1,6 +1,7 @@
 import type { Roots } from "../core.js";
 import { projectSettings, type SteeringMode } from "../config.js";
 import type { Note } from "../types.js";
+import { isRule, type Check } from "../checks/types.js";
 import { log } from "../util/log.js";
 
 export interface SteerEvent {
@@ -21,6 +22,28 @@ export class SteeringHub {
   idleWaiter?: (traceId: string, timeoutMs: number) => Promise<boolean>;
 
   constructor(private readonly roots: Roots) {}
+
+  /**
+   * The user's halt rules among `checks` that can't reach an agent, because steering is off for
+   * every project they apply to (off sends nothing, halts included).
+   */
+  inactiveHalts(checks: Check[]): string[] {
+    const projects = Object.keys(this.roots.config.projects);
+    return checks
+      .filter((c) => c.enabled !== false && isRule(c) && c.action === "halt")
+      .filter((c) => {
+        const scope = c.applies_to?.project;
+        const where = scope === undefined ? projects : Array.isArray(scope) ? scope : [scope];
+        return !where.some((p) => this.mode(p) !== "off");
+      })
+      .map((c) => c.id);
+  }
+
+  /** Logs the halt rules that won't stop agents until steering is on. */
+  warnInactiveHalts(checks: Check[]): void {
+    const ids = this.inactiveHalts(checks);
+    if (ids.length) log.warn(`halt rule${ids.length > 1 ? "s" : ""} ${ids.join(", ")} won't stop agents: steering is off where ${ids.length > 1 ? "they apply" : "it applies"}, and off sends nothing. Turn it on for the project: neatroots steering advisory --project <name>`);
+  }
 
   /** The steering mode for a project; off unless the user enabled it. */
   mode(project: string | null | undefined): SteeringMode {
@@ -60,7 +83,8 @@ export class SteeringHub {
   push(input: { traceId: string; findingId: string | null; kind: Note["kind"]; text: string; checks?: Note["checks"] }): Note | undefined {
     const run = this.roots.store.getRun(input.traceId);
     if (!run || run.status !== "running") return undefined;
-    if (input.kind !== "halt" && this.mode(run.project) === "off") return undefined;
+    // Off means nothing is sent (docs/steering.md), a halt from your own rule included.
+    if (this.mode(run.project) === "off") return undefined;
     const limit = this.roots.config.steering.maxNotesPerRun;
     if (input.kind !== "halt" && this.deliveredCount(input.traceId) + this.pendingCount(input.traceId) >= limit) return undefined;
     const note = this.roots.store.insertNote({
@@ -119,10 +143,9 @@ export class SteeringHub {
   claim(traceId: string, spanId?: string | null): Note | undefined {
     let pending = this.roots.store.notesForTrace(traceId, "pending");
     if (!pending.length) return undefined;
-    // If steering was turned off after a note was queued, don't deliver it.
-    // A halt note still wins (it matches push()'s halt exception).
+    // Steering turned off after a note was queued: nothing is delivered, a halt included.
     const run = this.roots.store.getRun(traceId);
-    if (this.mode(run?.project) === "off") pending = pending.filter((n) => n.kind === "halt");
+    if (this.mode(run?.project) === "off") pending = [];
     if (!pending.length) return undefined;
     const rank = (n: Note) => (n.kind === "halt" ? 0 : n.kind === "llm" ? 1 : 2);
     const pick = [...pending].sort((a, b) => rank(a) - rank(b) || a.created_ms - b.created_ms)[0];
