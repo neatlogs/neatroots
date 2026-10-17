@@ -60,4 +60,4 @@ is limited to 16 MiB and execution to five minutes; excess is exit 2.
 Run the wrapper tests with `node --test action/run.test.mjs`. The repository's
 action workflow tests known clean and failing traces through the actual composite
 action with its pinned CLI on Linux and macOS. Ambient `NEATROOTS_*`
-installer controls are cleared so they cannot replace the release or cached bundle.
+installer controls are cleared so they cannot replace the pinned source build or cached installation.
