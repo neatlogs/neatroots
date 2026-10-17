@@ -1,0 +1,34 @@
+{
+  "spec": 1,
+  "id": "neatlogs/neatroots",
+  "name": "Neatroots",
+  "category": "Observability",
+  "author": "Johnson Enyenihi",
+  "description": "An agent whose runs are checked by a same-machine neatroots: see, check and replay what the agent did while you build it.",
+  "engine": "opencode",
+  "workspace": {
+    "template": "template",
+    "marker": "NOTES.md",
+    "init": "toolchain/init-workspace.sh"
+  },
+  "viewer": {
+    "use": "autonomous/web-viewer"
+  },
+  "agent": {
+    "instructions": "AGENTS.md",
+    "skills": [
+      "skills"
+    ],
+    "env": {
+      "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://localhost:4100/v1/traces",
+      "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4100",
+      "OTEL_SERVICE_NAME": "openharness",
+      "NEATLOGS_ENDPOINT": "http://localhost:4100",
+      "NEATLOGS_API_KEY": "neatroots-local"
+    }
+  },
+  "toolchain": {
+    "setup": "toolchain/setup.sh",
+    "doctor": "toolchain/doctor.sh"
+  }
+}
