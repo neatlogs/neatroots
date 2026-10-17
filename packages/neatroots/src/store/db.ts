@@ -500,7 +500,7 @@ export class Store {
             u = { traceId: span.traceId, spans: [], runCreated: false, rootEnded: false, completed: false };
             updates.set(span.traceId, u);
           }
-          const row = this.writeSpan(span, view, resourceId, scopeId, now);
+          const row = this.writeSpan(span, view, resourceId, scopeId, now, !!previous);
           u.spans.push({ row, view, isNew: !previous });
           const runFlags = this.updateRun(span, view, row, resAttrs, now, previous);
           if (runFlags.created) u.runCreated = true;
@@ -515,7 +515,7 @@ export class Store {
     return [...updates.values()];
   }
 
-  private writeSpan(span: OtlpSpan, view: SpanView, resourceId: string, scopeId: string, now: number): SpanRow {
+  private writeSpan(span: OtlpSpan, view: SpanView, resourceId: string, scopeId: string, now: number, replacing: boolean): SpanRow {
     const used = new Set<string>();
     const attributes = this.blobs.offload(span.attributes, used);
     const events = span.events.map((e) => ({ ...e, attributes: this.blobs.offload(e.attributes, used) }));
@@ -579,7 +579,9 @@ export class Store {
         blobs: used.size ? JSON.stringify([...used]) : null,
       });
     if (!view.isMarker) {
-      this.indexSpan(span.traceId, span.spanId, span.name, view);
+      this.indexSpan(span.traceId, span.spanId, span.name, view, replacing);
+    } else if (replacing) {
+      this.deleteIndexedSpan(span.traceId, span.spanId);
     }
     return row;
   }
@@ -1294,7 +1296,7 @@ export class Store {
     if (Number.isFinite(maxAgeDays) && maxAgeDays >= 1) {
       const cutoff = Date.now() - maxAgeDays * 86_400_000;
       const old = this.db
-        .prepare("SELECT trace_id FROM runs WHERE pinned = 0 AND COALESCE(ended_ms, received_ms) < ?")
+        .prepare("SELECT trace_id FROM runs WHERE pinned = 0 AND received_ms < ?")
         .all(cutoff) as { trace_id: string }[];
       this.deleteRuns(old.map((r) => r.trace_id));
       removed += old.length;
@@ -1339,7 +1341,7 @@ export class Store {
         .prepare(
           `SELECT r.trace_id AS t, r.pinned AS pinned, COALESCE(SUM(${rowBytes}), 0) AS w, group_concat(s.blobs, '') AS b
            FROM runs r LEFT JOIN spans s ON s.trace_id = r.trace_id
-           GROUP BY r.trace_id ORDER BY COALESCE(r.ended_ms, r.received_ms) ASC`,
+           GROUP BY r.trace_id ORDER BY r.received_ms ASC`,
         )
         .all() as { t: string; pinned: number; w: number; b: string | null }[]
     ).map((r) => ({ ...r, w: r.w + (indexed.get(r.t) ?? 0) }));
@@ -1453,10 +1455,14 @@ export class Store {
   }
 
   /** Full-text index for a span: its input, output and error, as much as SEARCH_LIMIT allows. */
-  private indexSpan(traceId: string, spanId: string, name: string, view: SpanView): void {
-    this.db.prepare("DELETE FROM span_fts WHERE trace_id = ? AND span_id = ?").run(traceId, spanId);
+  private indexSpan(traceId: string, spanId: string, name: string, view: SpanView, replacing = true): void {
+    if (replacing) this.deleteIndexedSpan(traceId, spanId);
     const body = [searchText(view.input), searchText(view.output), searchText(view.error ?? undefined)].join("\n");
     this.db.prepare("INSERT INTO span_fts (trace_id, span_id, name, tool_name, body) VALUES (?, ?, ?, ?, ?)").run(traceId, spanId, name, view.toolName ?? "", body);
+  }
+
+  private deleteIndexedSpan(traceId: string, spanId: string): void {
+    this.db.prepare("DELETE FROM span_fts WHERE trace_id = ? AND span_id = ?").run(traceId, spanId);
   }
 
   /**
