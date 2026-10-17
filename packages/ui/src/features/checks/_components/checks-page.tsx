@@ -31,7 +31,7 @@ export function ChecksPage() {
   const [group, setGroup] = useState<Group>("all");
   const [q, setQ] = useState("");
   const [openId, setOpenId] = useState<string>();
-  const [editor, setEditor] = useState<{ yaml: string; n: number }>();
+  const [editor, setEditor] = useState<{ yaml: string; n: number; dir?: string; path?: string; manual?: boolean }>();
   const all = data?.checks ?? [];
   const needle = q.trim().toLowerCase();
   const checks = all.filter((c) => MATCH[group](c) && (!needle || c.title.toLowerCase().includes(needle) || c.id.includes(needle)));
@@ -68,7 +68,7 @@ export function ChecksPage() {
         </div>
       }
     >
-      {!!data?.pending_mcp_checks?.length && <McpCheckApprovals proposals={data.pending_mcp_checks} userDir={data.user_dir} />}
+      {!!data?.pending_mcp_checks?.length && <McpCheckApprovals proposals={data.pending_mcp_checks} userDir={data.user_dir} onManual={(proposal) => setEditor({ yaml: proposal.yaml, dir: proposal.target_dir ?? data.user_dir, path: proposal.target_path, manual: true, n: Date.now() })} />}
       {!!data?.errors.length && (
         <div role="alert" className="mx-6 mt-3 flex max-h-32 shrink-0 flex-col gap-1 overflow-y-auto rounded-lg border border-danger-border bg-danger-surface px-4 py-3">
           <span className="text-sm font-medium text-danger-fg">Some check files didn't load</span>
@@ -120,7 +120,7 @@ export function ChecksPage() {
           })
         }
       />
-      {editor && <CheckEditor key={editor.n} open initialYaml={editor.yaml} userDir={data?.user_dir} onClose={() => setEditor(undefined)} />}
+      {editor && <CheckEditor key={editor.n} open initialYaml={editor.yaml} userDir={data?.user_dir} targetDir={editor.dir} targetPath={editor.path} manualApplication={editor.manual} onClose={() => setEditor(undefined)} />}
     </ListPageLayout>
   );
 }

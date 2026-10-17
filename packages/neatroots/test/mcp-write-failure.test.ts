@@ -9,6 +9,7 @@ import { Store } from "../src/store/db.js";
 for (const origin of ["human", "project", "approved", "pending"] as const) {
   for (const operation of ["approval", "human"] as const) {
     for (const partial of [false, true, "unreadable", "exists"] as const) {
+      if (operation === "approval" && partial !== false) continue;
       it(`${operation} failed write preserves ${origin} provenance when ${String(partial)}, across reopen`, () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-write-"));
         const checks = path.join(dir, "checks");
@@ -38,7 +39,7 @@ for (const origin of ["human", "project", "approved", "pending"] as const) {
             throw Object.assign(new Error("failed write"), { code: partial === "exists" ? "EEXIST" : "ENOSPC" });
           });
           try {
-            expect(() => operation === "approval" ? registry.approvePendingMcp(check.id, proposal!.revision) : registry.save(next, "user")).toThrow("failed write");
+            expect(() => operation === "approval" ? registry.approvePendingMcp(check.id, proposal!.revision) : registry.save(next, "user")).toThrow(operation === "approval" ? "Manual application required" : "failed write");
           } finally { spy.mockRestore(); unreadable?.mockRestore(); }
           store.close();
           store = new Store(path.join(dir, "data"));

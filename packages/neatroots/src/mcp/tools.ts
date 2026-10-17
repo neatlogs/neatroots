@@ -357,7 +357,7 @@ export const TOOLS = [
     name: "create_check",
     title: "Create check",
     description:
-      "Propose a check. Give either `concern` (plain language; the local LLM writes the question) or `check` (YAML or JSON in neatroots check format). Set save=false to return a draft only. Saving creates an inactive local proposal that a person must approve in Checks; an existing active version remains unchanged until approval. Halt rules cannot be saved or changed here: save a rule with action: flag, and the user can switch it to halt in the app or CLI.",
+      "Propose a check. Give either `concern` (plain language; the local LLM writes the question) or `check` (YAML or JSON in neatroots check format). Set save=false to return a draft only. Saving creates an inactive local proposal that a person reviews in Checks. Approval only creates a new file; existing destinations require manual review and save in the editor, taking human ownership. The proposal remains pending until rejected; its existing active version is unchanged. Halt rules cannot be saved or changed here: save a rule with action: flag, and the user can switch it to halt in the app or CLI.",
     input: {
       concern: z.string().optional(),
       check: z.string().optional().describe("YAML or JSON check definition"),
@@ -399,6 +399,8 @@ export const TOOLS = [
         approved: false,
         active_version_unchanged: proposal.has_active_version,
         target_dir: proposal.target_dir,
+        target_path: proposal.target_path,
+        manual_application_required: proposal.manual_application_required,
       };
     },
   }),

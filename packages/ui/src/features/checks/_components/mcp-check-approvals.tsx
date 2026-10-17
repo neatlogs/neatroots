@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 import { PendingButton } from "@/components/pending-button";
 import { Panel, PanelContent, PanelHeader } from "@/components/ui/panel";
 import { StatusPill } from "@/components/ui/status-pill";
@@ -8,7 +9,7 @@ import { pct } from "@/lib/format";
 import { useCheckActions, type PreviewResult } from "../_services/check-queries";
 
 /** MCP-authored edits wait here for a person; the current approved version stays active until approval. */
-export function McpCheckApprovals({ proposals, userDir }: { proposals: CheckApprovalRow[]; userDir?: string }) {
+export function McpCheckApprovals({ proposals, userDir, onManual }: { proposals: CheckApprovalRow[]; userDir?: string; onManual: (proposal: CheckApprovalRow) => void }) {
   const actions = useCheckActions();
   const [previews, setPreviews] = useState<Record<string, PreviewResult>>({});
   const [previewing, setPreviewing] = useState<string>();
@@ -21,7 +22,7 @@ export function McpCheckApprovals({ proposals, userDir }: { proposals: CheckAppr
         actions={<StatusPill size="sm" tone="warning">{proposals.length} inactive</StatusPill>}
       />
       <p className="mb-3 text-xs text-muted-foreground">
-        These proposals do not run until you approve them. An edit leaves its current active version unchanged.
+        Approve new files here. Existing files require a manual review and save; their current version is unchanged by the proposal.
       </p>
       <PanelContent className="h-96 flex-none overflow-y-auto overscroll-contain divide-y divide-border">
         {proposals.map((proposal) => {
@@ -32,13 +33,14 @@ export function McpCheckApprovals({ proposals, userDir }: { proposals: CheckAppr
                 <span className="min-w-0 break-all text-sm font-medium text-foreground">{proposal.title}</span>
                 <span className="font-mono text-2xs text-muted-foreground">{proposal.id}</span>
                 <StatusPill size="sm" tone={proposal.has_active_version ? "info" : "muted"}>
-                  {proposal.has_active_version ? "Edit · current version stays active" : "Inactive until approval"}
+                  {proposal.has_active_version ? "Edit · current version stays active" : proposal.manual_application_required ? "Inactive · manual review required" : "Inactive until approval"}
                 </StatusPill>
               </div>
               <pre data-testid="proposal-yaml" className="max-h-48 overflow-auto rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs whitespace-pre-wrap break-words">{proposal.yaml}</pre>
               <span className="shrink-0 break-all text-2xs text-muted-foreground" title={proposal.target_dir ?? userDir ?? "~/.neatroots/checks"}>
                 Approval target: {proposal.target_dir ?? userDir ?? "~/.neatroots/checks"}
               </span>
+              {proposal.manual_application_required && <p className="text-xs text-muted-foreground">Existing file: {proposal.target_path}. Review and save manually as your own check, then reject this proposal.</p>}
               {preview && (
                 <p role="status" className="rounded-lg bg-background px-3 py-2 text-xs text-muted-foreground tabular-nums">
                   Fires on {preview.hits.length} of {preview.checked} runs · hit rate {pct(preview.hit_rate)}
@@ -64,6 +66,7 @@ export function McpCheckApprovals({ proposals, userDir }: { proposals: CheckAppr
                 >
                   Preview check
                 </PendingButton>
+                {proposal.manual_application_required ? <Button size="sm" variant="secondary" onClick={() => onManual(proposal)}>Review manually</Button> : (
                 <PendingButton
                   size="sm"
                   variant="secondary"
@@ -76,6 +79,7 @@ export function McpCheckApprovals({ proposals, userDir }: { proposals: CheckAppr
                 >
                   Approve check
                 </PendingButton>
+                )}
                 <PendingButton
                   size="sm"
                   variant="ghost"

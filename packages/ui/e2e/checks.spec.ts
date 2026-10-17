@@ -49,24 +49,27 @@ test.describe("checks", () => {
     const editYaml = "id: pending-edit\nkind: rule\naction: flag\nrule: { type: count, span: { type: tool, name: lookup_order }, at_least: 1 }\n";
     const newYaml = "id: pending-new\nkind: rule\naction: flag\nrule: { type: count, span: { type: tool, name: lookup_order }, at_least: 1 }\n";
     let activeChecks = [{
-      id: "pending-edit", kind: "rule", title: "Existing safe version", source: "user", path: "/checks/pending-edit.yaml", enabled: true,
+      id: "pending-edit", kind: "rule", title: "Existing safe version", source: "user", path: "/project/checks/pending-edit.yaml", enabled: true,
       precision: { hits: 0, dismissed: 0, precision: null, noisy: false }, yaml: safeYaml,
       check: { id: "pending-edit", kind: "rule", action: "flag", rule: { type: "count", span: { type: "tool", name: "lookup_order" }, at_least: 3 } },
     }];
     let proposals = [
-      { id: "pending-edit", revision: "edit-revision", kind: "rule", title: "Edited flag rule", yaml: editYaml, check: { id: "pending-edit", kind: "rule", action: "flag" }, created_ms: 2, target_dir: "/checks", has_active_version: true },
-      { id: "pending-new", revision: "new-revision", kind: "rule", title: "New flag rule", yaml: newYaml, check: { id: "pending-new", kind: "rule", action: "flag" }, created_ms: 1, target_dir: null, has_active_version: false },
+      { id: "pending-edit", revision: "edit-revision", kind: "rule", title: "Edited flag rule", yaml: editYaml, check: { id: "pending-edit", kind: "rule", action: "flag" }, created_ms: 2, target_dir: "/project/checks", target_path: "/project/checks/pending-edit.yaml", manual_application_required: true, has_active_version: true },
+      { id: "pending-new", revision: "new-revision", kind: "rule", title: "New flag rule", yaml: newYaml, check: { id: "pending-new", kind: "rule", action: "flag" }, created_ms: 1, target_dir: null, target_path: "/checks/pending-new.yaml", manual_application_required: false, has_active_version: false },
     ];
     await page.route("**/api/checks", async (route) => {
-      if (route.request().method() !== "GET") return route.continue();
-      await route.fulfill({ json: { checks: activeChecks, pending_mcp_checks: proposals, errors: [], user_dir: "~/.neatroots/checks", project_dirs: [] } });
+      if (route.request().method() === "POST") {
+        expect(route.request().postDataJSON()).toEqual({ yaml: editYaml, dir: "/project/checks", manual_target_path: "/project/checks/pending-edit.yaml" });
+        activeChecks = [{ ...activeChecks[0], title: "Edited flag rule", yaml: editYaml }];
+        return route.fulfill({ json: { id: "pending-edit", path: "/project/checks/pending-edit.yaml" } });
+      }
+      await route.fulfill({ json: { checks: activeChecks, pending_mcp_checks: proposals, errors: [], user_dir: "~/.neatroots/checks", project_dirs: ["/project/checks"] } });
     });
     await page.route("**/api/checks/preview", (route) => route.fulfill({ json: { checked: 2, total: 2, hits: [{ trace_id: "trace-1", probability: null, root_name: "Fixture run" }], hit_rate: 0.5, truncated: false } }));
-    await page.route("**/api/checks/pending-edit/approve", async (route) => {
-      expect(route.request().postDataJSON()).toEqual({ revision: "edit-revision" });
+    await page.route("**/api/checks/pending-edit/approve", () => { throw new Error("existing proposal must not use approval"); });
+    await page.route("**/api/checks/pending-edit/reject", async (route) => {
       proposals = proposals.filter((p) => p.id !== "pending-edit");
-      activeChecks = [{ ...activeChecks[0], source: "mcp", title: "Edited flag rule", yaml: editYaml, check: { ...activeChecks[0].check, action: "flag", rule: { type: "count", span: { type: "tool", name: "lookup_order" }, at_least: 1 } } }];
-      await route.fulfill({ json: { ok: true, id: "pending-edit", path: "/checks/pending-edit.yaml", source: "mcp" } });
+      await route.fulfill({ json: { ok: true } });
     });
     await page.route("**/api/checks/pending-new/reject", async (route) => {
       expect(route.request().postDataJSON()).toEqual({ revision: "new-revision" });
@@ -91,8 +94,16 @@ test.describe("checks", () => {
     }
     await edit.getByRole("button", { name: "Preview check" }).click();
     await expect(edit.getByText("Fires on 1 of 2 runs")).toBeVisible();
-    await edit.getByRole("button", { name: "Approve check" }).click();
-    await expect(page.getByTestId("mcp-check-proposal").filter({ hasText: "pending-edit" })).toHaveCount(0);
+    await expect(edit.getByRole("button", { name: "Approve check" })).toHaveCount(0);
+    await edit.getByRole("button", { name: "Review manually" }).click();
+    const editor = page.getByRole("dialog");
+    await expect(editor.getByText("Review proposed check", { exact: true })).toBeVisible();
+    await expect(editor.getByText("/project/checks/pending-edit.yaml", { exact: true })).toBeVisible();
+    await expect(editor.getByText(/takes human ownership/)).toBeVisible();
+    await editor.getByRole("button", { name: "Save check", exact: true }).click();
+    await expect(edit).toBeVisible();
+    await edit.getByRole("button", { name: "Reject check" }).click();
+    await expect(edit).toHaveCount(0);
     await expect(page.getByRole("row").filter({ hasText: "Edited flag rule" })).toBeVisible();
     await page.getByTestId("mcp-check-proposal").filter({ hasText: "pending-new" }).getByRole("button", { name: "Reject check" }).click();
     await expect(page.getByTestId("mcp-check-proposal")).toHaveCount(0);

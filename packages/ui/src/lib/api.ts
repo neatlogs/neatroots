@@ -399,6 +399,8 @@ export interface CheckApprovalRow {
   created_ms: number;
   target_dir: string | null;
   has_active_version: boolean;
+  target_path: string;
+  manual_application_required: boolean;
 }
 
 export interface ProjectRow {

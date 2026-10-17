@@ -15,7 +15,7 @@ import { useCheckActions, type PreviewResult } from "../_services/check-queries"
 const aborted = (e: unknown) => (e as Error)?.name === "AbortError";
 
 /** Write a check: describe it, let the LLM draft the YAML, preview it on recent runs, save. */
-export function CheckEditor({ open, initialYaml, userDir, onClose }: { open: boolean; initialYaml: string; userDir?: string; onClose: () => void }) {
+export function CheckEditor({ open, initialYaml, userDir, targetDir, targetPath, manualApplication, onClose }: { open: boolean; initialYaml: string; userDir?: string; targetDir?: string; targetPath?: string; manualApplication?: boolean; onClose: () => void }) {
   const a = useCheckActions();
   const [concern, setConcern] = useState("");
   const [yaml, setYaml] = useState(initialYaml);
@@ -34,13 +34,14 @@ export function CheckEditor({ open, initialYaml, userDir, onClose }: { open: boo
     <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
       <SheetContent side="right" className="flex w-full flex-col gap-0 p-0 sm:max-w-xl">
         <SheetHeader className="gap-1 border-b border-border px-6 py-4 pr-12">
-          <SheetTitle className="text-base font-normal">{initialYaml ? "Edit a copy" : "New check"}</SheetTitle>
+          <SheetTitle className="text-base font-normal">{manualApplication ? "Review proposed check" : initialYaml ? "Edit a copy" : "New check"}</SheetTitle>
           <SheetDescription className="text-xs">
-            Saved to <span className="font-mono">{userDir ?? "~/.neatroots/checks"}</span>. To share checks with your team, run <span className="font-mono">neatroots init</span> in
+            Saved to <span className="font-mono">{targetPath ?? targetDir ?? userDir ?? "~/.neatroots/checks"}</span>. To share checks with your team, run <span className="font-mono">neatroots init</span> in
             your repo.
           </SheetDescription>
         </SheetHeader>
         <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-6 py-5">
+          {manualApplication && <p className="text-xs text-muted-foreground">Review the YAML and target before saving. Save check applies your manual edit and takes human ownership; it does not approve the MCP proposal. After saving, reject the obsolete proposal.</p>}
           <Field>
             <FieldLabel htmlFor="concern">Describe a problem in plain language</FieldLabel>
             <Textarea
@@ -161,7 +162,7 @@ export function CheckEditor({ open, initialYaml, userDir, onClose }: { open: boo
             disabled={!yaml}
             pending={a.save.isPending}
             onClick={() =>
-              a.save.mutate(yaml, {
+              a.save.mutate(targetDir ? { yaml, dir: targetDir, ...(manualApplication ? { manual_target_path: targetPath } : {}) } : yaml, {
                 onSuccess: (r) => {
                   toast.success(`Saved ${r.id} to ${r.path}`);
                   onClose();

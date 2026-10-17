@@ -7,6 +7,7 @@ import { AnyCheck, isQuestion, isRule, type Check, type CheckSource, type Loaded
 import type { McpCheckProposalRow, Store } from "../store/db.js";
 import { log } from "../util/log.js";
 import { assertNoHaltFromAgent } from "./agent-policy.js";
+import { McpManualApplicationError } from "./mcp-approval-policy.js";
 
 function findLibraryDir(): string {
   let dir = path.dirname(fileURLToPath(import.meta.url));
@@ -88,6 +89,8 @@ export interface PendingMcpCheck {
   created_ms: number;
   target_dir: string | null;
   has_active_version: boolean;
+  target_path: string;
+  manual_application_required: boolean;
 }
 
 type CheckDestinationSnapshot =
@@ -278,7 +281,9 @@ export class CheckRegistry {
     const { checks } = parseChecks(row.body);
     const check = checks.find((c) => c.id === row.id);
     if (!check) return undefined;
-    return { check, revision: row.revision, created_ms: row.created_ms, target_dir: row.target_dir, has_active_version: this.enabled().some((c) => c.check.id === row.id) };
+    let destination = path.join(row.target_dir ?? this.userDir, `${row.id}.yaml`), manual = true;
+    try { destination = this.approvalDestination(row.id, row.target_dir, check); manual = this.destinationSnapshot(destination).kind !== "missing"; } catch { /* unreadable targets require manual review */ }
+    return { check, revision: row.revision, created_ms: row.created_ms, target_dir: row.target_dir, target_path: destination, manual_application_required: manual, has_active_version: this.enabled().some((c) => c.check.id === row.id) };
   }
 
   pendingMcp(): PendingMcpCheck[] {
@@ -350,17 +355,14 @@ export class CheckRegistry {
   private saveApprovedMcp(check: Check, destination: string, snapshot: CheckDestinationSnapshot): LoadedCheck {
     const parsed = AnyCheck.parse(check) as Check;
     assertNoHaltFromAgent(parsed, this.get(parsed.id)?.check);
-    if (snapshot.kind === "other") throw new Error("approval target conflict; destination is not a regular file");
-    if (snapshot.kind === "unreadable") throw new Error("approval target conflict; destination cannot be read");
-    const text = snapshot.kind === "file" ? replaceInYaml(snapshot.bytes.toString("utf8"), parsed) : checkToYaml(parsed);
-    if (text === undefined) throw new Error("approval target conflict; existing destination content does not contain this check ID");
+    if (snapshot.kind !== "missing") throw new McpManualApplicationError(destination);
+    const text = checkToYaml(parsed);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     const originKey = `mcp_origin:${parsed.id}`;
     const previousOrigin = this.store.getMeta(originKey);
     this.store.setMeta(originKey, JSON.stringify([checkToYaml(parsed), path.resolve(destination)]));
     try {
-      if (snapshot.kind === "missing") fs.writeFileSync(destination, text, { encoding: "utf8", flag: "wx" });
-      else fs.writeFileSync(destination, text, "utf8");
+      fs.writeFileSync(destination, text, { encoding: "utf8", flag: "wx" });
     } catch (error) {
       const exclusiveConflict = snapshot.kind === "missing" && (error as NodeJS.ErrnoException).code === "EEXIST";
       // Restore only proven no-writes; changed or unreadable content retains MCP provenance.
@@ -423,8 +425,9 @@ export class CheckRegistry {
    * A check that already lives in a user or project file is updated in that file, unless
    * `target` names a different directory.
    */
-  save(check: Check, target: "user" | "db" | { dir: string }, source: CheckSource = "user"): LoadedCheck {
+  save(check: Check, target: "user" | "db" | { dir: string }, source: CheckSource = "user", expectedPath?: string): LoadedCheck {
     const parsed = AnyCheck.parse(check) as Check;
+    if (expectedPath) this.reload();
     if (source === "mcp") assertNoHaltFromAgent(parsed, this.checks.get(parsed.id)?.check);
     let p: string | null = null;
     const recordOrigin = (file: string) => {
@@ -450,14 +453,14 @@ export class CheckRegistry {
         fs.existsSync(current.path)
           ? replaceInYaml(fs.readFileSync(current.path, "utf8"), parsed)
           : undefined;
+      p = inPlace !== undefined ? current!.path! : path.join(dir, `${parsed.id}.yaml`);
+      if (expectedPath && (path.resolve(p) !== path.resolve(expectedPath) || (current?.path && current.source !== "library" && path.resolve(current.path) !== path.resolve(expectedPath)))) throw new Error("manual target changed; refresh the proposal and review its current destination before saving");
       if (inPlace !== undefined) {
-        p = current!.path!;
         if (source === "mcp") recordOrigin(p);
         fs.writeFileSync(p, inPlace, "utf8");
         if (source !== "mcp") recordOrigin(p);
       } else {
         fs.mkdirSync(dir, { recursive: true });
-        p = path.join(dir, `${parsed.id}.yaml`);
         if (source === "mcp") recordOrigin(p);
         fs.writeFileSync(p, checkToYaml(parsed), "utf8");
         if (source !== "mcp") recordOrigin(p);

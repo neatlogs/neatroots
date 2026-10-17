@@ -114,7 +114,7 @@ it("preserves unrelated YAML entries at an existing proposal destination", async
   fs.writeFileSync(file, original);
   const proposal = t.roots.checks.proposeMcp(check, null);
 
-  expect(() => t.roots.checks.approvePendingMcp(check.id, proposal.revision)).toThrow(/approval target conflict/);
+  expect(() => t.roots.checks.approvePendingMcp(check.id, proposal.revision)).toThrow(/Manual application required/);
   expect(fs.readFileSync(file, "utf8")).toBe(original);
   expect(t.roots.checks.get(check.id)).toBeUndefined();
   expect(t.roots.checks.pendingMcpCheck(check.id)?.revision).toBe(proposal.revision);
@@ -231,17 +231,21 @@ it("MCP edits stay pending without changing the active check before approval", a
     expect(t.roots.checks.get("protected")?.check).toMatchObject({ action: "flag", rule: { at_least: 3 } });
 
     const approved = await fetch(`${t.url}/api/checks/protected/approve`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ revision: t.roots.checks.pendingMcpCheck("protected")!.revision }) });
-    expect(approved.status).toBe(200);
-    expect(await approved.json()).toMatchObject({ ok: true, id: "protected", path: file, source: "mcp" });
+    expect(approved.status).toBe(409);
+    expect(await approved.json()).toMatchObject({ code: "manual_application_required", target_path: file });
+    expect(fs.readFileSync(file, "utf8")).toBe(original);
+    const manual = await fetch(`${t.url}/api/checks`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ yaml: ruleYaml("protected", "flag", 1) }) });
+    expect(manual.status).toBe(200);
     const updated = fs.readFileSync(file, "utf8");
     expect(updated).toContain("action: flag");
     expect(updated).toContain("id: unrelated-entry");
     expect(updated).toContain("at_least: 11");
     expect(t.roots.checks.get("protected")?.check).toMatchObject({ action: "flag", rule: { at_least: 1 } });
-    expect(t.roots.checks.get("protected")?.source).toBe("mcp");
+    expect(t.roots.checks.get("protected")?.source).toBe("user");
     t.roots.checks.reload();
-    expect(t.roots.checks.get("protected")?.source).toBe("mcp");
-    expect(t.roots.checks.pendingMcp()).toHaveLength(0);
+    expect(t.roots.checks.get("protected")?.source).toBe("user");
+    expect(t.roots.checks.pendingMcpCheck("protected")).toBeDefined();
+    t.roots.checks.rejectPendingMcp("protected", t.roots.checks.pendingMcpCheck("protected")!.revision);
   } finally {
     await client.close();
   }
@@ -367,8 +371,11 @@ it.each(["user", "project"])("persists the effective %s target discovered after 
     store.close(); store = new Store(path.join(dir, "data"));
     registry = new CheckRegistry(store, userDir, () => [projectDir]);
     expect(registry.pendingMcpCheck(check.id)).toMatchObject({ target_dir: destinationDir, revision: proposal.revision });
-    const approved = registry.approvePendingMcp(check.id, proposal.revision);
-    expect(approved?.path).toBe(file);
+    expect(() => registry.approvePendingMcp(check.id, proposal.revision)).toThrow("Manual application required");
+    expect(fs.readFileSync(file, "utf8")).toBe(original);
+    const approved = registry.save(check, "user");
+    expect(approved.path).toBe(file);
+    expect(registry.pendingMcpCheck(check.id)?.revision).toBe(proposal.revision);
     expect(registry.get("untouched-target-entry")?.check).toMatchObject({ rule: { at_least: 9 } });
     expect(registry.get(check.id)?.check).toMatchObject({ rule: { at_least: 1 } });
     if (source === "project") expect(fs.existsSync(path.join(userDir, `${check.id}.yaml`))).toBe(false);
@@ -439,7 +446,8 @@ it("legacy blank-target proposals require resubmission before approval", async (
   try {
     const fresh = resultJson(await client.callTool({ name: "create_check", arguments: { check: ruleYaml(check.id, "flag", 1) } }));
     expect(fresh.target_dir).toBe(dir);
-    expect(t.roots.checks.approvePendingMcp(check.id, String(fresh.revision))?.path).toBe(file);
+    expect(() => t.roots.checks.approvePendingMcp(check.id, String(fresh.revision))).toThrow("Manual application required");
+    expect(fs.readFileSync(file, "utf8")).toBe(original);
   } finally { await client.close(); }
 });
 

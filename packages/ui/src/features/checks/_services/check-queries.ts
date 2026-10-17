@@ -35,6 +35,6 @@ export function useCheckActions() {
     // Both wait on the model; a signal lets the person cancel, which also frees its place in the queue.
     draft: useMutation({ mutationFn: (v: { concern: string; signal?: AbortSignal }) => api<{ yaml: string; warnings?: string[] }>("/api/checks/draft", { method: "POST", json: { concern: v.concern }, signal: v.signal }) }),
     preview: useMutation({ mutationFn: (v: { yaml: string; signal?: AbortSignal }) => api<PreviewResult>("/api/checks/preview", { method: "POST", json: { yaml: v.yaml, limit: 50 }, signal: v.signal }) }),
-    save: useMutation({ mutationFn: (yaml: string) => post<{ id: string; path: string; warnings?: string[] }>("/api/checks", { yaml }), onSettled: refresh }),
+    save: useMutation({ mutationFn: (value: string | { yaml: string; dir: string; manual_target_path?: string }) => post<{ id: string; path: string; warnings?: string[] }>("/api/checks", typeof value === "string" ? { yaml: value } : value), onSettled: refresh }),
   };
 }
