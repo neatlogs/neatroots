@@ -45,6 +45,10 @@ const NEAR = [
   "the sk- prefix marks a key",
   "-----begin rsa private key-----",
   "Akiaiosfodnn7example",
+  "I created branch task-add-user-authentication-flow",
+  "Saved the file as risk-assessment-report-q3-2026",
+  "Set the kiosk-mode-configuration-for-lobby",
+  "Added the class desk-top-navigation-container",
 ];
 
 describe("secret-in-output", () => {
@@ -54,6 +58,13 @@ describe("secret-in-output", () => {
 
   it("does not match lowercase or short look-alikes", () => {
     for (const n of NEAR) expect(fires(n)).toBe(false);
+  });
+
+  it("does not flag ordinary hyphenated words ending in sk (issue #356)", () => {
+    expect(fires("I created branch task-add-user-authentication-flow")).toBe(false);
+    expect(fires("Saved the file as risk-assessment-report-q3-2026")).toBe(false);
+    expect(fires("Set the kiosk-mode-configuration-for-lobby")).toBe(false);
+    expect(fires("Added the class desk-top-navigation-container")).toBe(false);
   });
 
   it("labeled smoke: 120 outputs, 60 with a key and 60 look-alikes, every verdict matches", () => {
