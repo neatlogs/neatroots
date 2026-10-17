@@ -193,6 +193,20 @@ export class Relay {
     if (unknown.length) {
       return this.roots.store.insertForward({ ...base, status: "error", http_status: null, span_count: 0, bytes: 0, redactions: 0, error: `no run with id ${unknown.join(", ")}` });
     }
+    // A payload a span references but that is not on disk would be sent as a placeholder instead of
+    // the prompt or output it was, so refuse rather than report a forward that lost content.
+    const missing = this.roots.store.missingBlobs(traceIds);
+    if (missing.length) {
+      return this.roots.store.insertForward({
+        ...base,
+        status: "error",
+        http_status: null,
+        span_count: 0,
+        bytes: 0,
+        redactions: 0,
+        error: `${missing.length} payload file(s) this run references are missing from the store (run neatroots store verify); forwarding would send them as placeholders`,
+      });
+    }
     if (!key) {
       return this.roots.store.insertForward({ ...base, status: "error", http_status: null, span_count: 0, bytes: 0, redactions: 0, error: "No Neatlogs Cloud API key. Add one with `neatroots cloud login` or in the app." });
     }

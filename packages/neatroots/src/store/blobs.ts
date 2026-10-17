@@ -10,6 +10,16 @@ export interface BlobRef {
   blobRef: { sha: string; len: number };
 }
 
+/**
+ * What a blob reference reads back as when its payload is gone. A store copied without its
+ * `blobs/` tree keeps the references and loses the payloads; reading those back as an empty string
+ * hides the loss on every surface (the run page, the API, MCP, cloud forward), so a missing payload
+ * says so instead.
+ */
+export function missingPayload(ref: { sha: string; len: number }): string {
+  return `[neatroots: payload missing, sha ${ref.sha} (${ref.len} bytes)]`;
+}
+
 export class BlobStore {
   constructor(private readonly dir: string) {
     fs.mkdirSync(dir, { recursive: true });
@@ -35,6 +45,23 @@ export class BlobStore {
     } catch {
       return undefined;
     }
+  }
+
+  /** Whether this payload is on disk. `get` cannot tell an empty file from a missing one. */
+  has(sha: string): boolean {
+    return fs.existsSync(this.file(sha));
+  }
+
+  /** Every payload file on disk, as shas. Used to find files nothing references. */
+  shas(): string[] {
+    const out: string[] = [];
+    if (!fs.existsSync(this.dir)) return out;
+    for (const sub of fs.readdirSync(this.dir)) {
+      const p = path.join(this.dir, sub);
+      if (!fs.statSync(p).isDirectory()) continue;
+      for (const f of fs.readdirSync(p)) out.push(sub + f);
+    }
+    return out;
   }
 
   delete(sha: string): void {
@@ -89,7 +116,7 @@ export class BlobStore {
 
   private rehydrateValue(v: AnyValue): AnyValue {
     const ref = (v as unknown as BlobRef).blobRef;
-    if (ref) return { stringValue: this.get(ref.sha) ?? "" };
+    if (ref) return { stringValue: this.get(ref.sha) ?? missingPayload(ref) };
     if ("arrayValue" in v) return { arrayValue: { values: v.arrayValue.values.map((x) => this.rehydrateValue(x)) } };
     if ("kvlistValue" in v) return { kvlistValue: { values: this.rehydrate(v.kvlistValue.values) } };
     return v;

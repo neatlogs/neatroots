@@ -376,9 +376,33 @@ export function currentRequest(v: Parameters<typeof preview>[0]): string | undef
   return undefined;
 }
 
+/** What `Store.verify()` found on disk. `missing` and a `quick_check` other than "ok" are problems. */
+export interface StoreVerify {
+  file: string;
+  blobs_dir: string;
+  quick_check: string;
+  schema_version: string | null;
+  runs: number;
+  spans: number;
+  /** Distinct payloads a span references. */
+  referenced: number;
+  /** Payload files on disk. */
+  present: number;
+  /** Referenced payloads that are not on disk: their reads report a missing payload. */
+  missing: string[];
+  /** Payload files no span references any more. */
+  orphaned: string[];
+  /** Bytes of referenced payloads that are on disk. */
+  referenced_bytes: number;
+  /** Bytes of all payload files on disk. */
+  present_bytes: number;
+}
+
 /** Search covers this much of each input, output and error: the start and the end of long values. */
 export const SEARCH_LIMIT = { head: 150_000, tail: 50_000 };
 const SEARCH_INDEX_VERSION = 2;
+/** The store layout this build writes and reads. A store with a higher number is from a newer build. */
+export const SCHEMA_VERSION = 1;
 /** A store over its size cap is trimmed to this share of the cap, so it isn't trimmed every hour. */
 export const RETENTION_LOW_WATER = 0.9;
 
@@ -429,7 +453,13 @@ export class Store {
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("busy_timeout = 5000");
     this.db.exec(SCHEMA);
-    this.migrate();
+    try {
+      this.migrate();
+    } catch (err) {
+      // A refused store must not keep its file locked on the way out.
+      this.db.close();
+      throw err;
+    }
     this.searchIds = new SearchIds(this.db);
     this.blobs = new BlobStore(path.join(dir, "blobs"));
     const row = this.db.prepare("SELECT MAX(seq) AS s FROM spans").get() as { s: number | null };
@@ -449,7 +479,17 @@ export class Store {
     ensure("plans", "body", "TEXT");
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
-    this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
+    // A store written by a newer neatroots may have columns this binary doesn't know about, so
+    // refuse it here with a readable message instead of failing later on a missing column.
+    const found = this.getMeta("schema_version");
+    const version = found ? Number(found) : SCHEMA_VERSION;
+    if (Number.isFinite(version) && version > SCHEMA_VERSION) {
+      throw new Error(
+        `this store was written by a newer neatroots (store schema ${version}, this build reads ${SCHEMA_VERSION}). ` +
+          `Update neatroots, or start it against a different home directory.`,
+      );
+    }
+    this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
   }
 
   // ------------------------------------------------------------------ ingest
@@ -1428,6 +1468,52 @@ export class Store {
       (this.db.prepare("SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.blobs IS NOT NULL AND j.value IN (SELECT value FROM json_each(?))").all(JSON.stringify(shas)) as { sha: string }[]).map((r) => r.sha),
     );
     for (const sha of shas) if (!used.has(sha)) this.blobs.delete(sha);
+  }
+
+  /**
+   * The payload shas the given traces reference but that are not on disk. A store copied without
+   * its `blobs/` tree has these; every read of them reports a missing payload rather than an empty
+   * one, and forwarding refuses to send a trace with any.
+   */
+  missingBlobs(traceIds?: string[]): string[] {
+    const where = traceIds?.length ? "AND trace_id IN (SELECT value FROM json_each(?))" : "";
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j
+         WHERE spans.blobs IS NOT NULL ${where}`,
+      )
+      .all(...(traceIds?.length ? [JSON.stringify(traceIds)] : [])) as { sha: string }[];
+    return rows.map((r) => r.sha).filter((sha) => !this.blobs.has(sha));
+  }
+
+  /**
+   * What is actually on disk, for `neatroots store verify`: the database's own integrity check,
+   * the schema version, every payload a span references, which of those are gone, and payload
+   * files nothing references any more.
+   */
+  verify(): StoreVerify {
+    const rows = this.db.prepare("PRAGMA quick_check").all() as Record<string, string>[];
+    const quick = Object.values(rows[0] ?? {})[0] ?? "unknown";
+    const referenced = new Set(
+      (this.db.prepare("SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.blobs IS NOT NULL").all() as { sha: string }[]).map((r) => r.sha),
+    );
+    const present = this.blobs.shas();
+    const missing = [...referenced].filter((sha) => !this.blobs.has(sha));
+    const n = (sql: string) => (this.db.prepare(sql).get() as { n: number }).n;
+    return {
+      file: this.file,
+      blobs_dir: path.join(this.dir, "blobs"),
+      quick_check: quick,
+      schema_version: this.getMeta("schema_version") ?? null,
+      runs: n("SELECT COUNT(*) AS n FROM runs"),
+      spans: n("SELECT COUNT(*) AS n FROM spans"),
+      referenced: referenced.size,
+      present: present.length,
+      missing,
+      orphaned: present.filter((sha) => !referenced.has(sha)),
+      referenced_bytes: [...referenced].reduce((total, sha) => total + this.blobs.sizeOf(sha), 0),
+      present_bytes: this.blobs.size(),
+    };
   }
 
   stats(): { runs: number; spans: number; findings: number; bytes: number } {

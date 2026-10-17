@@ -3,6 +3,14 @@ import { open, state, watchErrors } from "./util";
 
 // The e2e server's Codex is e2e/fixtures/fake-codex; Claude Code isn't installed.
 
+/**
+ * neatroots spawns the agent CLI directly, with no shell, and the e2e Codex is a POSIX shell script:
+ * Windows can't execute it (`spawn ENOENT`), and a `.cmd` shim can't stand in either (Node refuses
+ * to run one without `shell: true`, which neatroots must not pass to a CLI it launches). The same
+ * reason the neatroots agent-chat tests skip on Windows; the tests still run on CI's Linux and macOS.
+ */
+const needsPosixCli = process.platform === "win32" ? "the e2e Codex CLI is a POSIX shell script" : false;
+
 test.describe("coding agents", () => {
   test("shows Claude Code as not installed when its CLI isn't found", async ({ page }) => {
     await open(page, "agents");
@@ -11,6 +19,7 @@ test.describe("coding agents", () => {
   });
 
   test("a chat survives sending, reloading, leaving and starting a new one", async ({ page }) => {
+    test.skip(!!needsPosixCli, needsPosixCli as string);
     // QA's browser returned a value from scrollIntoView; production React then called it as an
     // effect cleanup and the whole page went blank. Do the same here.
     await page.addInitScript(() => {
@@ -47,6 +56,7 @@ test.describe("coding agents", () => {
   });
 
   test("a sign-in failure is explained in the chat and the page keeps working", async ({ page }) => {
+    test.skip(!!needsPosixCli, needsPosixCli as string);
     const errors = watchErrors(page);
     await open(page, "agents");
     await page.getByPlaceholder("~/code/my-agent").fill(state().home);
