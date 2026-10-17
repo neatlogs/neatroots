@@ -114,6 +114,7 @@ function asList(v: string | string[] | undefined): string[] | undefined {
 export function matchesSelector(s: SpanInfo, sel: SpanSelector | undefined): boolean {
   if (!sel) return true;
   if (sel.stream_cancelled !== undefined && s.streamCancelled !== sel.stream_cancelled) return false;
+  if (sel.has_error !== undefined && Boolean(s.error) !== sel.has_error) return false;
   const types = asList(sel.type);
   if (types && !types.includes(s.kind.toLowerCase())) return false;
   const names = asList(sel.name);

@@ -8,6 +8,8 @@ export const SpanSelector = z
     tool: z.union([z.string(), z.array(z.string())]).optional(),
     /** Match only an explicitly reported SDK stream cancellation state. */
     stream_cancelled: z.boolean().optional(),
+    /** Match the presence of a derived error, including exception-event details. */
+    has_error: z.boolean().optional(),
     status: z.enum(["ok", "error", "unset", "any"]).optional(),
   })
   .strict();

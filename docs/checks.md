@@ -40,8 +40,10 @@ action: flag              # or halt (your own rules only; needs steering on for 
 Span selectors can also use `stream_cancelled: true` to match the public SDK's explicit
 `neatlogs.stream.cancelled` flag (`false` matches only an explicit false value; missing telemetry
 matches neither). The shipped `stream-abandoned` rule flags cancelled LLM replies that have no
-error status. `status: ok` includes both OK and UNSET spans, as successful SDK calls often use
-UNSET. Failed calls remain covered by `llm-call-failed`.
+error status or derived error. The selector `has_error: true` matches a nonempty derived error
+(including exception-event type/message details); `false` excludes it. `status: ok` still includes
+both OK and UNSET spans, as successful SDK calls often use UNSET. `llm-call-failed` covers explicit
+ERROR statuses; exception evidence on an UNSET or OK span is retained without that failure finding.
 
 ## Questions
 

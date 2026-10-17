@@ -41,7 +41,7 @@
   title: A streamed model reply was abandoned before it finished
   rule:
     type: count
-    span: { type: llm, status: ok, stream_cancelled: true }
+    span: { type: llm, status: ok, has_error: false, stream_cancelled: true }
     at_least: 1
   guidance: >-
     A streamed model reply was abandoned before it finished. Check for an early break,
