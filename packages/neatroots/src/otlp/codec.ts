@@ -252,6 +252,7 @@ export function decodeTraceJson(body: unknown): ResourceSpansBatch[] {
 }
 
 export interface OtlpLogRecord {
+  eventName?: string;
   timeUnixNano: string;
   severityText?: string;
   severityNumber?: number;
@@ -272,6 +273,7 @@ function normLogs(obj: any): OtlpLogRecord[] {
       for (const lr of objects(g(sl, "logRecords", "log_records"), "logRecords")) {
         out.push({
           timeUnixNano: longToString(g(lr, "timeUnixNano", "time_unix_nano") ?? g(lr, "observedTimeUnixNano", "observed_time_unix_nano")),
+          eventName: g(lr, "eventName", "event_name") || undefined,
           severityText: g(lr, "severityText", "severity_text") || undefined,
           severityNumber: num(g(lr, "severityNumber", "severity_number")),
           body: normValue(lr.body),

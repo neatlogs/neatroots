@@ -7,6 +7,7 @@ import {
   decodeTraceProtobuf,
   encodeTraceResponse,
 } from "../otlp/codec.js";
+import type { OtlpLogRecord } from "../otlp/codec.js";
 import type { ResourceSpansBatch } from "../otlp/types.js";
 import { traceReadback } from "./readback.js";
 import { HttpTraceError, httpTraceToBatches } from "../ingest/http-trace.js";
@@ -92,12 +93,19 @@ export function mountCollector(app: Hono, roots: Roots): void {
   });
 
   app.post("/v1/logs", async (c) => {
+    let records: OtlpLogRecord[];
     try {
       const body = await readBody(c);
-      const records = isJson(c) ? decodeLogsJson(JSON.parse(body.toString("utf8"))) : decodeLogsProtobuf(body);
-      roots.store.ingestLogs(records);
+      records = isJson(c) ? decodeLogsJson(JSON.parse(body.toString("utf8"))) : decodeLogsProtobuf(body);
     } catch (err) {
-      return c.json({ code: 3, message: `invalid OTLP logs payload: ${(err as Error).message}` }, 400);
+      return c.json({ code: 3, message: `invalid OTLP logs payload: ${(err as Error).message}` }, ((err as { status?: number }).status ?? 400) as 400);
+    }
+    try {
+      roots.ingestLogs(records);
+    } catch (err) {
+      log.error("log ingest failed", err);
+      // OTLP/HTTP retries 503, whereas 500 requires dropping the batch.
+      return c.json({ code: 14, message: "neatroots could not store these logs" }, 503);
     }
     if (isJson(c)) return c.json({ partialSuccess: {} });
     return new Response(new Uint8Array(), { status: 200, headers: { "content-type": "application/x-protobuf" } });

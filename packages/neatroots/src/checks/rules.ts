@@ -1,3 +1,4 @@
+import { sha256 } from "../util/ids.js";
 import type { RuleCheck } from "./types.js";
 import { finalOutput, selectSpans, type SpanInfo, type TraceSnapshot } from "../engine/trace.js";
 import { preview } from "../semantics/view.js";
@@ -13,7 +14,8 @@ const matchMemo = new Map<string, boolean>();
 const TIMED_OUT = Symbol("timed out");
 
 export interface RuleHit {
-  /** Whether the condition holds now, looking at the latest spans. */
+  /** Whether the condition holds now. A false run_end/no_output hit disproves the missing-answer
+   * state; other false hits can retain evidence of a real historical loop or error streak. */
   firing: boolean;
   evidenceSpanIds: string[];
   params: Record<string, string>;
@@ -104,9 +106,12 @@ function matchTexts(v: unknown): string[] {
  * Evaluates one rule against a trace. Returns null when the rule has never held in this
  * trace; otherwise `firing` says whether it still holds for the newest spans, which is how
  * a finding later resolves. `fresh` names the spans that just arrived: a streak they complete
- * fires even if a later span in the same batch already ended it.
+ * fires even if a later span in the same batch already ended it. A nonfiring run_end/no_output
+ * result is state-only: a late answer disproves it and must not count as a historical failure.
+ * includeClearedMatches also reports successful zero-match evaluations to reconcile findings;
+ * invalid or timed-out patterns stay unknown (null), and ordinary preview callers keep null misses.
  */
-export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, untrusted = false): RuleHit | null {
+export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, untrusted = false, options: { includeClearedMatches?: boolean } = {}): RuleHit | null {
   const r = check.rule;
   switch (r.type) {
     case "repeat": {
@@ -226,7 +231,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
           if (v === undefined || v === null) return false;
           const texts = matchTexts(v);
           if (!untrusted) return texts.some(test);
-          const memo = `${key}\u0000${t.run?.trace_id ?? ""}\u0000${s.id}\u0000${r.field}\u0000${texts.reduce((n, x) => n + x.length, 0)}`;
+          const memo = `${key}\u0000${t.run?.trace_id ?? ""}\u0000${s.id}\u0000${r.field}\u0000${sha256(JSON.stringify(texts))}`;
           const known = matchMemo.get(memo);
           if (known !== undefined) return known;
           const found = texts.some(test);
@@ -240,7 +245,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
         log.warn(`check ${check.id}: its pattern took over ${MATCH_MS} ms on one span, so it is skipped until neatroots restarts. Simplify the regex (overlapping alternatives in a repeat, like (a|aa)+, are slow).`);
         return null;
       }
-      if (!hits.length) return null;
+      if (!hits.length) return options.includeClearedMatches ? { firing: false, evidenceSpanIds: [], params: { count: "0" } } : null;
       return { firing: true, evidenceSpanIds: hits.map((s) => s.id), params: { count: String(hits.length), span: hits[0].ref } };
     }
     case "requires_before": {
@@ -350,6 +355,8 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
         const out = finalOutput(t);
         const empty = !out || /^("?\s*"?|null|\{\}|\[\])$/.test(out.trim());
         if (empty && t.run.status !== "error") return { firing: true, evidenceSpanIds: [root.id], params: {} };
+        // Exporters may send message logs after run-end; a recorded answer disproves this finding.
+        if (!empty) return { firing: false, evidenceSpanIds: [root.id], params: {} };
       }
       return null;
     }

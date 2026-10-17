@@ -57,6 +57,7 @@ export function buildChat(t: TraceSnapshot, rootSpanId?: string): { root: string
       walk(c);
     }
   };
+  if (root.kind === "LLM") inScope.push(root);
   walk(root);
   inScope.sort((a, b) => a.startMs - b.startMs || a.seq - b.seq);
   const hasTools = inScope.some((s) => s.kind === "TOOL" || s.kind === "MCP_TOOL");

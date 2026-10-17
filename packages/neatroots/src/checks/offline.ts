@@ -55,7 +55,9 @@ export function checkFiles(files: string[], opts: OfflineOptions = {}): { runs: 
           const list = (v: string | string[] | undefined) => (v === undefined ? undefined : Array.isArray(v) ? v : [v]);
           if (run && ((list(a?.project) && !list(a?.project)!.includes(run.project ?? "")) || (list(a?.workflow) && !list(a?.workflow)!.includes(run.workflow ?? "")))) continue;
           const hit = evaluateRule(rule, snap, true, undefined, untrusted.has(rule.id));
-          if (hit) findings.push({ check_id: rule.id, title: rule.title ?? rule.id, evidence_span_ids: hit.evidenceSpanIds, params: hit.params });
+          // Other nonfiring hits can describe a real historical loop or error streak.
+          const disprovenOutput = rule.rule.type === "run_end" && rule.rule.when === "no_output" && !hit?.firing;
+          if (hit && !disprovenOutput) findings.push({ check_id: rule.id, title: rule.title ?? rule.id, evidence_span_ids: hit.evidenceSpanIds, params: hit.params });
         }
         runs.push({ file, trace_id: traceId, root_name: run?.root_name ?? null, findings });
         // Each file gets its own verdict: a later file with the same trace id must not see these spans.

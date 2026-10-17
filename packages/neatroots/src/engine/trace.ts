@@ -1,5 +1,5 @@
 import type { Store } from "../store/db.js";
-import { buildView, isSystemRole, preview, type SpanKind } from "../semantics/view.js";
+import { isSystemRole, preview, type SpanKind } from "../semantics/view.js";
 import type { Plain } from "../otlp/types.js";
 import type { Evidence, EvidenceField, SpanSelector } from "../checks/types.js";
 import type { RunRow, SpanRow } from "../types.js";
@@ -75,7 +75,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
     }
     const full = store.getOtlpSpan(traceId, row.span_id);
     if (!full) continue;
-    const v = buildView(full.span, full.resource.attributes);
+    const v = store.viewOf(full);
     const info: SpanInfo = {
       id: row.span_id,
       ref: row.span_id.slice(0, 6),

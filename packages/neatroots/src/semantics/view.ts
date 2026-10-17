@@ -1,3 +1,4 @@
+import { genaiMessages, type GenaiEvent } from "./genai-events.js";
 import { kvToPlain, setOwn, type KeyValue, type OtlpSpan, type Plain } from "../otlp/types.js";
 
 /**
@@ -216,7 +217,7 @@ function llmMessages(attrs: Attrs, dir: "input" | "output"): Plain | undefined {
  * OpenTelemetry GenAI messages ({role, parts: [{type: "text", content}]}) and AI SDK
  * content arrays ({type: "text", text}) flattened to {role, content} so they read like chat.
  */
-function normalizeParts(v: Plain): Plain {
+export function normalizeParts(v: Plain): Plain {
   if (!Array.isArray(v)) return v;
   return v.map((m) => {
     if (!m || typeof m !== "object" || Array.isArray(m)) return m;
@@ -225,14 +226,20 @@ function normalizeParts(v: Plain): Plain {
     if (!parts) return msg;
     const texts: string[] = [];
     const calls: Plain[] = [];
+    let responseId: Plain | undefined;
     for (const p of parts) {
       if (!p || typeof p !== "object" || Array.isArray(p)) continue;
       const part = p as Record<string, Plain>;
       if (part.type === "text") texts.push(str(part.content ?? part.text) ?? "");
       else if (part.type === "tool_call" || part.type === "tool-call") calls.push({ id: str(part.id ?? part.toolCallId) ?? null, name: str(part.name ?? part.toolName) ?? "tool", arguments: maybeJson(part.arguments ?? part.args ?? part.input) ?? null });
-      else if (part.type === "tool_call_response" || part.type === "tool-result") texts.push(str(part.response ?? part.result ?? part.output) ?? "");
+      else if (part.type === "tool_call_response" || part.type === "tool-result") {
+        texts.push(str(part.response ?? part.result ?? part.output) ?? "");
+        responseId = part.id ?? part.toolCallId;
+      }
     }
-    const out: Record<string, Plain> = { role: msg.role ?? "user", content: texts.join("\n") };
+    const out: Record<string, Plain> = { ...msg, role: msg.role ?? "user", content: texts.join("\n") };
+    delete out.parts;
+    if (responseId !== undefined) out.tool_call_id = responseId;
     if (calls.length) out.tool_calls = calls;
     return out;
   });
@@ -259,7 +266,7 @@ function exceptionMessage(span: OtlpSpan): string | undefined {
   return undefined;
 }
 
-export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
+export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[], logEvents: GenaiEvent[] = []): SpanView {
   const attrs = kvToPlain(span.attributes);
   const res = kvToPlain(resourceAttrs);
   const kind = deriveKind(span, attrs);
@@ -290,11 +297,12 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
   const genericOut = ["neatlogs.output.value", "output.value", "traceloop.entity.output"];
   switch (kind) {
     case "LLM": {
+      const eventMessages = genaiMessages(span.events, logEvents);
       const msgs = llmMessages(attrs, "input");
-      view.input = msgs ?? maybeJson(first(attrs, ["neatlogs.llm.input", ...genericIn]));
+      view.input = msgs ?? maybeJson(first(attrs, ["neatlogs.llm.input", ...genericIn])) ?? eventMessages.input;
       const out = llmMessages(attrs, "output");
       view.toolCalls = llmToolCalls(attrs);
-      view.output = out ?? maybeJson(first(attrs, ["neatlogs.llm.output", ...genericOut]));
+      view.output = out ?? maybeJson(first(attrs, ["neatlogs.llm.output", ...genericOut])) ?? eventMessages.output;
       if (view.toolCalls && Array.isArray(view.output) && view.output.length) {
         const m = view.output[0] as Record<string, Plain>;
         if (m && typeof m === "object" && !m.tool_calls) {
@@ -302,6 +310,13 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
         }
       } else if (view.toolCalls && view.output === undefined) {
         view.output = [{ role: "assistant", tool_calls: view.toolCalls.map((c) => ({ id: c.id ?? null, name: c.name, arguments: c.arguments })) }];
+      }
+      if (!view.toolCalls && Array.isArray(view.output)) {
+        const calls = view.output.flatMap((m) => m && typeof m === "object" && !Array.isArray(m) && Array.isArray(m.tool_calls) ? m.tool_calls : []);
+        if (calls.some((c) => c && typeof c === "object" && !Array.isArray(c))) view.toolCalls = calls.filter((c) => c && typeof c === "object" && !Array.isArray(c)).map((c) => {
+          const call = c as Record<string, Plain>;
+          return { id: str(call.id), name: str(call.name) ?? "tool", arguments: maybeJson(call.arguments) ?? null };
+        });
       }
       const tools = collectIndexed(attrs, "neatlogs.llm.tools").map((t) => str(t.name)).filter((x): x is string => !!x);
       if (tools.length) view.tools = tools;

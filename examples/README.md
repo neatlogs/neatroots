@@ -23,6 +23,7 @@ and the HTTP API example, and checks that each produced a run. Run `browser`, `i
 | [python-sub-agents](python-sub-agents) | Python | Neatlogs SDK `@span(kind="AGENT")` | An orchestrator with researcher and writer sub-agents |
 | [python-sessions](python-sessions) | Python | Neatlogs SDK sessions | A three-turn chat: open any turn's Conversation tab |
 | [python-replay](python-replay) | Python | Neatlogs SDK + `neatroots_steer` | An agent you can re-run from the app with a different input, model or system prompt |
+| [python-otel-genai-events](python-otel-genai-events) | Python | Plain OpenTelemetry GenAI span events and correlated logs | Prompts, choices and late-arriving messages |
 | [python-opentelemetry](python-opentelemetry) | Python | Plain OpenTelemetry + OpenInference, OTLP/HTTP or gRPC | No Neatlogs SDK at all |
 | [typescript-openai](typescript-openai) | TypeScript | Neatlogs TS SDK `wrapOpenAI` | The support agent on the OpenAI Node SDK |
 | [typescript-vercel-ai](typescript-vercel-ai) | TypeScript | Neatlogs TS SDK `wrapAISDK` | A Vercel AI SDK agent with a tool |

@@ -4,6 +4,8 @@ import type { SpanKind } from "./semantics/view.js";
 export type RunStatus = "running" | "ok" | "error" | "interrupted";
 
 export interface RunRow {
+  /** Accepted derived-content changes, persisted before check work starts. */
+  content_revision?: number;
   trace_id: string;
   session_id: string | null;
   project: string | null;
@@ -154,6 +156,8 @@ export interface PlanRow {
 }
 
 export interface DecisionRow {
+  /** Exact question evidence this verdict assessed; absent for legacy decisions and tool labels. */
+  evidence_hash?: string | null;
   id: string;
   trace_id: string;
   check_id: string;

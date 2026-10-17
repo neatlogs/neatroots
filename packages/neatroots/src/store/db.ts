@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
+import type { GenaiEvent } from "../semantics/genai-events.js";
 import { BlobStore } from "./blobs.js";
 import { SearchIds } from "./search-ids.js";
 import { sha256, newId } from "../util/ids.js";
+import { log } from "../util/log.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
 import { kvToPlain, type KeyValue, type OtlpResource, type OtlpScope, type OtlpSpan, type Plain, type ResourceSpansBatch } from "../otlp/types.js";
 import type {
@@ -271,6 +273,8 @@ export interface IngestedSpan {
 }
 
 export interface TraceUpdate {
+  /** Existing span evidence changed, without a new span or run-end signal. */
+  contentUpdated?: boolean;
   traceId: string;
   spans: IngestedSpan[];
   runCreated: boolean;
@@ -378,7 +382,7 @@ export function currentRequest(v: Parameters<typeof preview>[0]): string | undef
 
 /** Search covers this much of each input, output and error: the start and the end of long values. */
 export const SEARCH_LIMIT = { head: 150_000, tail: 50_000 };
-const SEARCH_INDEX_VERSION = 2;
+const SEARCH_INDEX_VERSION = 5;
 /** A store over its size cap is trimmed to this share of the cap, so it isn't trimmed every hour. */
 export const RETENTION_LOW_WATER = 0.9;
 
@@ -447,6 +451,11 @@ export class Store {
       if (!cols.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     };
     ensure("plans", "body", "TEXT");
+    ensure("logs", "event_name", "TEXT");
+    ensure("runs", "content_revision", "INTEGER NOT NULL DEFAULT 0");
+    ensure("decisions", "evidence_hash", "TEXT");
+    this.db.exec("CREATE TABLE IF NOT EXISTS check_progress (trace_id TEXT PRIMARY KEY, state TEXT NOT NULL, updated_ms INTEGER NOT NULL)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS logs_span_event ON logs (trace_id, span_id, event_name)");
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
     this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
@@ -489,7 +498,7 @@ export class Store {
         const scopeId = this.upsertScope(b.scope);
         const resAttrs = kvToPlain(b.resource.attributes);
         for (const span of b.spans) {
-          const view = buildView(span, b.resource.attributes);
+          const view = buildView(span, b.resource.attributes, this.genaiEvents(span.traceId, span.spanId, b.resource.attributes));
           const previous = this.db
             .prepare(
               `SELECT is_marker, span_kind, status_code, prompt_tokens, completion_tokens, total_tokens, blobs
@@ -698,7 +707,18 @@ export class Store {
       .run(id, run.project, run.workflow, now, now);
   }
 
-  ingestLogs(records: OtlpLogRecord[]): number {
+  ingestLogs(records: OtlpLogRecord[], onUpdate?: (updates: TraceUpdate[]) => void): number {
+    const before = new Map<string, { traceId: string; spanId: string; view: SpanView }>();
+    for (const r of records) {
+      const name = r.eventName || String(kvToPlain(r.attributes)["event.name"] ?? "");
+      if (!r.traceId || !r.spanId || !name.startsWith("gen_ai.")) continue;
+      const key = `${r.traceId}:${r.spanId}`;
+      if (!before.has(key)) {
+        const view = this.spanView(r.traceId, r.spanId);
+        if (view) before.set(key, { traceId: r.traceId, spanId: r.spanId, view });
+      }
+    }
+    const updates = new Map<string, TraceUpdate>();
     const now = Date.now();
     const tx = this.db.transaction(() => {
       for (const r of records) {
@@ -706,7 +726,7 @@ export class Store {
         const body = kvToPlain([{ key: "b", value: r.body }]).b;
         this.db
           .prepare(
-            "INSERT INTO logs (trace_id, span_id, time_ns, severity, body, attributes, resource_id, received_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO logs (trace_id, span_id, time_ns, severity, body, attributes, resource_id, received_ms, event_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
           )
           .run(
             r.traceId || null,
@@ -717,11 +737,56 @@ export class Store {
             JSON.stringify(r.attributes),
             resourceId,
             now,
+            (r.eventName || String(kvToPlain(r.attributes)["event.name"] ?? "")) || null,
           );
       }
+      for (const old of before.values()) {
+        const view = this.spanView(old.traceId, old.spanId)!;
+        if (JSON.stringify(view) === JSON.stringify(old.view)) continue;
+        const input = view.input === undefined ? null : preview(view.input, 600);
+        const output = view.output === undefined ? null : preview(view.output, 600);
+        this.db.prepare("UPDATE spans SET input_preview = ?, output_preview = ?, seq = ? WHERE trace_id = ? AND span_id = ?")
+          .run(input, output, ++this.seq, old.traceId, old.spanId);
+        this.indexSpan(old.traceId, old.spanId, this.getOtlpSpan(old.traceId, old.spanId)!.span.name, view);
+        this.db.prepare("UPDATE runs SET updated_ms = ?, content_revision = content_revision + 1 WHERE trace_id = ?").run(now, old.traceId);
+        this.db.prepare("UPDATE runs SET input_preview = ?, output_preview = ? WHERE trace_id = ? AND root_span_id = ?")
+          .run(view.input === undefined ? null : currentRequest(view.input) ?? preview(view.input, 300), view.output === undefined ? null : preview(view.output, 300), old.traceId, old.spanId);
+        const u = updates.get(old.traceId) ?? { traceId: old.traceId, spans: [], runCreated: false, rootEnded: false, completed: false, contentUpdated: true };
+        u.spans.push({ row: this.getSpanRow(old.traceId, old.spanId)!, view, isNew: false });
+        updates.set(old.traceId, u);
+      }
+      // Commit accepted replacement evidence and its recovery receipt together, before bus delivery.
+      for (const traceId of updates.keys()) this.db.prepare("INSERT INTO check_progress (trace_id, state, updated_ms) VALUES (?, 'checking', ?) ON CONFLICT(trace_id) DO UPDATE SET state = excluded.state, updated_ms = excluded.updated_ms").run(traceId, now);
     });
     tx();
+    if (updates.size) onUpdate?.([...updates.values()]);
     return records.length;
+  }
+
+  /** Correlate logs by both IDs; resource ownership must agree when specified. */
+  genaiEvents(traceId: string, spanId: string, resourceAttrs: KeyValue[]): GenaiEvent[] {
+    const resource = kvToPlain(resourceAttrs);
+    const rows = this.db.prepare("SELECT event_name, time_ns, body, attributes, resource_id FROM logs WHERE trace_id = ? AND span_id = ? AND (event_name LIKE 'gen_ai.%' OR event_name IS NULL) ORDER BY id")
+      .all(traceId, spanId) as { event_name: string | null; time_ns: string; body: string; attributes: string; resource_id: string }[];
+    return rows.flatMap((r) => {
+      const owner = kvToPlain(this.getResource(r.resource_id).attributes);
+      if (["service.name", "tenant.id", "neatlogs.tenant.id"].some((k) => owner[k] !== undefined && resource[k] !== undefined && owner[k] !== resource[k])) return [];
+      const attrs = kvToPlain(json<KeyValue[]>(r.attributes, []));
+      const name = r.event_name ?? String(attrs["event.name"] ?? "");
+      if (!name.startsWith("gen_ai.")) return [];
+      const body = json<Plain>(r.body, r.body);
+      return [{ name, timeUnixNano: r.time_ns, body: body && typeof body === "object" && !Array.isArray(body) ? { ...attrs, ...body } : Object.keys(attrs).length ? { ...attrs, ...(attrs.content === undefined && body !== null ? { content: body } : {}) } : body }];
+    });
+  }
+
+  /** Build the derived view without reloading an already hydrated span. */
+  viewOf(full: { span: OtlpSpan; resource: OtlpResource }): SpanView {
+    return buildView(full.span, full.resource.attributes, this.genaiEvents(full.span.traceId, full.span.spanId, full.resource.attributes));
+  }
+
+  spanView(traceId: string, spanId: string): SpanView | undefined {
+    const full = this.getOtlpSpan(traceId, spanId);
+    return full ? this.viewOf(full) : undefined;
   }
 
   // ------------------------------------------------------------------- reads
@@ -832,7 +897,10 @@ export class Store {
   }
 
   getSpanRow(traceId: string, spanId: string): SpanRow | undefined {
-    return this.getSpans(traceId, true).find((s) => s.span_id === spanId);
+    return this.db.prepare(`SELECT trace_id, span_id, parent_span_id, name, span_kind, otel_kind, start_ns, end_ns, start_ms, end_ms,
+          duration_ms, status_code, status_message, model, provider, tool_name, prompt_tokens, completion_tokens,
+          total_tokens, input_preview, output_preview, error, is_marker, resource_id, scope_id, received_ms, seq
+         FROM spans WHERE trace_id = ? AND span_id = ?`).get(traceId, spanId) as SpanRow | undefined;
   }
 
   /** Reassembles a stored span as OTLP, restoring blob payloads. */
@@ -1069,9 +1137,9 @@ export class Store {
     const row: DecisionRow = { ...d, id: newId("dec"), created_ms: Date.now() };
     this.db
       .prepare(
-        "INSERT INTO decisions (id, trace_id, check_id, span_id, probability, answer, backend, latency_ms, created_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO decisions (id, trace_id, check_id, span_id, probability, answer, backend, latency_ms, created_ms, evidence_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run(row.id, row.trace_id, row.check_id, row.span_id, row.probability, JSON.stringify(row.answer), row.backend, row.latency_ms, row.created_ms);
+      .run(row.id, row.trace_id, row.check_id, row.span_id, row.probability, JSON.stringify(row.answer), row.backend, row.latency_ms, row.created_ms, row.evidence_hash ?? null);
     return row;
   }
 
@@ -1478,26 +1546,74 @@ export class Store {
    * Re-indexes spans stored before the index covered whole values (it kept 4,000 characters of
    * each), a few hundred at a time so startup isn't held up. Runs once per database.
    */
-  reindexSearch(onDone?: (n: number) => void): void {
+  reindexSearch(onDone?: (n: number, error?: Error) => void, onUpdate?: (updates: TraceUpdate[]) => void): void {
     if (this.getMeta("search_index") === String(SEARCH_INDEX_VERSION)) return;
-    let after = 0;
+    const previousVersion = this.getMeta("search_index");
+    // The primary key is stable across replacements; seq is mutable and can have legacy ties.
+    let through: { trace_id: string; span_id: string } | undefined;
+    let after: { trace_id: string; span_id: string } | undefined;
     let n = 0;
     const step = () => {
       if (!this.db.open) return;
-      const rows = this.db.prepare("SELECT seq, trace_id, span_id FROM spans WHERE seq > ? ORDER BY seq LIMIT 300").all(after) as { seq: number; trace_id: string; span_id: string }[];
-      for (const r of rows) {
-        after = r.seq;
-        const full = this.getOtlpSpan(r.trace_id, r.span_id);
-        if (!full) continue;
-        const view = buildView(full.span, full.resource.attributes);
-        if (view.isMarker) continue;
-        this.indexSpan(r.trace_id, r.span_id, full.span.name, view);
-        n++;
-      }
-      if (rows.length) setImmediate(step);
-      else {
-        this.setMeta("search_index", String(SEARCH_INDEX_VERSION));
-        onDone?.(n);
+      try {
+        const updates = new Map<string, TraceUpdate>();
+        let nextAfter = after;
+        let batchCount = 0;
+        let more = false;
+        this.db.transaction(() => {
+          // Another Store can have committed since this instance opened. Reserve the writer
+          // before reading rows or allocating seqs, and never reinstall a selected old seq.
+          const maxSeq = (this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM spans").get() as { s: number }).s;
+          this.seq = Math.max(this.seq, maxSeq);
+          through ??= this.db.prepare("SELECT trace_id, span_id FROM spans ORDER BY trace_id DESC, span_id DESC LIMIT 1").get() as typeof through;
+          const rows = through ? this.db.prepare(`SELECT seq, trace_id, span_id, input_preview, output_preview FROM spans WHERE ${after ? "(trace_id, span_id) > (?, ?) AND " : ""}(trace_id, span_id) <= (?, ?) ORDER BY trace_id, span_id LIMIT 300`)
+            .all(...(after ? [after.trace_id, after.span_id] : []), through.trace_id, through.span_id) as Pick<SpanRow, "seq" | "trace_id" | "span_id" | "input_preview" | "output_preview">[] : [];
+          more = rows.length > 0;
+          for (const r of rows) {
+            nextAfter = { trace_id: r.trace_id, span_id: r.span_id };
+            const fresh = this.getSpanRow(r.trace_id, r.span_id);
+            if (!fresh || fresh.seq !== r.seq) throw new Error(`span changed during reindex for ${r.trace_id}/${r.span_id}`);
+            const full = this.getOtlpSpan(r.trace_id, r.span_id);
+            if (!full) throw new Error(`missing span content for ${r.trace_id}/${r.span_id}`);
+            const events = this.genaiEvents(full.span.traceId, full.span.spanId, full.resource.attributes);
+            const view = buildView(full.span, full.resource.attributes, events);
+            if (view.isMarker) continue;
+            const input = view.input === undefined ? null : preview(view.input, 600);
+            const output = view.output === undefined ? null : preview(view.output, 600);
+            // v4 already refreshed previews, but could leave pre-event findings/answers behind.
+            const attributesOnly = previousVersion === "4" && (events.length || full.span.events?.length) ? buildView({ ...full.span, events: [] }, full.resource.attributes) : undefined;
+            const eventDerived = attributesOnly && JSON.stringify([attributesOnly.input, attributesOnly.output]) !== JSON.stringify([view.input, view.output]);
+            const changed = r.input_preview !== input || r.output_preview !== output || !!eventDerived;
+            if (changed) {
+              const write = this.db.prepare("UPDATE spans SET input_preview = ?, output_preview = ?, seq = ? WHERE trace_id = ? AND span_id = ? AND seq = ?").run(input, output, ++this.seq, r.trace_id, r.span_id, r.seq);
+              if (write.changes !== 1) throw new Error(`span changed during reindex for ${r.trace_id}/${r.span_id}`);
+            }
+            this.db.prepare("UPDATE runs SET input_preview = ?, output_preview = ? WHERE trace_id = ? AND root_span_id = ?").run(view.input === undefined ? null : currentRequest(view.input) ?? preview(view.input, 300), view.output === undefined ? null : preview(view.output, 300), r.trace_id, r.span_id);
+            this.indexSpan(r.trace_id, r.span_id, full.span.name, view);
+            if (changed) {
+              const u = updates.get(r.trace_id) ?? { traceId: r.trace_id, spans: [], runCreated: false, rootEnded: false, completed: false, contentUpdated: true };
+              u.spans.push({ row: this.getSpanRow(r.trace_id, r.span_id)!, view, isNew: false });
+              updates.set(r.trace_id, u);
+            }
+            batchCount++;
+          }
+          // Preview/search changes and recovery receipts commit together, before engine delivery.
+          for (const traceId of updates.keys()) {
+            const now = Date.now();
+            this.db.prepare("UPDATE runs SET content_revision = content_revision + 1, updated_ms = ? WHERE trace_id = ?").run(now, traceId);
+            this.db.prepare("INSERT INTO check_progress (trace_id, state, updated_ms) VALUES (?, 'checking', ?) ON CONFLICT(trace_id) DO UPDATE SET state = excluded.state, updated_ms = excluded.updated_ms").run(traceId, now);
+          }
+          if (!more) this.setMeta("search_index", String(SEARCH_INDEX_VERSION));
+        }).immediate();
+        after = nextAfter;
+        n += batchCount;
+        if (updates.size) onUpdate?.([...updates.values()]);
+        if (more) setImmediate(step);
+        else onDone?.(n);
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        log.warn(`search reindex paused; it will retry on next start: ${error.message}`);
+        onDone?.(n, error);
       }
     };
     setImmediate(step);

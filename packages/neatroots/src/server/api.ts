@@ -4,7 +4,6 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { Roots } from "../core.js";
 import { kvToPlain } from "../otlp/types.js";
-import { buildView } from "../semantics/view.js";
 import { hardwareTier, llmErrorMessage } from "../models/llm.js";
 import { regexProblem } from "../util/regex.js";
 import { allowedEndpoint } from "../relay/endpoint.js";
@@ -77,7 +76,7 @@ export function runDetail(roots: Roots, traceId: string) {
 export function spanDetail(roots: Roots, traceId: string, spanId: string) {
   const full = roots.store.getOtlpSpan(traceId, spanId);
   if (!full) return undefined;
-  const view = buildView(full.span, full.resource.attributes);
+  const view = roots.store.viewOf(full);
   return {
     trace_id: traceId,
     span_id: spanId,

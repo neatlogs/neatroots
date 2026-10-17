@@ -1,3 +1,4 @@
+import { sha256 } from "../util/ids.js";
 import type { Roots } from "../core.js";
 import type { TraceUpdate } from "../store/db.js";
 import type { LlmClient } from "../models/llm.js";
@@ -42,6 +43,8 @@ import { verifyFlag } from "./verify.js";
 /** Default library questions when no LLM is available to plan. */
 export const DEFAULT_PLAN = ["ignored-tool-error", "repeat-without-progress", "unfinished-task", "contradicts-tool-output"];
 
+const decisionEvidenceHash = (text: string, spanIds: string[]) => `v2:${sha256(JSON.stringify([spanIds, text]))}`;
+
 const TRIAGE_LEVELS = [
   "fine, nothing to look at",
   "minor, cosmetic only",
@@ -71,6 +74,9 @@ interface LiveRun {
   used: { plans: number; investigations: number; notes: number; summaries: number };
   deferred: (() => Promise<void>)[];
   spanDone: Set<string>;
+  spanEvidence: Map<string, string>;
+  /** Previously persisted span verdicts that may need replacement after restart. */
+  persistedSpanChecks: Set<string>;
   /** Per span-scope check: spans waiting to be asked about, newest last. */
   spanQueue: Map<string, string[]>;
   spanBusy: Set<string>;
@@ -83,6 +89,7 @@ interface LiveRun {
   dirty: Set<string>;
   debounce?: NodeJS.Timeout;
   endTimer?: NodeJS.Timeout;
+  cleanupTimer?: NodeJS.Timeout;
   /** Rules waiting out RULE_GRACE_MS before raising: false while waiting, true once it is up. */
   ruleGrace: Map<string, boolean>;
   ended: boolean;
@@ -186,9 +193,9 @@ export class Engine {
         const n = (this.jobs.get(traceId) ?? 1) - 1;
         if (n <= 0) {
           this.jobs.delete(traceId);
-          if (this.live.get(traceId)?.endHandled) this.progress.done(traceId);
-          // A debounced trace question still counts as pending; its flush wakes the waiters.
+          // A debounced trace question still counts as pending; retain its recovery receipt.
           if (this.pending(traceId)) return;
+          if (this.live.get(traceId)?.endHandled && !this.hasStaleAnswers(traceId)) this.progress.done(traceId);
           for (const fn of this.idleWaiters.get(traceId) ?? []) fn();
           this.idleWaiters.delete(traceId);
         } else this.jobs.set(traceId, n);
@@ -247,16 +254,26 @@ export class Engine {
     if (r) return r;
     const row = this.roots.store.getRun(traceId);
     if (!row) return undefined;
+    const persistedSpanChecks = new Set<string>();
+    const spanAsked = new Map<string, number>();
+    if (row.content_revision) for (const d of this.roots.store.decisionsForTrace(traceId)) {
+      if (!d.span_id || persistedSpanChecks.has(`${d.check_id}:${d.span_id}`)) continue;
+      persistedSpanChecks.add(`${d.check_id}:${d.span_id}`);
+      spanAsked.set(d.check_id, Math.min(SLOW_SPAN_CHECKS_PER_RUN, (spanAsked.get(d.check_id) ?? 0) + 1));
+    }
     r = {
       traceId,
       project: row.project ?? "unknown",
       workflow: row.workflow ?? row.project ?? "unknown",
+      plan: row.plan_id ? this.roots.store.getPlan(row.plan_id) : undefined,
       used: { plans: 0, investigations: 0, notes: 0, summaries: 0 },
       deferred: [],
       spanDone: new Set(),
+      spanEvidence: new Map(),
+      persistedSpanChecks,
       spanQueue: new Map(),
       spanBusy: new Set(),
-      spanAsked: new Map(),
+      spanAsked,
       retrySpans: new Map(),
       rejected: new Map(),
       traceEvidence: new Map(),
@@ -275,6 +292,22 @@ export class Engine {
     if (!run) return;
     if (run.doctor) {
       this.live.delete(u.traceId);
+      return;
+    }
+    if (u.contentUpdated) {
+      const persisted = this.roots.store.getRun(u.traceId);
+      run.ended ||= persisted?.root_ended === 1 || persisted?.complete === 1;
+      // A reconstructed completed run has no pending original end pass to finish.
+      if (run.ended && !run.endTimer) {
+        run.endHandled = true;
+        this.scheduleCleanup(run);
+      }
+      const ids = u.spans.map((s) => s.row.span_id);
+      for (const { check } of this.questionsFor(run)) {
+        run.answered?.traceChecks.delete(check.id);
+        for (const id of ids) run.spanDone.delete(`${check.id}:${id}`);
+      }
+      this.track(u.traceId, this.handleContentUpdate(run, ids));
       return;
     }
     const fresh = u.spans.filter((s) => s.isNew && !s.view.isMarker);
@@ -328,21 +361,41 @@ export class Engine {
     if (run.plan) this.scheduleQuestions(run, snap, fresh);
   }
 
-  private scheduleQuestions(run: LiveRun, snap: TraceSnapshot, fresh: SpanInfo[]): void {
+  private async handleContentUpdate(run: LiveRun, ids: string[]): Promise<void> {
+    const snap = loadTrace(this.roots.store, run.traceId);
+    this.applyRules(run, snap, run.ended, new Set(ids), { contentOnly: true });
+    const goal = runGoal(snap);
+    if (!run.plan || (run.plan.id === "default" && (goal.system || goal.user || goal.rootInput))) this.ensurePlan(run, snap);
+    if (run.planning) await run.planning;
+    const latest = loadTrace(this.roots.store, run.traceId);
+    this.scheduleQuestions(run, latest, latest.spans, run.ended, true);
+  }
+
+  private scheduleQuestions(run: LiveRun, snap: TraceSnapshot, fresh: SpanInfo[], includeEnd = false, contentUpdate = false): void {
     for (const { check, params } of this.questionsFor(run)) {
-      if (check.when === "end") continue;
+      if (check.when === "end" && !includeEnd) continue;
       const sel = check.evidence?.spans;
       if (check.scope === "span") {
         const queue = run.spanQueue.get(check.id) ?? [];
         for (const s of fresh) {
           const key = `${check.id}:${s.id}`;
-          if (run.spanDone.has(key) || !matchesSelector(s, sel)) continue;
+          if (!matchesSelector(s, sel)) continue;
+          const evidence = buildEvidence(snap, check.evidence, { focus: s }).text;
+          // Goal and earlier tool context can change evidence for a different focus span.
+          if (contentUpdate && run.spanEvidence.get(key) !== evidence) run.spanDone.delete(key);
+          if (run.spanDone.has(key)) continue;
+          if (run.spanEvidence.get(key) === evidence) {
+            run.spanDone.add(key);
+            continue;
+          }
           run.spanDone.add(key);
-          queue.push(s.id);
+          if (!queue.includes(s.id)) queue.push(s.id);
         }
         run.spanQueue.set(check.id, queue);
         if (queue.length) void this.track(run.traceId, this.drainSpanQueue(run, check, params));
-      } else if (fresh.some((s) => matchesSelector(s, sel))) {
+      } else if (contentUpdate || fresh.some((s) => matchesSelector(s, sel))) {
+        // Final output and run goal can change even outside this question's span selector.
+        // askTrace still deduplicates unchanged evidence before making a model call.
         run.dirty.add(check.id);
       }
     }
@@ -359,6 +412,7 @@ export class Engine {
   /**
    * Asks a span-scope question about queued spans. With a fast classifier every span is
    * asked; when the LLM stands in, only the newest waiting span is asked, up to a per-run cap.
+   * Replacements for already judged spans are drained individually without discarding stale work.
    */
   private async drainSpanQueue(run: LiveRun, check: QuestionCheck, params: Record<string, string>): Promise<void> {
     if (run.spanBusy.has(check.id)) return;
@@ -369,7 +423,12 @@ export class Engine {
         if (!queue.length) break;
         const slow = await this.decisions.isSlow([toQuestion(check, params)]);
         let spanId: string;
-        if (slow) {
+        const replacement = queue.findIndex((id) => run.spanEvidence.has(`${check.id}:${id}`) || run.persistedSpanChecks.has(`${check.id}:${id}`));
+        if (slow && replacement >= 0) {
+          // The slow cap limits first-time sampling, not correction of verdicts already shown.
+          // Keep every replacement queued; each ask reloads the latest focused evidence.
+          spanId = queue.splice(replacement, 1)[0];
+        } else if (slow) {
           spanId = queue[queue.length - 1];
           queue.length = 0;
           const asked = run.spanAsked.get(check.id) ?? 0;
@@ -413,14 +472,16 @@ export class Engine {
 
   // ----------------------------------------------------------------- rules
 
-  private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>): void {
+  private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, options: { contentOnly?: boolean } = {}): void {
     for (const lc of this.registry.rules()) {
       const rule = lc.check as RuleCheck;
       if (!this.appliesTo(rule, run)) continue;
-      if (rule.rule.type === "run_end" && !atEnd) continue;
+      if (rule.rule.type === "run_end" && (!atEnd || (options.contentOnly && rule.rule.when !== "no_output"))) continue;
       let hit: RuleHit | null;
       try {
-        hit = evaluateRule(rule, snap, atEnd, fresh, lc.source !== "library");
+        const replacementMatch = rule.rule.type === "match" && (rule.rule.field === "input" || rule.rule.field === "output")
+          && (options.contentOnly || (run.rechecked && !!snap.run?.content_revision));
+        hit = evaluateRule(rule, snap, atEnd, fresh, lc.source !== "library", { includeClearedMatches: replacementMatch });
       } catch (err) {
         log.warn(`rule ${rule.id} failed: ${(err as Error).message}`);
         continue;
@@ -456,7 +517,8 @@ export class Engine {
       } else if (open && hit && !hit.firing) {
         // A streak that ended still happened, so its halt stands. A requires_before whose earlier
         // call arrived late never happened at all, so its halt is withdrawn too.
-        this.resolve(open, { keepHalts: rule.rule.type !== "requires_before" });
+        const disproven = rule.rule.type === "match" || rule.rule.type === "requires_before" || (rule.rule.type === "run_end" && rule.rule.when === "no_output");
+        this.resolve(open, { keepHalts: !disproven });
       }
     }
   }
@@ -498,6 +560,7 @@ export class Engine {
     const span = snap.spans.find((s) => s.id === spanId);
     if (!span) return;
     const ev = buildEvidence(snap, check.evidence, { focus: span });
+    run.spanEvidence.set(`${check.id}:${spanId}`, ev.text);
     const outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, spanId);
     // The model call failed (a timeout or dropped connection lands here too): run end tries once more.
     if (outcome === "unavailable" && !run.endHandled) {
@@ -511,7 +574,7 @@ export class Engine {
     if (run.answered?.traceChecks.has(check.id)) return;
     const ev = buildEvidence(snap, check.evidence);
     if (!ev.spanIds.length && !check.evidence?.final_output) return;
-    const key = ev.spanIds.join(",") + (check.evidence?.final_output ? `|${finalOutput(snap) ?? ""}` : "");
+    const key = JSON.stringify([ev.spanIds, ev.text]);
     if (run.traceEvidence.get(check.id) === key) return;
     run.traceEvidence.set(check.id, key);
     const outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null);
@@ -528,11 +591,21 @@ export class Engine {
     snap: TraceSnapshot,
     spanId: string | null,
   ): Promise<"unavailable" | void> {
+    const current = () => {
+      // Neither a matching revision nor rendered text proves that full evidence IDs still agree.
+      const latest = loadTrace(this.roots.store, run.traceId);
+      const focus = spanId ? latest.spans.find((s) => s.id === spanId) : undefined;
+      if (spanId && !focus) return false;
+      const ev = buildEvidence(latest, check.evidence, focus ? { focus } : {});
+      return ev.text === evidence && JSON.stringify(ev.spanIds) === JSON.stringify(spanIds);
+    };
     let result: DecisionResult;
     try {
       result = await this.decisions.decide(evidence, [toQuestion(check, params)]);
       this.decisionDown = false;
+      if (!current()) return;
     } catch (err) {
+      if (!current()) return;
       if (err instanceof DecisionUnavailableError || err instanceof LlmUnavailableError) {
         if (!this.decisionDown) log.warn(`questions skipped: ${(err as Error).message}`);
         this.decisionDown = true;
@@ -565,6 +638,7 @@ export class Engine {
       check_id: check.id,
       span_id: spanId,
       probability: verdict.probability,
+      evidence_hash: decisionEvidenceHash(evidence, spanIds),
       answer: (answer ? { choice: answer.choice ?? null, score: answer.score ?? null, distribution: answer.distribution } : null) as Plain,
       backend: result.backend,
       latency_ms: result.latencyMs,
@@ -587,6 +661,7 @@ export class Engine {
       // A second look, with a quote that must be in the run, before anything is raised.
       if ((run.rejected.get(check.id) ?? 0) >= 3) return;
       const check2 = check.kind === "yes_no" ? await verifyFlag(this.llm, fillTemplate(check.ask, params) || check.ask, evidence) : undefined;
+      if (!current()) return;
       if (check2 && !check2.verified) {
         run.rejected.set(check.id, (run.rejected.get(check.id) ?? 0) + 1);
         log.debug(`${check.id}: flag not confirmed on a second look${check2.quote ? ` (quote: ${clip(check2.quote, 80)})` : ""}`);
@@ -1034,7 +1109,7 @@ ${library}`;
           const key = `${check.id}:${s.id}`;
           if (run.spanDone.has(key)) continue;
           run.spanDone.add(key);
-          queue.push(s.id);
+          if (!queue.includes(s.id)) queue.push(s.id);
         }
         run.spanQueue.set(check.id, queue);
         await this.drainSpanQueue(run, check, params);
@@ -1051,9 +1126,19 @@ ${library}`;
     }
     for (const work of run.deferred.splice(0)) await work();
     await this.summarize(run, snap);
-    setTimeout(() => {
-      if (!this.pending(run.traceId)) this.live.delete(run.traceId);
+    this.scheduleCleanup(run);
+  }
+
+  /** Evict completed state after idle; long-running replacement checks get another chance. */
+  private scheduleCleanup(run: LiveRun): void {
+    if (run.cleanupTimer || !this.roots.store.db.open) return;
+    run.cleanupTimer = setTimeout(() => {
+      run.cleanupTimer = undefined;
+      if (!this.roots.store.db.open || this.live.get(run.traceId) !== run) return;
+      if (this.pending(run.traceId)) this.scheduleCleanup(run);
+      else this.live.delete(run.traceId);
     }, 60_000);
+    run.cleanupTimer.unref();
   }
 
   private async triageRun(run: LiveRun, snap: TraceSnapshot): Promise<void> {
@@ -1182,7 +1267,8 @@ ${library}`;
       if (isRule(check)) {
         // A previewed check is a draft someone (or a coding agent) wrote, so its pattern is timed.
         const hit = evaluateRule(check, snap, true, undefined, true);
-        if (hit) hits.push({ trace_id: r.trace_id, probability: null, evidence_span_ids: hit.evidenceSpanIds, root_name: r.root_name });
+        const disprovenOutput = check.rule.type === "run_end" && check.rule.when === "no_output" && !hit?.firing;
+        if (hit && !disprovenOutput) hits.push({ trace_id: r.trace_id, probability: null, evidence_span_ids: hit.evidenceSpanIds, root_name: r.root_name });
         continue;
       }
       const targets = check.scope === "span" ? selectSpans(snap.spans, check.evidence?.spans).slice(-5) : [undefined];
@@ -1205,19 +1291,52 @@ ${library}`;
     return { checked, hits, total: runs.length, truncated: checked < runs.length };
   }
 
+  /** Only reuse answers for the evidence currently stored, including after a crash. */
+  private currentAnswers(traceId: string) {
+    const run = this.liveRun(traceId);
+    if (!run) return [];
+    const snap = loadTrace(this.roots.store, traceId);
+    if (!run.plan && snap.run?.plan_id) run.plan = this.roots.store.getPlan(snap.run.plan_id);
+    const questions = new Map(this.questionsFor(run).map(({ check }) => [check.id, check]));
+    const latest = new Map<string, import("../types.js").DecisionRow>();
+    for (const d of this.roots.store.decisionsForTrace(traceId)) latest.set(`${d.check_id}:${d.span_id ?? ""}`, d);
+    return [...latest.values()].filter((d) => {
+      const check = questions.get(d.check_id);
+      if (!check) return true;
+      if (!d.evidence_hash) return !snap.run?.content_revision;
+      const focus = d.span_id ? snap.spans.find((s) => s.id === d.span_id) : undefined;
+      if (d.span_id && !focus) return false;
+      const ev = buildEvidence(snap, check.evidence, focus ? { focus } : {});
+      if (d.evidence_hash.startsWith("v2:")) return d.evidence_hash === decisionEvidenceHash(ev.text, ev.spanIds);
+      // Legacy hashes cannot establish ID equality after accepted replacement content.
+      return !snap.run?.content_revision && d.evidence_hash === sha256(ev.text);
+    });
+  }
+
+  /** Retain the recovery receipt if replacement evidence could not get a new verdict. */
+  private hasStaleAnswers(traceId: string): boolean {
+    if (!this.roots.store.db.open) return true;
+    if (!this.roots.store.getRun(traceId)?.content_revision) return false;
+    const current = new Set(this.currentAnswers(traceId).map((d) => `${d.check_id}:${d.span_id ?? ""}`));
+    return this.roots.store.decisionsForTrace(traceId).some((d) => !current.has(`${d.check_id}:${d.span_id ?? ""}`));
+  }
+
   /** Re-runs the checks for a finished run, e.g. after checks changed. `resume` keeps stored answers. */
   async recheck(traceId: string, opts: { resume?: boolean } = {}): Promise<void> {
     const row = this.roots.store.getRun(traceId);
     if (!row) return;
     this.live.delete(traceId);
     const run = this.liveRun(traceId)!;
-    run.ended = row.status !== "running";
+    run.ended = row.status !== "running" || row.complete === 1 || row.root_ended === 1;
     run.rechecked = true;
     if (opts.resume) {
-      const done = this.roots.store.decisionsForTrace(traceId);
-      for (const d of done) if (d.span_id) run.spanDone.add(`${d.check_id}:${d.span_id}`);
+      const done = this.currentAnswers(traceId);
+      // An unpersisted provisional plan can be restored later by handleSpans. Unknown
+      // historical questions are not reusable answers for that not-yet-selected plan.
+      const selected = new Set(this.questionsFor(run).map(({ check }) => check.id));
+      for (const d of done) if (d.span_id && selected.has(d.check_id)) run.spanDone.add(`${d.check_id}:${d.span_id}`);
       run.answered = {
-        traceChecks: new Set(done.filter((d) => !d.span_id).map((d) => d.check_id)),
+        traceChecks: new Set(done.filter((d) => !d.span_id && selected.has(d.check_id)).map((d) => d.check_id)),
         toolSpans: new Set(done.filter((d) => d.check_id === "neatroots.tool-result" && d.span_id).map((d) => d.span_id!)),
       };
     }
@@ -1235,7 +1354,7 @@ export async function resumeUnfinished(engine: Engine, roots: Roots): Promise<nu
   const ended = ids.filter((id) => {
     const r = roots.store.getRun(id);
     if (!r) engine.progress.done(id);
-    return !!r && r.status !== "running";
+    return !!r && (r.status !== "running" || r.complete === 1 || r.root_ended === 1);
   });
   for (const id of ended.slice(RESUME_LIMIT)) engine.progress.interrupted(id);
   const todo = ended.slice(0, RESUME_LIMIT);
