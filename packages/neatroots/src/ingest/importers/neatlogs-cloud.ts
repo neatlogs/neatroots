@@ -141,12 +141,10 @@ export async function fetchCloudTrace(base: string, auth: CloudAuth, traceId: st
   const spans = exp.data.spans;
   if (!trace || !Array.isArray(spans)) throw new ImportError("Neatlogs Cloud did not return the trace's spans");
   const payloads = await pool(spans, 4, (s) =>
-    getJson<{ data: { fields: { input?: Field; output?: Field; error?: Field } } }>(`${base}/traces/${id}/spans/${encodeURIComponent(s.spanId)}/payload?fields=input,output,error`, {
+    cloudJson<{ data: { fields: { input?: Field; output?: Field; error?: Field } } }>(`${base}/traces/${id}/spans/${encodeURIComponent(s.spanId)}/payload?fields=input,output,error`, {
       headers: headers(auth),
       signal,
-    })
-      .then((r) => r.data.fields)
-      .catch(() => ({}) as { input?: Field; output?: Field; error?: Field }),
+    }).then((r) => r.data.fields),
   );
   const ids = new Set(spans.map((s) => s.spanId));
   const nodes = spans.map<SpanNode>((s, i) => {
