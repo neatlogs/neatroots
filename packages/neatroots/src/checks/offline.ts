@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { evaluateResultAction } from "./result-action.js";
 import { rootsHome } from "../config.js";
 import { loadTrace } from "../engine/trace.js";
 import { parseTraceFile } from "../ingest/importers/file.js";
@@ -21,6 +22,7 @@ export interface OfflineRun {
   trace_id: string;
   root_name: string | null;
   findings: OfflineFinding[];
+  rule_evaluations?: { check_id: string; actions: number; evaluated: number; matched: number; skipped: Record<string, number> }[];
 }
 
 export interface OfflineOptions {
@@ -51,15 +53,17 @@ export function checkFiles(files: string[], opts: OfflineOptions = {}): { runs: 
         const run = store.getRun(traceId);
         const snap = loadTrace(store, traceId);
         const findings: OfflineFinding[] = [];
+        const rule_evaluations: NonNullable<OfflineRun["rule_evaluations"]> = [];
         for (const rule of rules) {
           const a = rule.applies_to;
           const list = (v: string | string[] | undefined) => (v === undefined ? undefined : Array.isArray(v) ? v : [v]);
           if (run && ((list(a?.project) && !list(a?.project)!.includes(run.project ?? "")) || (list(a?.workflow) && !list(a?.workflow)!.includes(run.workflow ?? "")))) continue;
-          const hit = evaluateRule(rule, snap, true);
-          if (hit) findings.push({ check_id: rule.id, title: rule.title ?? rule.id, evidence_span_ids: hit.evidenceSpanIds, params: hit.params });
+          const temporal = rule.rule.type === "result_action" ? evaluateResultAction(rule.rule, snap) : undefined;
+          const hit = temporal ? temporal.hit : evaluateRule(rule, snap, true);
+          if (temporal) rule_evaluations.push({ check_id: rule.id, ...temporal.coverage });
+          if (hit) findings.push({ check_id: rule.id, title: rule.title ?? hit.title ?? rule.id, evidence_span_ids: hit.evidenceSpanIds, params: hit.params });
         }
-        runs.push({ file, trace_id: traceId, root_name: run?.root_name ?? null, findings });
-        // Each file gets its own verdict: a later file with the same trace id must not see these spans.
+        runs.push({ file, trace_id: traceId, root_name: run?.root_name ?? null, findings, ...(rule_evaluations.length ? { rule_evaluations } : {}) });
         store.deleteRun(traceId);
       }
     }

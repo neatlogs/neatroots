@@ -54,6 +54,16 @@ const Base = {
   group: z.string().regex(/^[a-z0-9][a-z0-9_.-]*$/).optional(),
 };
 
+const StructuredPath = z.array(z.union([
+  z.string().min(1).max(100).refine((s) => !["__proto__", "prototype", "constructor"].includes(s), "unsafe path key"),
+  z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+])).max(16);
+const ExplicitSelector = SpanSelector.refine(
+  (s) => [s.type, s.name, s.tool].some((v) => typeof v === "string" ? v.trim().length > 0 : Array.isArray(v) && v.length > 0 && v.every((x) => x.trim().length > 0)),
+  "select a span type, name or tool explicitly",
+);
+const CorrelationField = z.object({ field: z.enum(["input", "output"]), path: StructuredPath }).strict();
+
 export const RuleSpec = z.discriminatedUnion("type", [
   z
     .object({
@@ -151,6 +161,19 @@ export const RuleSpec = z.discriminatedUnion("type", [
     .strict(),
   z
     .object({
+      type: z.literal("result_action"),
+      result: ExplicitSelector,
+      path: StructuredPath,
+      equals: z.union([z.string().max(1000), z.number().finite(), z.boolean(), z.null()]),
+      forbids: ExplicitSelector,
+      within_ms: z.number().finite().positive().max(3_600_000),
+      scope: z.literal("same_parent").default("same_parent"),
+      clock: z.literal("same").default("same"),
+      correlate: z.object({ result: CorrelationField, action: CorrelationField }).strict().optional(),
+    })
+    .strict(),
+  z
+    .object({
       type: z.literal("run_end"),
       /** Fire when the run ends with this condition. */
       when: z.enum(["error", "no_output", "interrupted"]),
@@ -167,7 +190,8 @@ export const RuleCheck = z
     /** halt stops the run through the steering hook; only rules can halt. */
     action: z.enum(["flag", "halt"]).optional(),
   })
-  .strict();
+  .strict()
+  .refine((c) => c.rule.type !== "result_action" || c.action !== "halt", { message: "result_action only checks recorded end-of-run order; it cannot halt", path: ["action"] });
 export type RuleCheck = z.infer<typeof RuleCheck>;
 
 const QuestionBase = {

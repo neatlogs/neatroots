@@ -402,8 +402,10 @@ program
         for (const e of r.errors) console.log(`! ${e}`);
         for (const x of r.runs) {
           const label = `${x.file} ${x.trace_id.slice(0, 8)}${x.root_name ? ` ${x.root_name}` : ""}`;
-          if (!x.findings.length) console.log(`✓ ${label}`);
+          const incomplete = x.rule_evaluations?.some((e) => Object.keys(e.skipped).length > 0);
+          if (!x.findings.length) console.log(`${incomplete ? "?" : "✓"} ${label}${incomplete ? " (temporal contract coverage incomplete)" : ""}`);
           for (const f of x.findings) console.log(`✗ ${label}: ${f.check_id}: ${f.title}`);
+          for (const e of x.rule_evaluations?.filter((e) => Object.keys(e.skipped).length > 0) ?? []) console.log(`  ${e.check_id}: ${e.evaluated}/${e.actions} actions evaluated, ${e.matched} matched; skipped ${JSON.stringify(e.skipped)}`);
         }
         console.log(`\n${r.runs.length} run${r.runs.length === 1 ? "" : "s"}, ${failed.length} with findings, ${r.rules.length} rules`);
       }

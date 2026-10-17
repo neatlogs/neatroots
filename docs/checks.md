@@ -9,7 +9,7 @@ A check is anything neatroots watches for. Checks are YAML, loaded from (later w
 
 ## Rules
 
-Code, no model, every span.
+Code, no model. Most rules check every span; `result_action`, `unrecovered_error` and `run_end` check recorded runs at the end or offline.
 
 ```yaml
 id: repeated-tool-call
@@ -35,7 +35,37 @@ action: flag              # or halt (your own rules only; needs steering on for 
 | `match` | a regex matches a span's `input`, `output`, `error` or `name`; an MCP tool result's `content[].text` items are read like plain output too (the first 200,000 characters in all). A pattern that doesn't compile, or that nests repeats like `(a+)+` and could freeze neatroots, is rejected when the check is saved. That check catches the common slow shape, not every one: a repeat over alternatives that overlap, like `(a\|aa)+`, still gets through, so keep alternatives inside a repeat distinct |
 | `requires_before` | a `span` call has no earlier successful `requires` call in the same run, for example a refund with no order lookup. Spans can arrive out of order, so during a run it waits 250 ms for a late `requires` span before it raises (or halts), and a finding resolves if the earlier call turns up later |
 | `unrecovered_error` | at run end, the last call of a tool failed (no later success of that tool) and the run still produced a final answer that does not say anything failed (a words check, so it is a hint, not proof) |
+| `result_action` | an explicit structured result/value precedes a configured action within a bounded window and recorded parent scope; end/offline only, uncertainty is skipped |
 | `run_end` | the run ended with `error`, `no_output` or `interrupted` |
+
+### Recorded result/action contracts
+
+`result_action` is opt-in and end/offline only. It matches recorded order, not causality or
+whether an action depended on a result. No default check ships with it, and it cannot halt a run.
+
+```yaml
+id: write-after-blocked-result
+kind: rule
+description: Recorded order only; this does not prove the action depended on the result.
+rule:
+  type: result_action
+  result: { tool: permission }
+  path: [allowed]
+  equals: false
+  forbids: { tool: write }
+  within_ms: 5000
+```
+
+The latest preceding result under the same known parent wins. Its scalar value must match
+exactly, with no coercion; the action must start strictly after it ends, within `within_ms`
+(maximum one hour). String path segments select own object properties; integers select array
+indexes. Optional `correlate: {result: {field: input, path: [id]}, action: {field: input, path: [id]}}`
+restricts pairs to the same scalar key. `scope: same_parent` and `clock: same` are defaults;
+the author must ensure timestamps are comparable. Missing data, ties, overlaps, incomplete spans,
+duplicate ids and more than 100,000 candidate comparisons are skipped. Offline `rule_evaluations`
+reports action/evaluated/matched/skipped counts separately from findings. End-of-run evaluation
+uses the usual snapshot; use Re-run checks after late telemetry arrives. A skipped pair is not
+proof that an action was safe.
 
 ## Questions
 
