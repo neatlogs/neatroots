@@ -436,7 +436,8 @@ export class Engine {
       else if (!open && !atEnd && rule.rule.type === "requires_before" && this.waitForLateSpans(run, rule.id)) continue;
       if (hit?.firing) {
         if (open) {
-          const changed = JSON.stringify(open.evidence_span_ids) !== JSON.stringify(hit.evidenceSpanIds);
+          const changed = JSON.stringify(open.evidence_span_ids) !== JSON.stringify(hit.evidenceSpanIds)
+            || JSON.stringify(open.detail.params) !== JSON.stringify(hit.params);
           if (changed) {
             const f = this.roots.store.updateFinding(open.id, { evidence_span_ids: hit.evidenceSpanIds, detail: { ...open.detail, params: hit.params } });
             if (f) this.roots.bus.emit("finding", f);

@@ -34,6 +34,33 @@ function findings(tb: TestRoots) {
   return tb.roots.store.findingsForTrace(traceId).filter((f) => f.check_id === "cache-not-reused");
 }
 
+for (const update of ["later reads", "same-ID writes"] as const) {
+  it(`refreshes cache totals without changing evidence or duplicating a halt after ${update}`, async () => {
+    const { tb, calls } = await setup(true);
+    tb.roots.ingest([batch(calls.slice(0, 3))]);
+    expect(await tb.roots.engine!.waitIdle(traceId, 5000)).toBe(true);
+    const [raised] = findings(tb);
+    expect(raised?.status).toBe("raised");
+    expect(raised.detail.params).toEqual({ cache_write: "200", cache_read: "0" });
+    const pending = tb.roots.store.notesForTrace(traceId, "pending");
+    expect(pending).toMatchObject([{ kind: "halt", finding_id: raised.id }]);
+    const attributes = update === "later reads"
+      ? calls[3].attributes.map((a) => a.key === "neatlogs.llm.token_count.cache_read" ? s(a.key, 50) : a)
+      : calls[1].attributes.map((a) => a.key === "neatlogs.llm.token_count.cache_write" ? s(a.key, 150) : a);
+    const changed = { ...(update === "later reads" ? calls[3] : calls[1]), attributes };
+    tb.roots.ingest([batch([changed])]);
+    expect(await tb.roots.engine!.waitIdle(traceId, 5000)).toBe(true);
+    const current = tb.roots.store.getFinding(raised.id)!;
+    expect(current.status).toBe("raised");
+    expect(current.evidence_span_ids).toEqual(raised.evidence_span_ids);
+    expect(current.detail.params).toEqual(update === "later reads"
+      ? { cache_write: "200", cache_read: "50" } : { cache_write: "250", cache_read: "0" });
+    expect(current.detail.source).toBe(raised.detail.source);
+    expect(findings(tb)).toHaveLength(1);
+    expect(tb.roots.store.notesForTrace(traceId, "pending").map((n) => n.id)).toEqual(pending.map((n) => n.id));
+  });
+}
+
 for (const correction of ["replacement", "identity", "late read"] as const) {
   it(`withdraws an erased cache halt before the next gate claim after ${correction}`, async () => {
     const { tb, calls } = await setup(true);
