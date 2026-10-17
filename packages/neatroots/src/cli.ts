@@ -17,7 +17,7 @@ import { registerCloudImportCommands, registerDataCommands } from "./cli/data.js
 import { connectClient, findClient, listClients, serverCommand, CLIENTS } from "./mcp/clients.js";
 import { parseChecks } from "./checks/registry.js";
 import { checkWarnings } from "./checks/lint.js";
-import { checkFiles } from "./checks/offline.js";
+import { checkFiles, formatJUnit, formatJUnitError } from "./checks/offline.js";
 import { hardwareTier } from "./models/llm.js";
 import { setCloudKey, deleteCloudKey, getCloudKey, getCloudToken } from "./relay/keychain.js";
 import { LAYA_DOWNLOAD_MB } from "./models/laya.js";
@@ -384,12 +384,25 @@ program
   .option("--checks <dir...>", "extra checks folders")
   .option("--only <ids>", "only these rule ids, comma-separated")
   .option("--json", "print the result as JSON")
-  .action((files: string[], opts: { checks?: string[]; only?: string; json?: boolean }) => {
+  .option("--format <format>", "output format (text, json, junit)", "text")
+  .option("--junit <path>", "write JUnit XML report to file")
+  .action((files: string[], opts: { checks?: string[]; only?: string; json?: boolean; format?: string; junit?: string }) => {
+    const format = opts.json ? "json" : (opts.format ?? "text");
     try {
       const r = checkFiles(files, { dirs: opts.checks, only: opts.only?.split(",").map((s) => s.trim()).filter(Boolean) });
       const failed = r.runs.filter((x) => x.findings.length);
-      if (opts.json) console.log(JSON.stringify({ runs: r.runs, rules: r.rules, errors: r.errors }, null, 2));
-      else {
+
+      if (opts.junit) {
+        const dir = path.dirname(opts.junit);
+        if (dir && dir !== ".") fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(opts.junit, formatJUnit(r));
+      }
+
+      if (format === "junit") {
+        console.log(formatJUnit(r));
+      } else if (format === "json") {
+        console.log(JSON.stringify({ runs: r.runs, rules: r.rules, errors: r.errors }, null, 2));
+      } else {
         for (const e of r.errors) console.log(`! ${e}`);
         for (const x of r.runs) {
           const label = `${x.file} ${x.trace_id.slice(0, 8)}${x.root_name ? ` ${x.root_name}` : ""}`;
@@ -400,7 +413,19 @@ program
       }
       process.exit(r.errors.length ? 2 : failed.length ? 1 : 0);
     } catch (e) {
-      console.error(`✗ ${(e as Error).message}`);
+      const err = e as Error;
+      if (opts.junit) {
+        try {
+          const dir = path.dirname(opts.junit);
+          if (dir && dir !== ".") fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(opts.junit, formatJUnitError(err));
+        } catch {}
+      }
+      if (format === "junit") {
+        console.log(formatJUnitError(err));
+      } else {
+        console.error(`✗ ${err.message}`);
+      }
       process.exit(2);
     }
   });
