@@ -97,8 +97,9 @@ it("selects exact scalar paths and keeps unrelated data-bearing names sanitizabl
   expect(otlpScalar(`${sp}.attributes[0].value.arrayValue.values[0].kvlistValue.values[0].value.intValue`)).toBe("int");
   const scalar = new DiagnosticOtlpScalars({}, compileRules([]), new DiagnosticRedactionBudget());
   const intPath = `${sp}.attributes[0].value.intValue`;
+  expect(scalar.redact(intPath, "1e3")).toBe("1000");
   for (const n of ["-9223372036854775808", "9223372036854775807", "0"]) expect(scalar.redact(intPath, n)).toBe(n);
-  for (const n of ["9223372036854775808", "-9223372036854775809", "123secret", "1e3"]) expect(scalar.redact(intPath, n)).toBe("0");
+  for (const n of ["9223372036854775808", "-9223372036854775809", "123secret", "1e-3"]) expect(scalar.redact(intPath, n)).toBe("0");
   expect(scalar.redact(`${sp}.startTimeUnixNano`, "18446744073709551615")).toBe("18446744073709551615");
   for (const n of ["-1", "18446744073709551616", "not-a-number"]) expect(scalar.redact(`${sp}.startTimeUnixNano`, n)).toBe("0");
   expect(scalar.redact(`${sp}.parentSpanId`, "")).toBe("");

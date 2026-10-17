@@ -11,7 +11,7 @@ const METADATA_KEYS: Record<string, string> = { definition_omitted: "bundle.chec
 // Schema positions, not property spellings, distinguish fixed values from user data.
 // These names describe the bundle and OTLP wire shape. Data map keys are still redacted.
 const STRUCTURAL_KEYS = new Set([
-  "format", "schema_version", "exported_at", "version", "neatroots", "run", "trace", "findings", "checks", "redactions", "applied",
+  "format", "schema_version", "version", "neatroots", "run", "trace", "findings", "checks", "redactions", "applied",
   "rule_source", "scope", "matches", "kind", "count", "trace_id", "session_id", "project", "workflow",
   "root_span_id", "root_name", "status", "started_ms", "ended_ms", "span_count", "llm_calls", "tool_calls", "error_count",
   "prompt_tokens", "completion_tokens", "total_tokens", "input_preview", "output_preview", "interrupted", "termination_reason",
@@ -34,6 +34,7 @@ export function dataMap(path: string): boolean {
   return path.endsWith(".params") || path.endsWith(".options") || path.startsWith("bundle.checks.historical.params.");
 }
 export function structuralKey(path: string, key: string): boolean {
+  if (key === "exported_at") return path === "bundle";
   if (key === "historical") return path === "bundle.checks";
   if (key === "occurrences") return path.replace(/\[\d+\]/g, "[]") === "bundle.findings[].detail";
   if (Object.hasOwn(METADATA_KEYS, key)) return path.replace(/\[\d+\]/g, "[]") === METADATA_KEYS[key];
@@ -49,7 +50,7 @@ export function fixedString(path: string, value: string): boolean {
     "bundle.redactions.rule_source": ["cloud_forwarding"],
   };
   if (exact[p]?.includes(value)) return true;
-  if (["bundle.redactions.scope", "bundle.checks.historical.note", "bundle.version.neatroots"].includes(p)) return true; // application-authored constants
+  if (["bundle.exported_at", "bundle.redactions.scope", "bundle.checks.historical.note", "bundle.version.neatroots"].includes(p)) return true; // application-authored constants
   if (p === "bundle.findings[].check_kind") return ["rule", "question"].includes(value);
   if (p === "bundle.findings[].status") return ["raised", "active", "resolved", "dismissed", "failed", "quiet"].includes(value);
   if (/^bundle\.findings\[\]\.detail\.source$/.test(p) || /^bundle\.checks\.current_definitions\[\]\.source$/.test(p)) return SOURCES.includes(value);

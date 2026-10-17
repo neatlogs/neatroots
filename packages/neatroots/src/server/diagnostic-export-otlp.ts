@@ -25,6 +25,35 @@ export function otlpScalar(path: string): "trace" | "span" | "nanos" | "int" | "
   return undefined;
 }
 
+/** Exact decimal/ProtoJSON exponent conversion. Exponents are bounded by input length
+ * before parsing; append at most 19 zeros, never expand an attacker-sized exponent. */
+function canonicalInteger(value: string, unsigned: boolean): string | undefined {
+  const parts = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(value);
+  if (!parts) return undefined;
+  const fraction = parts[3] ?? "";
+  let digits = (parts[2] + fraction).replace(/^0+/, "");
+  if (!digits) return "0";
+  if (unsigned && parts[1]) return undefined;
+  const exponent = parts[4] ?? "0";
+  const magnitudeText = exponent.replace(/^[+-]/, "").replace(/^0+/, "") || "0";
+  const maxScale = value.length + 20;
+  if (magnitudeText.length > String(maxScale).length) return undefined;
+  const magnitude = Number(magnitudeText);
+  if (magnitude > maxScale) return undefined;
+  const scale = (exponent.startsWith("-") ? -magnitude : magnitude) - fraction.length;
+  if (scale < 0) {
+    const cut = -scale;
+    if (cut >= digits.length || /[1-9]/.test(digits.slice(-cut))) return undefined;
+    digits = digits.slice(0, -cut);
+  } else {
+    if (digits.length + scale > 20) return undefined;
+    digits += "0".repeat(scale);
+  }
+  const bound = unsigned ? "18446744073709551615" : parts[1] ? "9223372036854775808" : "9223372036854775807";
+  if (digits.length > bound.length || (digits.length === bound.length && digits > bound)) return undefined;
+  return parts[1] + digits;
+}
+
 /** Matching identities use random fixed-width aliases, no original-value lookup in the bundle.
  * Matching integers use zero; this sacrifices timing/value fidelity instead of OTLP validity. */
 export class DiagnosticOtlpScalars {
@@ -81,11 +110,10 @@ export class DiagnosticOtlpScalars {
       return canonical;
     }
     const redacted = redactString(value, this.rules, "", [], this.budget);
-    if (redacted !== value || !/^-?\d+$/.test(value)) return "0";
-    if (type === "nanos" && !/^\d+$/.test(value)) return "0";
-    if (value.length > (type === "nanos" ? 20 : 21)) return "0";
-    const n = BigInt(value);
-    const valid = type === "nanos" ? n >= 0n && n <= (1n << 64n) - 1n : n >= -(1n << 63n) && n <= (1n << 63n) - 1n;
-    return valid ? value : "0";
+    if (redacted !== value) return "0";
+    const canonical = canonicalInteger(value, type === "nanos");
+    if (canonical === undefined) return "0";
+    if (canonical !== value && redactString(canonical, this.rules, "", [], this.budget) !== canonical) return "0";
+    return canonical;
   }
 }

@@ -189,7 +189,9 @@ neatlogs.init(workflow_name="refund-agent", flush_interval=0.5, instrumentations
   Aliases use fresh randomness rather than content hashes, and cannot collide with original IDs.
   At exact OTLP schema positions, matching trace/span IDs use correlated fixed-width hex aliases
   across parents, links and exported evidence references. Matching or invalid int64/nanosecond
-  strings become decimal zero; byte values retain base64 encoding, with valid unpadded/URL-safe
+  strings become decimal zero. Valid exponent-form integers canonicalize exactly to decimal, with
+  original and canonical spellings checked for redaction. The application export timestamp stays
+  valid at its schema position; identically named user data still redacts. Byte values retain base64 encoding, with valid unpadded/URL-safe
   spellings canonicalized to padded standard base64. This keeps accepted exports
   reimportable while sacrificing matched timing/value fidelity. Identically named user data still
   undergoes ordinary redaction. Scalar preparation shares the export's node/work budgets.
