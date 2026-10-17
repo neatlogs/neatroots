@@ -417,6 +417,7 @@ export class Engine {
     for (const lc of this.registry.rules()) {
       const rule = lc.check as RuleCheck;
       if (!this.appliesTo(rule, run)) continue;
+      if (this.roots.store.latestFindingFor(run.traceId, rule.id)?.status === "dismissed") continue;
       if (rule.rule.type === "run_end" && !atEnd) continue;
       let hit: RuleHit | null;
       try {
@@ -528,6 +529,7 @@ export class Engine {
     snap: TraceSnapshot,
     spanId: string | null,
   ): Promise<"unavailable" | void> {
+    if (this.roots.store.latestFindingFor(run.traceId, check.id)?.status === "dismissed") return;
     let result: DecisionResult;
     try {
       result = await this.decisions.decide(evidence, [toQuestion(check, params)]);
