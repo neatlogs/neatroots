@@ -81,6 +81,37 @@ describe("store", () => {
     expect(st.getRun(t)).toMatchObject({ span_count: 1, llm_calls: 0, tool_calls: 1, error_count: 1, total_tokens: 0 });
   });
 
+  it("only scans the full-text index when replacing an existing span", () => {
+    const st = store();
+    const traceId = hex(16);
+    const original = toolSpan(traceId, "", "lookup_order", '{"order_id":"42"}', 'first result');
+    let deletes = 0;
+    const prepare = st.db.prepare.bind(st.db);
+    st.db.prepare = ((sql: string) => {
+      if (sql.startsWith("DELETE FROM span_fts WHERE trace_id")) deletes++;
+      return prepare(sql);
+    }) as typeof st.db.prepare;
+
+    st.ingest([batch([original])]);
+    expect(deletes).toBe(0);
+    expect(st.searchSpans("first").map((hit) => hit.trace_id)).toEqual([traceId]);
+
+    const updated = {
+      ...original,
+      attributes: original.attributes.map((attribute) => (attribute.key === "neatlogs.tool.output" ? s("neatlogs.tool.output", "second result") : attribute)),
+    };
+    st.ingest([batch([updated])]);
+    expect(deletes).toBe(1);
+    expect(st.searchSpans("first")).toEqual([]);
+    expect(st.searchSpans("second").map((hit) => hit.trace_id)).toEqual([traceId]);
+
+    const marker = markerSpan(traceId, "");
+    marker.spanId = original.spanId;
+    st.ingest([batch([marker])]);
+    expect(deletes).toBe(2);
+    expect(st.searchSpans("second")).toEqual([]);
+  });
+
   it("offloads large payloads to blobs and restores them losslessly", () => {
     const st = store();
     const t = hex(16);
@@ -281,6 +312,22 @@ describe("store", () => {
     // a normal positive retention still prunes old runs
     expect(st.sweep(14, 5 * 1024 ** 3)).toBe(4);
     expect(st.listRuns({ limit: 500 }).length).toBe(0);
+  });
+
+  it("ages imported historical runs from when they were received", () => {
+    const st = store();
+    const traceId = hex(16);
+    const historical = span({ traceId, name: "historical", kind: "workflow" });
+    historical.startTimeUnixNano = "1000000";
+    historical.endTimeUnixNano = "2000000";
+    st.ingest([batch([historical])]);
+
+    expect(st.sweep(14, Number.POSITIVE_INFINITY)).toBe(0);
+    expect(st.getRun(traceId)).toBeDefined();
+
+    st.db.prepare("UPDATE runs SET received_ms = 1 WHERE trace_id = ?").run(traceId);
+    expect(st.sweep(14, Number.POSITIVE_INFINITY)).toBe(1);
+    expect(st.getRun(traceId)).toBeUndefined();
   });
 
   it("trims to the size cap by removing the oldest runs, not every run", () => {
