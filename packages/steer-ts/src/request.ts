@@ -7,6 +7,7 @@ interface ResponseRequest {
 /** Wait for guidance without assimilating the SDK promise or consuming its response body. */
 export class SteeredRequest extends Promise<unknown> {
   private parsed?: Promise<unknown>;
+  private readonly fallbackResponse = new Response(null);
 
   constructor(private readonly request: Promise<{ value: unknown }>) {
     super((resolve) => resolve(undefined));
@@ -32,16 +33,27 @@ export class SteeredRequest extends Promise<unknown> {
   }
 
   _thenUnwrap<T>(transform: (data: unknown, props: unknown) => T): SteeredRequest {
-    return new SteeredRequest(this.request.then(({ value }) => ({
-      value: (value as ResponseRequest)._thenUnwrap(transform),
-    })));
+    return new SteeredRequest(
+      this.request.then(({ value }) => ({
+        value:
+          typeof (value as Partial<ResponseRequest>)?._thenUnwrap === "function"
+            ? (value as ResponseRequest)._thenUnwrap(transform)
+            : Promise.resolve(value).then((data) => transform(data, { response: this.fallbackResponse })),
+      })),
+    );
   }
 
   asResponse(): Promise<Response> {
-    return this.request.then(({ value }) => (value as ResponseRequest).asResponse());
+    return this.request.then(({ value }) =>
+      typeof (value as Partial<ResponseRequest>)?.asResponse === "function" ? (value as ResponseRequest).asResponse() : this.fallbackResponse,
+    );
   }
 
   withResponse(): Promise<unknown> {
-    return this.request.then(({ value }) => (value as ResponseRequest).withResponse());
+    return this.request.then(async ({ value }) =>
+      typeof (value as Partial<ResponseRequest>)?.withResponse === "function"
+        ? (value as ResponseRequest).withResponse()
+        : { data: await value, response: this.fallbackResponse, request_id: null },
+    );
   }
 }
