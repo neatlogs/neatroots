@@ -150,6 +150,7 @@ CREATE TABLE IF NOT EXISTS checks (
   hits INTEGER NOT NULL DEFAULT 0,
   confirmed INTEGER NOT NULL DEFAULT 0,
   dismissed INTEGER NOT NULL DEFAULT 0,
+  metric_generation TEXT NOT NULL DEFAULT '',
   created_ms INTEGER NOT NULL,
   updated_ms INTEGER NOT NULL
 );
@@ -180,6 +181,8 @@ CREATE TABLE IF NOT EXISTS findings (
   model TEXT,
   triage_score INTEGER,
   explanation_id TEXT,
+  metric_counted INTEGER NOT NULL DEFAULT 1,
+  metric_generation TEXT,
   created_ms INTEGER NOT NULL,
   updated_ms INTEGER NOT NULL
 );
@@ -437,9 +440,34 @@ export class Store {
   private migrate(): void {
     const ensure = (table: string, column: string, type: string) => {
       const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-      if (!cols.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+      if (cols.some((c) => c.name === column)) return false;
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+      return true;
     };
     ensure("plans", "body", "TEXT");
+    const metricMigration = this.db.transaction(() => {
+      ensure("checks", "metric_generation", "TEXT NOT NULL DEFAULT ''");
+      // Old databases used the all-insert counter behavior. Keep their existing counter basis
+      // intact while recording eligibility for future status transitions.
+      ensure("findings", "metric_counted", "INTEGER NOT NULL DEFAULT 1");
+      const addedFindingGeneration = ensure("findings", "metric_generation", "TEXT");
+      for (const { id } of this.db.prepare("SELECT id FROM checks WHERE metric_generation = ''").all() as { id: string }[]) {
+        this.db.prepare("UPDATE checks SET metric_generation = ? WHERE id = ?").run(newId("cmet"), id);
+      }
+      if (addedFindingGeneration) {
+        this.db
+          .prepare(
+            `UPDATE findings
+             SET metric_generation = (SELECT metric_generation FROM checks WHERE checks.id = findings.check_id)
+           WHERE EXISTS (
+             SELECT 1 FROM checks
+             WHERE checks.id = findings.check_id AND findings.created_ms >= checks.created_ms
+           )`,
+          )
+          .run();
+      }
+    });
+    metricMigration();
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
     this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
@@ -929,8 +957,11 @@ export class Store {
   // ----------------------------------------------------------------- findings
 
   private findingFromRow(r: Record<string, unknown>): Finding {
+    const row = { ...r };
+    delete row.metric_counted;
+    delete row.metric_generation;
     return {
-      ...(r as unknown as Finding),
+      ...(row as unknown as Finding),
       evidence_span_ids: json<string[]>(r.evidence_span_ids as string, []),
       detail: json<Record<string, Plain>>(r.detail as string, {}),
     };
@@ -939,35 +970,60 @@ export class Store {
   insertFinding(f: Omit<Finding, "id" | "created_ms" | "updated_ms"> & { id?: string }): Finding {
     const now = Date.now();
     const finding: Finding = { ...f, id: f.id ?? newId("fnd"), created_ms: now, updated_ms: now };
-    this.db
-      .prepare(
-        `INSERT INTO findings (id, trace_id, check_id, check_kind, title, probability, status, evidence_span_ids, detail,
-          model, triage_score, explanation_id, created_ms, updated_ms)
-         VALUES (@id, @trace_id, @check_id, @check_kind, @title, @probability, @status, @evidence_span_ids, @detail,
-          @model, @triage_score, @explanation_id, @created_ms, @updated_ms)`,
-      )
-      .run({ ...finding, evidence_span_ids: JSON.stringify(finding.evidence_span_ids), detail: JSON.stringify(finding.detail) });
-    this.db.prepare("UPDATE checks SET hits = hits + 1 WHERE id = ?").run(finding.check_id);
-    this.refreshFindingCounts(finding.trace_id);
+    const metricCounted = finding.status === "raised" || finding.status === "active";
+    const tx = this.db.transaction(() => {
+      const check = this.db.prepare("SELECT metric_generation FROM checks WHERE id = ?").get(finding.check_id) as { metric_generation: string } | undefined;
+      const metricGeneration = check?.metric_generation ?? null;
+      this.db
+        .prepare(
+          `INSERT INTO findings (id, trace_id, check_id, check_kind, title, probability, status, evidence_span_ids, detail,
+            model, triage_score, explanation_id, metric_counted, metric_generation, created_ms, updated_ms)
+           VALUES (@id, @trace_id, @check_id, @check_kind, @title, @probability, @status, @evidence_span_ids, @detail,
+            @model, @triage_score, @explanation_id, @metric_counted, @metric_generation, @created_ms, @updated_ms)`,
+        )
+        .run({ ...finding, metric_counted: metricCounted ? 1 : 0, metric_generation: metricGeneration, evidence_span_ids: JSON.stringify(finding.evidence_span_ids), detail: JSON.stringify(finding.detail) });
+      // Persisted check counters outlive retained finding rows, so classify each insert once.
+      if (metricCounted && metricGeneration !== null) {
+        this.db.prepare("UPDATE checks SET hits = hits + 1 WHERE id = ? AND metric_generation = ?").run(finding.check_id, metricGeneration);
+      }
+      this.refreshFindingCounts(finding.trace_id);
+    });
+    tx();
     return finding;
   }
 
   updateFinding(id: string, patch: Partial<Pick<Finding, "status" | "probability" | "triage_score" | "explanation_id" | "evidence_span_ids" | "detail" | "title">>): Finding | undefined {
-    const cur = this.getFinding(id);
-    if (!cur) return undefined;
+    const row = this.db.prepare("SELECT * FROM findings WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    const cur = this.findingFromRow(row);
+    const wasMetricCounted = Number(row.metric_counted) === 1;
+    const metricGeneration = typeof row.metric_generation === "string" ? row.metric_generation : null;
     const next = { ...cur, ...patch, updated_ms: Date.now() };
-    this.db
-      .prepare(
-        `UPDATE findings SET status = @status, probability = @probability, triage_score = @triage_score,
-          explanation_id = @explanation_id, evidence_span_ids = @evidence_span_ids, detail = @detail, title = @title,
-          updated_ms = @updated_ms WHERE id = @id`,
-      )
-      .run({ ...next, evidence_span_ids: JSON.stringify(next.evidence_span_ids), detail: JSON.stringify(next.detail) });
-    if (patch.status && patch.status !== cur.status) {
-      if (patch.status === "dismissed") this.db.prepare("UPDATE checks SET dismissed = dismissed + 1 WHERE id = ?").run(cur.check_id);
-      if (cur.status === "dismissed") this.db.prepare("UPDATE checks SET dismissed = MAX(0, dismissed - 1) WHERE id = ?").run(cur.check_id);
-    }
-    this.refreshFindingCounts(cur.trace_id);
+    const becomesMetricCounted = !wasMetricCounted && (next.status === "raised" || next.status === "active");
+    const isMetricCounted = wasMetricCounted || becomesMetricCounted;
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE findings SET status = @status, probability = @probability, triage_score = @triage_score,
+            explanation_id = @explanation_id, evidence_span_ids = @evidence_span_ids, detail = @detail, title = @title,
+            metric_counted = @metric_counted, updated_ms = @updated_ms WHERE id = @id`,
+        )
+        .run({ ...next, metric_counted: isMetricCounted ? 1 : 0, evidence_span_ids: JSON.stringify(next.evidence_span_ids), detail: JSON.stringify(next.detail) });
+      if (patch.status && patch.status !== cur.status) {
+        // Promote a previously excluded row once; the marker survives dismissals and reopens.
+        if (metricGeneration !== null && becomesMetricCounted) {
+          this.db.prepare("UPDATE checks SET hits = hits + 1 WHERE id = ? AND metric_generation = ?").run(cur.check_id, metricGeneration);
+        }
+        if (metricGeneration !== null && wasMetricCounted && patch.status === "dismissed") {
+          this.db.prepare("UPDATE checks SET dismissed = dismissed + 1 WHERE id = ? AND metric_generation = ?").run(cur.check_id, metricGeneration);
+        }
+        if (metricGeneration !== null && wasMetricCounted && cur.status === "dismissed") {
+          this.db.prepare("UPDATE checks SET dismissed = MAX(0, dismissed - 1) WHERE id = ? AND metric_generation = ?").run(cur.check_id, metricGeneration);
+        }
+      }
+      this.refreshFindingCounts(cur.trace_id);
+    });
+    tx();
     return next;
   }
 
@@ -1047,7 +1103,7 @@ export class Store {
   /** How often the person dismissed a check's findings in one project. */
   dismissalsIn(checkId: string, project: string): number {
     const r = this.db
-      .prepare("SELECT COUNT(*) AS n FROM findings f JOIN runs r ON r.trace_id = f.trace_id WHERE f.check_id = ? AND r.project = ? AND f.status = 'dismissed'")
+      .prepare("SELECT COUNT(*) AS n FROM findings f JOIN runs r ON r.trace_id = f.trace_id JOIN checks c ON c.id = f.check_id AND c.metric_generation = f.metric_generation WHERE f.check_id = ? AND r.project = ? AND f.metric_counted = 1 AND f.status = 'dismissed'")
       .get(checkId, project) as { n: number };
     return r.n;
   }
@@ -1200,12 +1256,13 @@ export class Store {
 
   upsertCheckRow(c: { id: string; kind: string; source: string; path: string | null; body: string; enabled?: boolean }): void {
     const now = Date.now();
+    const metricGeneration = newId("cmet");
     this.db
       .prepare(
-        `INSERT INTO checks (id, kind, source, path, body, enabled, created_ms, updated_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO checks (id, kind, source, path, body, enabled, metric_generation, created_ms, updated_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, source = excluded.source, path = excluded.path, body = excluded.body, updated_ms = excluded.updated_ms`,
       )
-      .run(c.id, c.kind, c.source, c.path, c.body, c.enabled === false ? 0 : 1, now, now);
+      .run(c.id, c.kind, c.source, c.path, c.body, c.enabled === false ? 0 : 1, metricGeneration, now, now);
   }
 
   checkStats(): Record<string, { hits: number; dismissed: number; confirmed: number; enabled: number }> {

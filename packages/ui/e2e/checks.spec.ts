@@ -16,7 +16,13 @@ test.describe("checks", () => {
     await page.getByText("secret-in-output").click();
     const sheet = page.getByRole("dialog");
     await expect(sheet.getByText("id: secret-in-output")).toBeVisible();
+    await expect(sheet.getByText(/Each finding counts once after it is raised or made active/)).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Edit a copy" })).toBeVisible();
+  });
+
+  test("explains which finding rows count toward precision", async ({ page }) => {
+    await open(page, "checks");
+    await expect(page.getByRole("columnheader", { name: "Findings" })).toHaveAttribute("title", /raised or made active/);
   });
 
   test("turning a check off and on", async ({ page }) => {
