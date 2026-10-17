@@ -353,18 +353,22 @@ export class CheckRegistry {
     if (snapshot.kind === "unreadable") throw new Error("approval target conflict; destination cannot be read");
     const text = snapshot.kind === "file" ? replaceInYaml(snapshot.bytes.toString("utf8"), parsed) : checkToYaml(parsed);
     if (text === undefined) throw new Error("approval target conflict; existing destination content does not contain this check ID");
-
     fs.mkdirSync(path.dirname(destination), { recursive: true });
-    this.store.setMeta(`mcp_origin:${parsed.id}`, JSON.stringify([checkToYaml(parsed), path.resolve(destination)]));
-    if (snapshot.kind === "missing") {
-      try {
-        fs.writeFileSync(destination, text, { encoding: "utf8", flag: "wx" });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("approval target changed; destination was created during approval");
-        throw error;
+    const originKey = `mcp_origin:${parsed.id}`;
+    const previousOrigin = this.store.getMeta(originKey);
+    this.store.setMeta(originKey, JSON.stringify([checkToYaml(parsed), path.resolve(destination)]));
+    try {
+      if (snapshot.kind === "missing") fs.writeFileSync(destination, text, { encoding: "utf8", flag: "wx" });
+      else fs.writeFileSync(destination, text, "utf8");
+    } catch (error) {
+      const exclusiveConflict = snapshot.kind === "missing" && (error as NodeJS.ErrnoException).code === "EEXIST";
+      // Restore only proven no-writes; changed or unreadable content retains MCP provenance.
+      if (exclusiveConflict || this.destinationFingerprint(destination, this.destinationSnapshot(destination)) === this.destinationFingerprint(destination, snapshot)) {
+        if (previousOrigin === undefined) this.store.db.prepare("DELETE FROM meta WHERE key = ?").run(originKey);
+        else this.store.setMeta(originKey, previousOrigin);
       }
-    } else {
-      fs.writeFileSync(destination, text, "utf8");
+      if (exclusiveConflict) throw new Error("approval target changed; destination was created during approval");
+      throw error;
     }
     this.store.upsertCheckRow({ id: parsed.id, kind: parsed.kind === "rule" ? "rule" : "question", source: "mcp", path: destination, body: checkToYaml(parsed), enabled: parsed.enabled });
     this.reload();
@@ -447,13 +451,15 @@ export class CheckRegistry {
           : undefined;
       if (inPlace !== undefined) {
         p = current!.path!;
-        recordOrigin(p);
+        if (source === "mcp") recordOrigin(p);
         fs.writeFileSync(p, inPlace, "utf8");
+        if (source !== "mcp") recordOrigin(p);
       } else {
         fs.mkdirSync(dir, { recursive: true });
         p = path.join(dir, `${parsed.id}.yaml`);
-        recordOrigin(p);
+        if (source === "mcp") recordOrigin(p);
         fs.writeFileSync(p, checkToYaml(parsed), "utf8");
+        if (source !== "mcp") recordOrigin(p);
       }
       if (source === "planner") source = target === "user" ? "user" : "project";
       if (source === "mcp") {

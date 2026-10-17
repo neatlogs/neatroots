@@ -96,3 +96,27 @@ test("mounted Checks recovers MCP proposals missed during an SSE disconnection",
     });
   }
 });
+
+test("Checks reconciles proposals created before the first SSE subscription", async ({ page }, testInfo) => {
+  const id = `first-open-${testInfo.repeatEachIndex}-${Date.now()}`;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/events", async (route) => { await gate; await route.continue(); });
+  try {
+    const initialChecks = page.waitForResponse((r) => r.url().endsWith("/api/checks") && r.ok());
+    await open(page, "checks");
+    await initialChecks;
+    await expect(page.getByRole("textbox", { name: "Search checks" })).toBeVisible();
+    await propose(`id: ${id}\nkind: rule\naction: flag\nrule: { type: count, at_least: 2 }\n`);
+    const proposal = page.getByTestId("mcp-check-proposal").filter({ hasText: id });
+    await expect(proposal).toHaveCount(0);
+    release();
+    await expect(page.getByText("live", { exact: true })).toBeVisible();
+    await expect(proposal).toBeVisible();
+  } finally {
+    release();
+    const data = await (await page.request.get(`${state().url}/api/checks`)).json();
+    const pending = data.pending_mcp_checks.find((c: { id: string }) => c.id === id);
+    if (pending) await page.request.post(`${state().url}/api/checks/${id}/reject`, { data: { revision: pending.revision } });
+  }
+});

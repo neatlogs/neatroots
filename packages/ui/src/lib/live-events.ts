@@ -21,7 +21,6 @@ export function useLiveEvents(): { connected: boolean; spanTick: number } {
   useEffect(() => {
     let es: EventSource | undefined;
     let closed = false;
-    let missedEvents = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
     const flush = () => {
       void qc.invalidateQueries({ queryKey: runKeys.lists() });
@@ -37,12 +36,10 @@ export function useLiveEvents(): { connected: boolean; spanTick: number } {
       es = new EventSource("/api/events");
       es.onopen = () => {
         setConnected(true);
-        // The stream does not replay events missed while disconnected.
-        if (missedEvents) void qc.invalidateQueries({ queryKey: appKeys.checks });
-        missedEvents = false;
+        // Reconcile the initial subscription gap as well as missed events on reconnect.
+        void qc.invalidateQueries({ queryKey: appKeys.checks });
       };
       es.onerror = () => {
-        missedEvents = true;
         setConnected(false);
         es?.close();
         if (!closed) retry = setTimeout(open, 2000);
