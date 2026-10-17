@@ -66,6 +66,31 @@ export class BlobStore {
     return total;
   }
 
+  /** Removes payload files no committed span references. Safe at startup before ingest begins. */
+  reclaimExcept(used: ReadonlySet<string>): number {
+    let removed = 0;
+    if (!fs.existsSync(this.dir)) return removed;
+    for (const sub of fs.readdirSync(this.dir)) {
+      const dir = path.join(this.dir, sub);
+      if (!fs.statSync(dir).isDirectory()) continue;
+      for (const name of fs.readdirSync(dir)) {
+        if (used.has(sub + name)) continue;
+        try {
+          fs.unlinkSync(path.join(dir, name));
+          removed++;
+        } catch {
+          /* leave an unreadable file for the next startup */
+        }
+      }
+      try {
+        fs.rmdirSync(dir);
+      } catch {
+        /* still contains referenced or unreadable files */
+      }
+    }
+    return removed;
+  }
+
   /** Replaces large string values with blob references; returns the shas used. */
   offload(kvs: KeyValue[], used: Set<string>): KeyValue[] {
     return kvs.map((kv) => ({ key: kv.key, value: this.offloadValue(kv.value, used) }));

@@ -432,6 +432,10 @@ export class Store {
     this.migrate();
     this.searchIds = new SearchIds(this.db);
     this.blobs = new BlobStore(path.join(dir, "blobs"));
+    const usedBlobs = new Set(
+      (this.db.prepare("SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.blobs IS NOT NULL").all() as { sha: string }[]).map((r) => r.sha),
+    );
+    this.blobs.reclaimExcept(usedBlobs);
     const row = this.db.prepare("SELECT MAX(seq) AS s FROM spans").get() as { s: number | null };
     this.seq = row.s ?? 0;
   }
