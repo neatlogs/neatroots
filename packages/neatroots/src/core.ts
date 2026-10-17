@@ -19,6 +19,8 @@ import { log } from "./util/log.js";
 export interface RootsOptions {
   home?: string;
   config?: RootsConfig;
+  /** One-process start flags. Settings saves keep the underlying configured values. */
+  runtime?: { port?: number; grpcPort?: number; layaEnabled?: boolean };
   /** Skip the check engine (used by tests and read-only tools). */
   noEngine?: boolean;
 }
@@ -41,6 +43,7 @@ export class Roots {
   readonly replays: Replays;
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
+  private readonly persistedOverrides: { port?: number; grpcPort?: number; layaEnabled?: boolean } = {};
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
   /** The run and span the app has in focus, for the MCP get_current_run tool. */
@@ -51,6 +54,18 @@ export class Roots {
   constructor(opts: RootsOptions = {}) {
     this.home = opts.home ?? rootsHome();
     this.config = opts.config ?? loadConfig();
+    if (opts.runtime?.port !== undefined) {
+      this.persistedOverrides.port = this.config.port;
+      this.config.port = opts.runtime.port;
+    }
+    if (opts.runtime?.grpcPort !== undefined) {
+      this.persistedOverrides.grpcPort = this.config.grpcPort;
+      this.config.grpcPort = opts.runtime.grpcPort;
+    }
+    if (opts.runtime?.layaEnabled !== undefined) {
+      this.persistedOverrides.layaEnabled = this.config.classifier.laya.enabled;
+      this.config.classifier.laya.enabled = opts.runtime.layaEnabled;
+    }
     this.store = new Store(path.join(this.home, "data"));
     this.llm = new LlmClient(this.config.llm, { secret: (n) => getSecret(n), redactPatterns: () => this.config.cloud.redactPatterns });
     this.laya = new LayaManager(this.home, this.config.classifier);
@@ -83,7 +98,17 @@ export class Roots {
 
   /** Saves to this instance's own home (the one it was opened with), never another one. */
   saveConfig(): void {
-    saveConfig(this.config, path.join(this.home, "config.yaml"));
+    const saved = structuredClone(this.config);
+    if (this.persistedOverrides.port !== undefined) saved.port = this.persistedOverrides.port;
+    if (this.persistedOverrides.grpcPort !== undefined) saved.grpcPort = this.persistedOverrides.grpcPort;
+    if (this.persistedOverrides.layaEnabled !== undefined) saved.classifier.laya.enabled = this.persistedOverrides.layaEnabled;
+    saveConfig(saved, path.join(this.home, "config.yaml"));
+  }
+
+  /** An explicit settings edit supersedes the one-process Laya override. */
+  setLayaEnabled(enabled: boolean): void {
+    delete this.persistedOverrides.layaEnabled;
+    this.config.classifier.laya.enabled = enabled;
   }
 
   /** Applies retention now and every hour. */

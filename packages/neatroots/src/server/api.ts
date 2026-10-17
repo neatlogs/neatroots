@@ -329,7 +329,7 @@ export function mountApi(app: Hono, roots: Roots): void {
     if (b.classifier_url) roots.config.classifier.baseUrl = b.classifier_url;
     if (b.jev_cloud_enabled !== undefined) roots.config.classifier.jevCloud.enabled = b.jev_cloud_enabled;
     if (b.laya_enabled !== undefined) {
-      roots.config.classifier.laya.enabled = b.laya_enabled;
+      roots.setLayaEnabled(b.laya_enabled);
       if (b.laya_enabled) roots.startModels();
       else roots.laya.stop();
     }
