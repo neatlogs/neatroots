@@ -20,14 +20,24 @@ function mockDecisions() {
 
 it("rechecks selected tool spans when shared goal changes, preserving selectors and goal:false dedupe", async () => {
   t = await makeRoots();
-  for (const goal of [true, false]) t.roots.checks.save({ id: `shared-goal-${goal}`, kind: "yes_no", ask: "Are the tool arguments wrong?", scope: "span", when: "live", flag_at: 0.5, evidence: { spans: { type: "TOOL" }, goal, fields: ["input", "output"] } }, "user");
+  for (const goal of [true, false]) t.roots.checks.save({ id: `shared-goal-${goal}`, kind: "yes_no", ask: "Are the tool arguments wrong?", scope: "span", when: "live", flag_at: 0.5, evidence: { spans: { type: "TOOL" }, ...(goal ? {} : { goal: false }), fields: ["input", "output"] } }, "user");
   const decide = mockDecisions();
+  const base = decide.getMockImplementation()!;
+  decide.mockImplementation(async (...args) => {
+    const result = await base(...args);
+    if (args[1][0].name === "shared-goal-true" && !args[0].includes("new shared instruction")) {
+      return { ...result, answers: { "shared-goal-true": { name: "shared-goal-true", type: "yes_no", probability: 0.99, distribution: { yes: 0.99, no: 0.01 } } } } as never;
+    }
+    return result;
+  });
   const sp = llm();
   const tool = span({ traceId: sp.traceId, parent: sp.spanId, name: "lookup", kind: "tool", attrs: [s("input.value", "lookupinput")] });
   t.roots.ingest([batch([sp, tool])]);
   await until(() => decide.mock.calls.some(([, qs]) => qs[0].name === "shared-goal-true"));
   await until(() => t!.roots.store.findingsForTrace(sp.traceId).some((f) => f.check_id === "empty-final-answer"));
   expect(await t.roots.engine!.waitIdle(sp.traceId, 5000)).toBe(true);
+  const stale = t.roots.store.findingsForTrace(sp.traceId).find((f) => f.check_id === "shared-goal-true");
+  expect(stale?.status).toBe("raised");
   const before = decide.mock.calls.filter(([, qs]) => qs[0].name === "shared-goal-false").length;
   decide.mockClear();
   t.roots.ingestLogs(records(sp, "new shared instruction"));
@@ -40,6 +50,7 @@ it("rechecks selected tool spans when shared goal changes, preserving selectors 
   expect(before).toBe(1);
   expect(t.roots.store.decisionsForTrace(sp.traceId).filter((d) => d.check_id === "shared-goal-true").map((d) => d.span_id)).toEqual([tool.spanId, tool.spanId]);
   expect(t.roots.engine!.progress.state(sp.traceId)).toBeUndefined();
+  expect(t.roots.store.getFinding(stale!.id)?.status).toBe("resolved");
   decide.mockClear(); t.roots.ingestLogs(records(sp, "new shared instruction"));
   expect(await t.roots.engine!.waitIdle(sp.traceId, 5000)).toBe(true);
   expect(decide).not.toHaveBeenCalled();
@@ -58,6 +69,11 @@ it("retries idle cleanup of a reconstructed completed run while replacement chec
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   try {
     t.roots.ingestLogs(records(sp, undefined, "cleanupanswer"));
+    const run = internals().live.get(sp.traceId) as { cleanupTimer?: NodeJS.Timeout };
+    const timer = run.cleanupTimer;
+    expect(timer).toBeDefined();
+    t.roots.ingestLogs(records(sp, undefined, "another cleanupanswer"));
+    expect(run.cleanupTimer).toBe(timer);
     await vi.advanceTimersByTimeAsync(301);
     expect(t.roots.engine!.pending(sp.traceId)).toBeGreaterThan(0);
     await vi.advanceTimersByTimeAsync(60_000);
@@ -67,6 +83,34 @@ it("retries idle cleanup of a reconstructed completed run while replacement chec
     expect(t.roots.engine!.pending(sp.traceId)).toBe(0);
     expect(internals().live.has(sp.traceId)).toBe(false);
   } finally { release(); vi.useRealTimers(); }
+});
+
+it("stops the owned cleanup retry after run replacement or store close", async () => {
+  t = await makeRoots(); mockDecisions();
+  const sp = llm(); t.roots.ingest([batch([sp])]);
+  await until(() => t!.roots.store.findingsForTrace(sp.traceId).some((f) => f.check_id === "empty-final-answer"));
+  expect(await t.roots.engine!.waitIdle(sp.traceId, 5000)).toBe(true);
+  type CleanupRun = { traceId: string; cleanupTimer?: NodeJS.Timeout };
+  const engine = t.roots.engine as unknown as { live: Map<string, CleanupRun>; scheduleCleanup(run: CleanupRun): void; pending(id: string): number };
+  const original = engine.live.get(sp.traceId)!;
+  clearTimeout(original.cleanupTimer);
+  original.cleanupTimer = undefined;
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  vi.spyOn(engine, "pending").mockReturnValue(1);
+  engine.scheduleCleanup(original);
+  const replacement = { ...original, cleanupTimer: undefined };
+  engine.live.set(sp.traceId, replacement);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(original.cleanupTimer).toBeUndefined();
+  expect(engine.live.get(sp.traceId)).toBe(replacement);
+  expect(vi.getTimerCount()).toBe(0);
+  engine.scheduleCleanup(replacement);
+  await t.close(); t = undefined;
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(replacement.cleanupTimer).toBeUndefined();
+  expect(vi.getTimerCount()).toBe(0);
+  engine.scheduleCleanup(replacement);
+  expect(vi.getTimerCount()).toBe(0);
 });
 
 it("reevaluates memoized user match patterns after same-length operation-details replacement", async () => {
@@ -79,6 +123,19 @@ it("reevaluates memoized user match patterns after same-length operation-details
   t.roots.ingestLogs(records(sp, undefined, "bad!"));
   expect(await t.roots.engine!.waitIdle(sp.traceId, 5000)).toBe(true);
   expect(t.roots.store.findingsForTrace(sp.traceId).filter((f) => f.check_id === "same-length")).toHaveLength(1);
+});
+
+it("does not reuse equal-length match results across stores with identical trace and span IDs", async () => {
+  const sp = llm();
+  for (const [output, count] of [["safe", 0], ["bad!", 1]] as const) {
+    t = await makeRoots(); mockDecisions();
+    t.roots.checks.save({ id: "cross-store-match", kind: "rule", rule: { type: "match", field: "output", pattern: "bad!" } }, "user");
+    t.roots.ingest([batch([sp])]);
+    t.roots.ingestLogs(records(sp, undefined, output));
+    expect(await t.roots.engine!.waitIdle(sp.traceId, 5000)).toBe(true);
+    expect(t.roots.store.findingsForTrace(sp.traceId).filter((f) => f.check_id === "cross-store-match")).toHaveLength(count);
+    await t.close(); t = undefined;
+  }
 });
 
 it("automatically resumes an outstanding marker-only completed receipt through a reopened Roots", async () => {

@@ -1112,10 +1112,10 @@ ${library}`;
 
   /** Evict completed state after idle; long-running replacement checks get another chance. */
   private scheduleCleanup(run: LiveRun): void {
-    if (run.cleanupTimer) return;
+    if (run.cleanupTimer || !this.roots.store.db.open) return;
     run.cleanupTimer = setTimeout(() => {
       run.cleanupTimer = undefined;
-      if (this.live.get(run.traceId) !== run) return;
+      if (!this.roots.store.db.open || this.live.get(run.traceId) !== run) return;
       if (this.pending(run.traceId)) this.scheduleCleanup(run);
       else this.live.delete(run.traceId);
     }, 60_000);
