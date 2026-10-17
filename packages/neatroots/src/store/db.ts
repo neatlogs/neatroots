@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import type { GenaiEvent } from "../semantics/genai-events.js";
 import { BlobStore } from "./blobs.js";
 import { sha256, newId } from "../util/ids.js";
+import { log } from "../util/log.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
 import { kvToPlain, type KeyValue, type OtlpResource, type OtlpScope, type OtlpSpan, type Plain, type ResourceSpansBatch } from "../otlp/types.js";
 import type {
@@ -376,7 +377,7 @@ export function currentRequest(v: Parameters<typeof preview>[0]): string | undef
 
 /** Search covers this much of each input, output and error: the start and the end of long values. */
 export const SEARCH_LIMIT = { head: 150_000, tail: 50_000 };
-const SEARCH_INDEX_VERSION = 4;
+const SEARCH_INDEX_VERSION = 5;
 /** A store over its size cap is trimmed to this share of the cap, so it isn't trimmed every hour. */
 export const RETENTION_LOW_WATER = 0.9;
 
@@ -1530,28 +1531,74 @@ export class Store {
    * Re-indexes spans stored before the index covered whole values (it kept 4,000 characters of
    * each), a few hundred at a time so startup isn't held up. Runs once per database.
    */
-  reindexSearch(onDone?: (n: number) => void): void {
+  reindexSearch(onDone?: (n: number, error?: Error) => void, onUpdate?: (updates: TraceUpdate[]) => void): void {
     if (this.getMeta("search_index") === String(SEARCH_INDEX_VERSION)) return;
-    let after = 0;
+    const previousVersion = this.getMeta("search_index");
+    // The primary key is stable across replacements; seq is mutable and can have legacy ties.
+    let through: { trace_id: string; span_id: string } | undefined;
+    let after: { trace_id: string; span_id: string } | undefined;
     let n = 0;
     const step = () => {
       if (!this.db.open) return;
-      const rows = this.db.prepare("SELECT seq, trace_id, span_id FROM spans WHERE seq > ? ORDER BY seq LIMIT 300").all(after) as { seq: number; trace_id: string; span_id: string }[];
-      for (const r of rows) {
-        after = r.seq;
-        const full = this.getOtlpSpan(r.trace_id, r.span_id);
-        if (!full) continue;
-        const view = buildView(full.span, full.resource.attributes, this.genaiEvents(full.span.traceId, full.span.spanId, full.resource.attributes));
-        if (view.isMarker) continue;
-        this.db.prepare("UPDATE spans SET input_preview = ?, output_preview = ? WHERE trace_id = ? AND span_id = ?").run(view.input === undefined ? null : preview(view.input, 600), view.output === undefined ? null : preview(view.output, 600), r.trace_id, r.span_id);
-        this.db.prepare("UPDATE runs SET input_preview = ?, output_preview = ? WHERE trace_id = ? AND root_span_id = ?").run(view.input === undefined ? null : currentRequest(view.input) ?? preview(view.input, 300), view.output === undefined ? null : preview(view.output, 300), r.trace_id, r.span_id);
-        this.indexSpan(r.trace_id, r.span_id, full.span.name, view);
-        n++;
-      }
-      if (rows.length) setImmediate(step);
-      else {
-        this.setMeta("search_index", String(SEARCH_INDEX_VERSION));
-        onDone?.(n);
+      try {
+        const updates = new Map<string, TraceUpdate>();
+        let nextAfter = after;
+        let batchCount = 0;
+        let more = false;
+        this.db.transaction(() => {
+          // Another Store can have committed since this instance opened. Reserve the writer
+          // before reading rows or allocating seqs, and never reinstall a selected old seq.
+          const maxSeq = (this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM spans").get() as { s: number }).s;
+          this.seq = Math.max(this.seq, maxSeq);
+          through ??= this.db.prepare("SELECT trace_id, span_id FROM spans ORDER BY trace_id DESC, span_id DESC LIMIT 1").get() as typeof through;
+          const rows = through ? this.db.prepare(`SELECT seq, trace_id, span_id, input_preview, output_preview FROM spans WHERE ${after ? "(trace_id, span_id) > (?, ?) AND " : ""}(trace_id, span_id) <= (?, ?) ORDER BY trace_id, span_id LIMIT 300`)
+            .all(...(after ? [after.trace_id, after.span_id] : []), through.trace_id, through.span_id) as Pick<SpanRow, "seq" | "trace_id" | "span_id" | "input_preview" | "output_preview">[] : [];
+          more = rows.length > 0;
+          for (const r of rows) {
+            nextAfter = { trace_id: r.trace_id, span_id: r.span_id };
+            const fresh = this.getSpanRow(r.trace_id, r.span_id);
+            if (!fresh || fresh.seq !== r.seq) throw new Error(`span changed during reindex for ${r.trace_id}/${r.span_id}`);
+            const full = this.getOtlpSpan(r.trace_id, r.span_id);
+            if (!full) throw new Error(`missing span content for ${r.trace_id}/${r.span_id}`);
+            const events = this.genaiEvents(full.span.traceId, full.span.spanId, full.resource.attributes);
+            const view = buildView(full.span, full.resource.attributes, events);
+            if (view.isMarker) continue;
+            const input = view.input === undefined ? null : preview(view.input, 600);
+            const output = view.output === undefined ? null : preview(view.output, 600);
+            // v4 already refreshed previews, but could leave pre-event findings/answers behind.
+            const attributesOnly = previousVersion === "4" && (events.length || full.span.events?.length) ? buildView({ ...full.span, events: [] }, full.resource.attributes) : undefined;
+            const eventDerived = attributesOnly && JSON.stringify([attributesOnly.input, attributesOnly.output]) !== JSON.stringify([view.input, view.output]);
+            const changed = r.input_preview !== input || r.output_preview !== output || !!eventDerived;
+            if (changed) {
+              const write = this.db.prepare("UPDATE spans SET input_preview = ?, output_preview = ?, seq = ? WHERE trace_id = ? AND span_id = ? AND seq = ?").run(input, output, ++this.seq, r.trace_id, r.span_id, r.seq);
+              if (write.changes !== 1) throw new Error(`span changed during reindex for ${r.trace_id}/${r.span_id}`);
+            }
+            this.db.prepare("UPDATE runs SET input_preview = ?, output_preview = ? WHERE trace_id = ? AND root_span_id = ?").run(view.input === undefined ? null : currentRequest(view.input) ?? preview(view.input, 300), view.output === undefined ? null : preview(view.output, 300), r.trace_id, r.span_id);
+            this.indexSpan(r.trace_id, r.span_id, full.span.name, view);
+            if (changed) {
+              const u = updates.get(r.trace_id) ?? { traceId: r.trace_id, spans: [], runCreated: false, rootEnded: false, completed: false, contentUpdated: true };
+              u.spans.push({ row: this.getSpanRow(r.trace_id, r.span_id)!, view, isNew: false });
+              updates.set(r.trace_id, u);
+            }
+            batchCount++;
+          }
+          // Preview/search changes and recovery receipts commit together, before engine delivery.
+          for (const traceId of updates.keys()) {
+            const now = Date.now();
+            this.db.prepare("UPDATE runs SET content_revision = content_revision + 1, updated_ms = ? WHERE trace_id = ?").run(now, traceId);
+            this.db.prepare("INSERT INTO check_progress (trace_id, state, updated_ms) VALUES (?, 'checking', ?) ON CONFLICT(trace_id) DO UPDATE SET state = excluded.state, updated_ms = excluded.updated_ms").run(traceId, now);
+          }
+          if (!more) this.setMeta("search_index", String(SEARCH_INDEX_VERSION));
+        }).immediate();
+        after = nextAfter;
+        n += batchCount;
+        if (updates.size) onUpdate?.([...updates.values()]);
+        if (more) setImmediate(step);
+        else onDone?.(n);
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        log.warn(`search reindex paused; it will retry on next start: ${error.message}`);
+        onDone?.(n, error);
       }
     };
     setImmediate(step);

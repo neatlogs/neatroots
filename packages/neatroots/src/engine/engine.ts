@@ -43,6 +43,8 @@ import { verifyFlag } from "./verify.js";
 /** Default library questions when no LLM is available to plan. */
 export const DEFAULT_PLAN = ["ignored-tool-error", "repeat-without-progress", "unfinished-task", "contradicts-tool-output"];
 
+const decisionEvidenceHash = (text: string, spanIds: string[]) => `v2:${sha256(JSON.stringify([spanIds, text]))}`;
+
 const TRIAGE_LEVELS = [
   "fine, nothing to look at",
   "minor, cosmetic only",
@@ -73,7 +75,8 @@ interface LiveRun {
   deferred: (() => Promise<void>)[];
   spanDone: Set<string>;
   spanEvidence: Map<string, string>;
-  contentRevision: number;
+  /** Previously persisted span verdicts that may need replacement after restart. */
+  persistedSpanChecks: Set<string>;
   /** Per span-scope check: spans waiting to be asked about, newest last. */
   spanQueue: Map<string, string[]>;
   spanBusy: Set<string>;
@@ -251,6 +254,13 @@ export class Engine {
     if (r) return r;
     const row = this.roots.store.getRun(traceId);
     if (!row) return undefined;
+    const persistedSpanChecks = new Set<string>();
+    const spanAsked = new Map<string, number>();
+    if (row.content_revision) for (const d of this.roots.store.decisionsForTrace(traceId)) {
+      if (!d.span_id || persistedSpanChecks.has(`${d.check_id}:${d.span_id}`)) continue;
+      persistedSpanChecks.add(`${d.check_id}:${d.span_id}`);
+      spanAsked.set(d.check_id, Math.min(SLOW_SPAN_CHECKS_PER_RUN, (spanAsked.get(d.check_id) ?? 0) + 1));
+    }
     r = {
       traceId,
       project: row.project ?? "unknown",
@@ -260,10 +270,10 @@ export class Engine {
       deferred: [],
       spanDone: new Set(),
       spanEvidence: new Map(),
-      contentRevision: 0,
+      persistedSpanChecks,
       spanQueue: new Map(),
       spanBusy: new Set(),
-      spanAsked: new Map(),
+      spanAsked,
       retrySpans: new Map(),
       rejected: new Map(),
       traceEvidence: new Map(),
@@ -285,7 +295,6 @@ export class Engine {
       return;
     }
     if (u.contentUpdated) {
-      run.contentRevision++;
       const persisted = this.roots.store.getRun(u.traceId);
       run.ended ||= persisted?.root_ended === 1 || persisted?.complete === 1;
       // A reconstructed completed run has no pending original end pass to finish.
@@ -355,7 +364,8 @@ export class Engine {
   private async handleContentUpdate(run: LiveRun, ids: string[]): Promise<void> {
     const snap = loadTrace(this.roots.store, run.traceId);
     this.applyRules(run, snap, run.ended, new Set(ids), { contentOnly: true });
-    if (!run.plan) this.ensurePlan(run, snap);
+    const goal = runGoal(snap);
+    if (!run.plan || (run.plan.id === "default" && (goal.system || goal.user || goal.rootInput))) this.ensurePlan(run, snap);
     if (run.planning) await run.planning;
     const latest = loadTrace(this.roots.store, run.traceId);
     this.scheduleQuestions(run, latest, latest.spans, run.ended, true);
@@ -402,6 +412,7 @@ export class Engine {
   /**
    * Asks a span-scope question about queued spans. With a fast classifier every span is
    * asked; when the LLM stands in, only the newest waiting span is asked, up to a per-run cap.
+   * Replacements for already judged spans are drained individually without discarding stale work.
    */
   private async drainSpanQueue(run: LiveRun, check: QuestionCheck, params: Record<string, string>): Promise<void> {
     if (run.spanBusy.has(check.id)) return;
@@ -412,7 +423,12 @@ export class Engine {
         if (!queue.length) break;
         const slow = await this.decisions.isSlow([toQuestion(check, params)]);
         let spanId: string;
-        if (slow) {
+        const replacement = queue.findIndex((id) => run.spanEvidence.has(`${check.id}:${id}`) || run.persistedSpanChecks.has(`${check.id}:${id}`));
+        if (slow && replacement >= 0) {
+          // The slow cap limits first-time sampling, not correction of verdicts already shown.
+          // Keep every replacement queued; each ask reloads the latest focused evidence.
+          spanId = queue.splice(replacement, 1)[0];
+        } else if (slow) {
           spanId = queue[queue.length - 1];
           queue.length = 0;
           const asked = run.spanAsked.get(check.id) ?? 0;
@@ -463,7 +479,9 @@ export class Engine {
       if (rule.rule.type === "run_end" && (!atEnd || (options.contentOnly && rule.rule.when !== "no_output"))) continue;
       let hit: RuleHit | null;
       try {
-        hit = evaluateRule(rule, snap, atEnd, fresh, lc.source !== "library");
+        const replacementMatch = rule.rule.type === "match" && (rule.rule.field === "input" || rule.rule.field === "output")
+          && (options.contentOnly || (run.rechecked && !!snap.run?.content_revision));
+        hit = evaluateRule(rule, snap, atEnd, fresh, lc.source !== "library", { includeClearedMatches: replacementMatch });
       } catch (err) {
         log.warn(`rule ${rule.id} failed: ${(err as Error).message}`);
         continue;
@@ -499,7 +517,7 @@ export class Engine {
       } else if (open && hit && !hit.firing) {
         // A streak that ended still happened, so its halt stands. A requires_before whose earlier
         // call arrived late never happened at all, so its halt is withdrawn too.
-        const disproven = rule.rule.type === "requires_before" || (rule.rule.type === "run_end" && rule.rule.when === "no_output");
+        const disproven = rule.rule.type === "match" || rule.rule.type === "requires_before" || (rule.rule.type === "run_end" && rule.rule.when === "no_output");
         this.resolve(open, { keepHalts: !disproven });
       }
     }
@@ -573,12 +591,13 @@ export class Engine {
     snap: TraceSnapshot,
     spanId: string | null,
   ): Promise<"unavailable" | void> {
-    const revision = run.contentRevision;
     const current = () => {
-      if (revision === run.contentRevision) return true;
+      // Neither a matching revision nor rendered text proves that full evidence IDs still agree.
       const latest = loadTrace(this.roots.store, run.traceId);
       const focus = spanId ? latest.spans.find((s) => s.id === spanId) : undefined;
-      return buildEvidence(latest, check.evidence, focus ? { focus } : {}).text === evidence;
+      if (spanId && !focus) return false;
+      const ev = buildEvidence(latest, check.evidence, focus ? { focus } : {});
+      return ev.text === evidence && JSON.stringify(ev.spanIds) === JSON.stringify(spanIds);
     };
     let result: DecisionResult;
     try {
@@ -619,7 +638,7 @@ export class Engine {
       check_id: check.id,
       span_id: spanId,
       probability: verdict.probability,
-      evidence_hash: sha256(evidence),
+      evidence_hash: decisionEvidenceHash(evidence, spanIds),
       answer: (answer ? { choice: answer.choice ?? null, score: answer.score ?? null, distribution: answer.distribution } : null) as Plain,
       backend: result.backend,
       latency_ms: result.latencyMs,
@@ -1287,7 +1306,10 @@ ${library}`;
       if (!d.evidence_hash) return !snap.run?.content_revision;
       const focus = d.span_id ? snap.spans.find((s) => s.id === d.span_id) : undefined;
       if (d.span_id && !focus) return false;
-      return d.evidence_hash === sha256(buildEvidence(snap, check.evidence, focus ? { focus } : {}).text);
+      const ev = buildEvidence(snap, check.evidence, focus ? { focus } : {});
+      if (d.evidence_hash.startsWith("v2:")) return d.evidence_hash === decisionEvidenceHash(ev.text, ev.spanIds);
+      // Legacy hashes cannot establish ID equality after accepted replacement content.
+      return !snap.run?.content_revision && d.evidence_hash === sha256(ev.text);
     });
   }
 
@@ -1309,9 +1331,12 @@ ${library}`;
     run.rechecked = true;
     if (opts.resume) {
       const done = this.currentAnswers(traceId);
-      for (const d of done) if (d.span_id) run.spanDone.add(`${d.check_id}:${d.span_id}`);
+      // An unpersisted provisional plan can be restored later by handleSpans. Unknown
+      // historical questions are not reusable answers for that not-yet-selected plan.
+      const selected = new Set(this.questionsFor(run).map(({ check }) => check.id));
+      for (const d of done) if (d.span_id && selected.has(d.check_id)) run.spanDone.add(`${d.check_id}:${d.span_id}`);
       run.answered = {
-        traceChecks: new Set(done.filter((d) => !d.span_id).map((d) => d.check_id)),
+        traceChecks: new Set(done.filter((d) => !d.span_id && selected.has(d.check_id)).map((d) => d.check_id)),
         toolSpans: new Set(done.filter((d) => d.check_id === "neatroots.tool-result" && d.span_id).map((d) => d.span_id!)),
       };
     }

@@ -108,8 +108,10 @@ function matchTexts(v: unknown): string[] {
  * a finding later resolves. `fresh` names the spans that just arrived: a streak they complete
  * fires even if a later span in the same batch already ended it. A nonfiring run_end/no_output
  * result is state-only: a late answer disproves it and must not count as a historical failure.
+ * includeClearedMatches also reports successful zero-match evaluations to reconcile findings;
+ * invalid or timed-out patterns stay unknown (null), and ordinary preview callers keep null misses.
  */
-export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, untrusted = false): RuleHit | null {
+export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, untrusted = false, options: { includeClearedMatches?: boolean } = {}): RuleHit | null {
   const r = check.rule;
   switch (r.type) {
     case "repeat": {
@@ -243,7 +245,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
         log.warn(`check ${check.id}: its pattern took over ${MATCH_MS} ms on one span, so it is skipped until neatroots restarts. Simplify the regex (overlapping alternatives in a repeat, like (a|aa)+, are slow).`);
         return null;
       }
-      if (!hits.length) return null;
+      if (!hits.length) return options.includeClearedMatches ? { firing: false, evidenceSpanIds: [], params: { count: "0" } } : null;
       return { firing: true, evidenceSpanIds: hits.map((s) => s.id), params: { count: String(hits.length), span: hits[0].ref } };
     }
     case "requires_before": {
