@@ -146,7 +146,7 @@ export function markerSpan(traceId: string, root: string): OtlpSpan {
  * "yes" when the question contains one of `yesWhen`, else "no", with logprobs.
  */
 export async function mockLlm(
-  opts: { yesWhen?: string[]; delayMs?: number; rejectWhen?: string[]; plan?: { id: string; params?: Record<string, string> }[] } = {},
+  opts: { yesWhen?: string[]; delayMs?: number; rejectWhen?: string[]; plan?: { id: string; params?: Record<string, string> }[]; plannerJson?: unknown } = {},
 ): Promise<{ url: string; requests: any[]; close: () => Promise<void> }> {
   const requests: any[] = [];
   const server = http.createServer((req, res) => {
@@ -195,7 +195,7 @@ export async function mockLlm(
         content = JSON.stringify({ quote: rejected ? "" : ev.slice(0, 40), shows_problem: !rejected });
       } else if (schema === "plan") {
         const checks = opts.plan ?? [{ id: "ignored-tool-error" }, { id: "unfinished-task" }, { id: "repeat-without-progress" }];
-        content = JSON.stringify({ rationale: "mock plan", checks, new_questions: [] });
+        content = JSON.stringify(opts.plannerJson ?? { rationale: "mock plan", checks, new_questions: [] });
       } else if (schema === "note") {
         content = JSON.stringify({ note: "Stop retrying lookup_order with the same id and tell the user the order was not found." });
       } else if (schema === "summary") {
