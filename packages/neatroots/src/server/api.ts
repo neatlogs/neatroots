@@ -160,7 +160,10 @@ export function mountApi(app: Hono, roots: Roots): void {
       workflow: q.workflow || undefined,
       status: q.status || undefined,
       sessionId: q.session || undefined,
-      hasFinding: q.has_finding === "1" || q.has_finding === "true",
+      hasFinding:
+        q.has_finding === undefined || q.has_finding === ""
+          ? undefined
+          : q.has_finding === "1" || q.has_finding === "true",
       checkId: q.check || undefined,
       text: q.q || undefined,
       sinceMs: q.since ? Number(q.since) : undefined,
