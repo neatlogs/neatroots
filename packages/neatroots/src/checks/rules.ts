@@ -1,3 +1,4 @@
+import { sha256 } from "../util/ids.js";
 import type { RuleCheck } from "./types.js";
 import { finalOutput, selectSpans, type SpanInfo, type TraceSnapshot } from "../engine/trace.js";
 import { preview } from "../semantics/view.js";
@@ -228,7 +229,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
           if (v === undefined || v === null) return false;
           const texts = matchTexts(v);
           if (!untrusted) return texts.some(test);
-          const memo = `${key}\u0000${t.run?.trace_id ?? ""}\u0000${s.id}\u0000${r.field}\u0000${texts.reduce((n, x) => n + x.length, 0)}`;
+          const memo = `${key}\u0000${t.run?.trace_id ?? ""}\u0000${s.id}\u0000${r.field}\u0000${sha256(JSON.stringify(texts))}`;
           const known = matchMemo.get(memo);
           if (known !== undefined) return known;
           const found = texts.some(test);

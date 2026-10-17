@@ -86,6 +86,7 @@ interface LiveRun {
   dirty: Set<string>;
   debounce?: NodeJS.Timeout;
   endTimer?: NodeJS.Timeout;
+  cleanupTimer?: NodeJS.Timeout;
   /** Rules waiting out RULE_GRACE_MS before raising: false while waiting, true once it is up. */
   ruleGrace: Map<string, boolean>;
   ended: boolean;
@@ -254,6 +255,7 @@ export class Engine {
       traceId,
       project: row.project ?? "unknown",
       workflow: row.workflow ?? row.project ?? "unknown",
+      plan: row.plan_id ? this.roots.store.getPlan(row.plan_id) : undefined,
       used: { plans: 0, investigations: 0, notes: 0, summaries: 0 },
       deferred: [],
       spanDone: new Set(),
@@ -287,7 +289,10 @@ export class Engine {
       const persisted = this.roots.store.getRun(u.traceId);
       run.ended ||= persisted?.root_ended === 1 || persisted?.complete === 1;
       // A reconstructed completed run has no pending original end pass to finish.
-      if (run.ended && !run.endTimer) run.endHandled = true;
+      if (run.ended && !run.endTimer) {
+        run.endHandled = true;
+        this.scheduleCleanup(run);
+      }
       const ids = u.spans.map((s) => s.row.span_id);
       for (const { check } of this.questionsFor(run)) {
         run.answered?.traceChecks.delete(check.id);
@@ -349,10 +354,11 @@ export class Engine {
 
   private async handleContentUpdate(run: LiveRun, ids: string[]): Promise<void> {
     const snap = loadTrace(this.roots.store, run.traceId);
-    this.applyRules(run, snap, run.ended, new Set(ids), true);
-    this.ensurePlan(run, snap);
+    this.applyRules(run, snap, run.ended, new Set(ids), { contentOnly: true });
+    if (!run.plan) this.ensurePlan(run, snap);
     if (run.planning) await run.planning;
-    this.scheduleQuestions(run, loadTrace(this.roots.store, run.traceId), snap.spans.filter((s) => ids.includes(s.id)), run.ended, true);
+    const latest = loadTrace(this.roots.store, run.traceId);
+    this.scheduleQuestions(run, latest, latest.spans, run.ended, true);
   }
 
   private scheduleQuestions(run: LiveRun, snap: TraceSnapshot, fresh: SpanInfo[], includeEnd = false, contentUpdate = false): void {
@@ -363,8 +369,12 @@ export class Engine {
         const queue = run.spanQueue.get(check.id) ?? [];
         for (const s of fresh) {
           const key = `${check.id}:${s.id}`;
-          if (run.spanDone.has(key) || !matchesSelector(s, sel)) continue;
-          if (run.spanEvidence.get(key) === buildEvidence(snap, check.evidence, { focus: s }).text) {
+          if (!matchesSelector(s, sel)) continue;
+          const evidence = buildEvidence(snap, check.evidence, { focus: s }).text;
+          // Goal and earlier tool context can change evidence for a different focus span.
+          if (contentUpdate && run.spanEvidence.get(key) !== evidence) run.spanDone.delete(key);
+          if (run.spanDone.has(key)) continue;
+          if (run.spanEvidence.get(key) === evidence) {
             run.spanDone.add(key);
             continue;
           }
@@ -446,11 +456,11 @@ export class Engine {
 
   // ----------------------------------------------------------------- rules
 
-  private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, contentOnly = false): void {
+  private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, options: { contentOnly?: boolean } = {}): void {
     for (const lc of this.registry.rules()) {
       const rule = lc.check as RuleCheck;
       if (!this.appliesTo(rule, run)) continue;
-      if (rule.rule.type === "run_end" && (!atEnd || (contentOnly && rule.rule.when !== "no_output"))) continue;
+      if (rule.rule.type === "run_end" && (!atEnd || (options.contentOnly && rule.rule.when !== "no_output"))) continue;
       let hit: RuleHit | null;
       try {
         hit = evaluateRule(rule, snap, atEnd, fresh, lc.source !== "library");
@@ -1097,9 +1107,19 @@ ${library}`;
     }
     for (const work of run.deferred.splice(0)) await work();
     await this.summarize(run, snap);
-    setTimeout(() => {
-      if (!this.pending(run.traceId)) this.live.delete(run.traceId);
+    this.scheduleCleanup(run);
+  }
+
+  /** Evict completed state after idle; long-running replacement checks get another chance. */
+  private scheduleCleanup(run: LiveRun): void {
+    if (run.cleanupTimer) return;
+    run.cleanupTimer = setTimeout(() => {
+      run.cleanupTimer = undefined;
+      if (this.live.get(run.traceId) !== run) return;
+      if (this.pending(run.traceId)) this.scheduleCleanup(run);
+      else this.live.delete(run.traceId);
     }, 60_000);
+    run.cleanupTimer.unref();
   }
 
   private async triageRun(run: LiveRun, snap: TraceSnapshot): Promise<void> {
@@ -1285,7 +1305,7 @@ ${library}`;
     if (!row) return;
     this.live.delete(traceId);
     const run = this.liveRun(traceId)!;
-    run.ended = row.status !== "running";
+    run.ended = row.status !== "running" || row.complete === 1 || row.root_ended === 1;
     run.rechecked = true;
     if (opts.resume) {
       const done = this.currentAnswers(traceId);
@@ -1309,7 +1329,7 @@ export async function resumeUnfinished(engine: Engine, roots: Roots): Promise<nu
   const ended = ids.filter((id) => {
     const r = roots.store.getRun(id);
     if (!r) engine.progress.done(id);
-    return !!r && r.status !== "running";
+    return !!r && (r.status !== "running" || r.complete === 1 || r.root_ended === 1);
   });
   for (const id of ended.slice(RESUME_LIMIT)) engine.progress.interrupted(id);
   const todo = ended.slice(0, RESUME_LIMIT);
