@@ -66,7 +66,7 @@ function ReplayDialog({ project, onClose }: { project: ProjectRow; onClose: () =
   );
 }
 
-export function ProjectsSection({ hooks, steerPython, steerTs }: { hooks: number; steerPython?: string | null; steerTs?: string | null }) {
+export function ProjectsSection({ hooks, lastSeenMs, lastProject, steerPython, steerTs }: { hooks: number; lastSeenMs?: number | null; lastProject?: string | null; steerPython?: string | null; steerTs?: string | null }) {
   const { data, isLoading } = useProjects();
   const save = useSaveSettings();
   const [replayFor, setReplayFor] = useState<ProjectRow>();
@@ -137,7 +137,12 @@ export function ProjectsSection({ hooks, steerPython, steerTs }: { hooks: number
           </div>
         )}
       </SettingsCard>
-      <SettingsCard title={`Steering hook · ${hooks} connected now`} description="Steering and replay overrides need a small hook in your agent. Wrap the LLM client you already use.">
+      <SettingsCard
+        title={lastSeenMs ? `Steering hook · last asked ${ago(lastSeenMs)}${lastProject ? ` (${lastProject})` : ""}` : "Steering hook · no hook has asked yet"}
+        description="Steering and replay overrides need a small hook in your agent. Wrap the LLM client you already use."
+      >
+        {!lastSeenMs && <p className="text-xs text-muted-foreground">No hook has ever asked neatroots for work. If you have wired one up, check the project name it reports.</p>}
+        {hooks > 0 && <p className="text-xs text-muted-foreground">{hooks} streaming client{hooks === 1 ? "" : "s"} connected now (the Python hook streams; the TypeScript hook polls).</p>}
         <SettingField label="Python">
           <CodeLine text={`pip install ${steerPython ?? "~/.neatroots/app/steer/python/neatroots-steer"}\n\nimport neatroots_steer\nclient = neatroots_steer.wrap(OpenAI())`} />
         </SettingField>

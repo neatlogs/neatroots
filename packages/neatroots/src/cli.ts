@@ -8,7 +8,7 @@ import { startGrpc } from "./ingest/grpc.js";
 import { VERSION } from "./version.js";
 import { rootsHome, loadConfig, saveConfig, type SteeringMode } from "./config.js";
 import { runStdioBridge } from "./mcp/stdio.js";
-import { api, ask, port, running } from "./cli/util.js";
+import { api, ask, port, running, steeringHook } from "./cli/util.js";
 import { registerModelCommands } from "./cli/models.js";
 import { doctorModels } from "./cli/doctor-models.js";
 import { registerServiceCommands } from "./cli/service.js";
@@ -212,7 +212,7 @@ program
       console.log(`  decisions ${s.engine.decision.backend ?? "unavailable"}${s.engine.decision.model ? ` (${s.engine.decision.model})` : ""}`);
       console.log(`  live runs ${s.engine.liveRuns} · pending checks ${s.engine.pendingJobs}`);
     }
-    console.log(`  steering ${s.steering.enabled ? "on" : "OFF (global switch)"} · hooks connected ${s.steering.hooks_connected}`);
+    console.log(`  steering ${s.steering.enabled ? "on" : "OFF (global switch)"} · ${steeringHook(s.steering.last_seen_ms ?? null, s.steering.last_project ?? null, s.steering.hooks_connected ?? 0)}`);
     console.log(`  cloud ${s.cloud.has_key ? "key stored" : "no key"} → ${s.cloud.endpoint}`);
   });
 
@@ -261,6 +261,9 @@ program
       }
       const s = await api<any>(p, "/api/status");
       line(s.check_errors.length === 0 ? true : "warn", s.check_errors.length ? `${s.check_errors.length} check file problem(s)` : "all checks load");
+      // Steering is opt-in, so a hook that never asked is a warning, not a failure.
+      const seen = s.steering.last_seen_ms ?? null;
+      line(seen ? true : "warn", `steering: ${steeringHook(seen, s.steering.last_project ?? null, s.steering.hooks_connected ?? 0)}`);
     }
     console.log(`\nTo test the SDK path end to end:  NEATLOGS_API_KEY=neatroots-local NEATLOGS_ENDPOINT=http://localhost:${p} python -m neatlogs doctor --probe`);
     process.exitCode = ok ? 0 : 1;

@@ -43,6 +43,22 @@ export class Roots {
   private sweeper?: NodeJS.Timeout;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
+  /**
+   * When a steering hook last asked neatroots for work, and the last project a hook named. The SSE
+   * subscriber count only tells you about clients that stream (the Python hook), so a TypeScript
+   * hook that is polling happily reads as zero connections without this.
+   */
+  steerSeen: { at: number; project: string | null } | null = null;
+
+  /**
+   * Records that a steering hook asked neatroots for work. `project` is what the hook said, or null
+   * when it did not say: the Python hook streams without naming one (only `/api/steer/claim`
+   * carries a project), and blanking the field there would drop the project the status line had
+   * just been showing. So an unnamed report moves the time and leaves the last named project alone.
+   */
+  noteSteerSeen(project: string | null): void {
+    this.steerSeen = { at: Date.now(), project: project ?? this.steerSeen?.project ?? null };
+  }
   /** The run and span the app has in focus, for the MCP get_current_run tool. */
   focus: { trace_id: string; span_id: string | null; at: number } | null = null;
   /** Cloud pushes a coding agent asked for, waiting for the user to confirm in the app. */

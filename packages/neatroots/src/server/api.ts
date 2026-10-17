@@ -130,7 +130,14 @@ export function mountApi(app: Hono, roots: Roots): void {
       stats: roots.store.stats(),
       engine: status,
       tier: { ...tier, platform: `${os.platform()} ${os.arch()}` },
-      steering: { enabled: roots.config.steering.enabled, hooks_connected: roots.steering.listeners },
+      steering: {
+        enabled: roots.config.steering.enabled,
+        // Stream subscribers only: the Python hook opens /api/steer/stream, the TypeScript hook
+        // polls /api/steer/claim and never appears here. Read it with `last_seen_ms`, not as health.
+        hooks_connected: roots.steering.listeners,
+        last_seen_ms: roots.steerSeen?.at ?? null,
+        last_project: roots.steerSeen?.project ?? null,
+      },
       mcp: { last_seen_ms: roots.mcpSeenMs },
       cloud: { endpoint: roots.relay.endpoint(), has_key: !!(await getCloudKey()), has_token: !!(await getCloudToken()), project_id: roots.config.cloud.projectId ?? null },
       classifier: {
@@ -424,6 +431,7 @@ export function mountApi(app: Hono, roots: Roots): void {
     streamSSE(c, async (stream) => {
       const queue: { event: string; data: string }[] = [];
       let wake: (() => void) | undefined;
+      roots.noteSteerSeen(c.req.query("project") ?? null);
       const off = roots.steering.subscribe((e) => {
         queue.push({ event: e.event, data: JSON.stringify(e.data) });
         wake?.();
@@ -454,6 +462,9 @@ export function mountApi(app: Hono, roots: Roots): void {
     const b = await body<{ trace_id?: string; span_id?: string; gate_ms?: number; project?: string }>(c);
     if (typeof b.trace_id !== "string" || !b.trace_id) return err(c, 400, "trace_id required");
     const run = roots.store.getRun(b.trace_id);
+    // A hook asking is a hook that is wired up, whatever it finds: record it before the branches
+    // below, so "no hook has ever asked" is answerable for both SDKs.
+    roots.noteSteerSeen(run?.project ?? b.project ?? null);
     // Before any span of this run has arrived neatroots cannot know its project; say so, so the
     // hook flushes the SDK and asks again instead of caching "off".
     if (!run && !b.project) return c.json({ mode: "unknown", known: false, note: null });

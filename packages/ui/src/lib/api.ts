@@ -295,7 +295,14 @@ export interface Status {
     pendingJobs: number;
   } | null;
   tier: { tier: string; memoryGb: number; description: string; platform: string };
-  steering: { enabled: boolean; hooks_connected: number };
+  steering: {
+    enabled: boolean;
+    /** SSE subscribers only: the Python hook streams, the TypeScript hook polls and is never counted. */
+    hooks_connected: number;
+    /** When any hook last asked neatroots for work, from either SDK. */
+    last_seen_ms?: number | null;
+    last_project?: string | null;
+  };
   mcp?: { last_seen_ms: number | null };
   install?: { mode: "bundle" | "source" | "other"; root: string | null; steer_python: string | null; steer_ts: string | null; examples?: string | null };
   cloud: { endpoint: string; has_key: boolean; has_token?: boolean; project_id?: string | null };
