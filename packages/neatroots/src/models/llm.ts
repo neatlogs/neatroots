@@ -2,7 +2,7 @@ import os from "node:os";
 import Anthropic from "@anthropic-ai/sdk";
 import type { RootsConfig } from "../config.js";
 import { log } from "../util/log.js";
-import { BUILTIN_RULES, compileRules, CREDENTIAL_KINDS, redactString, type RedactionRule } from "../relay/redact.js";
+import { BUILTIN_RULES, compileRules, CREDENTIAL_KINDS, RedactionPatternError, redactString, type RedactionRule } from "../relay/redact.js";
 import { isLocalUrl, llmKeyName, providerById, strictSchema, type ProviderPreset } from "./providers.js";
 
 export interface ChatMessage {
@@ -647,8 +647,8 @@ export class LlmClient {
     }
     let lastErr: unknown;
     for (const t of targets) {
-      const redact = this.redactFor(t);
       try {
+        const redact = this.redactFor(t);
         const r = await t.send(
           messages.map((m) => ({ ...m, content: redact(m.content) })),
           opts,
@@ -657,7 +657,9 @@ export class LlmClient {
         return r;
       } catch (err) {
         lastErr = err;
-        if (!(err instanceof LlmUnavailableError)) throw err;
+        // A saved redaction pattern that can't be applied means this text can't go to the hosted
+        // LLM (nothing is sent); the local LLM, which gets unredacted text, can still answer.
+        if (!(err instanceof LlmUnavailableError || err instanceof RedactionPatternError)) throw err;
         if (t !== this.local && targets.length > 1 && Date.now() - this.warnedFallback > 60_000) {
           this.warnedFallback = Date.now();
           log.warn(`${t.where} unavailable (${err.message}); using the local LLM`);

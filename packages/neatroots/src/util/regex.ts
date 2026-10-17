@@ -99,3 +99,22 @@ export function testWithin(re: RegExp, s: string, ms: number): boolean | undefin
     sandbox.s = undefined;
   }
 }
+
+const replaceScript = new vm.Script("re.lastIndex = 0; s.replace(re, fn)");
+
+/** Like testWithin, for `s.replace(re, fn)`. Returns undefined when the time ran out. */
+export function replaceWithin(re: RegExp, s: string, fn: (m: string, ...groups: unknown[]) => string, ms: number): string | undefined {
+  sandbox.re = re;
+  sandbox.s = s;
+  sandbox.fn = fn;
+  try {
+    return String(replaceScript.runInContext(sandbox, { timeout: ms }));
+  } catch (e) {
+    if ((e as { code?: string }).code === "ERR_SCRIPT_EXECUTION_TIMEOUT") return undefined;
+    throw e;
+  } finally {
+    sandbox.re = undefined;
+    sandbox.s = undefined;
+    sandbox.fn = undefined;
+  }
+}

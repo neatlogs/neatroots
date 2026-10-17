@@ -38,10 +38,21 @@ The relay is tested end to end by forwarding into a second neatroots instance an
 - From a coding agent: `push_to_cloud` asks; you confirm in the app before anything is sent.
 
 Before each send neatroots shows a redaction preview. Emails, phone numbers, private keys and credentials
-are always redacted: API keys (OpenAI, Anthropic, AWS access key ids, GitHub classic and fine-grained
-tokens, Slack, Google, Stripe, Hugging Face, Groq, npm, Google OAuth), bearer tokens, JWTs, `Basic`
-authorization, AWS secret access keys and passwords in URLs (`scheme://user:password@host`). Add your own
-patterns in Settings. Redaction also inspects OTLP byte
+are always redacted:
+- API keys and tokens: OpenAI, Anthropic, AWS access key ids (`AKIA…`, `ASIA…`), GitHub classic and
+  fine-grained tokens, Slack tokens and webhook URLs, Google, Stripe (`sk_`/`rk_` and `whsec_`), Hugging
+  Face, Groq, npm, SendGrid, Google OAuth, Neatlogs service-account tokens (`nlsa_…`) and `x-api-key` values;
+- bearer tokens of 20 characters or more, JWTs and `Basic` authorization;
+- AWS secret access keys and session tokens (as config keys, JSON or SDK options), Azure storage and
+  Service Bus keys, and JSON `password` / `client_secret` fields;
+- private keys (PEM, OpenSSH, PGP), including one cut off before its END line, which is redacted to the
+  end of the value;
+- passwords in URLs (`scheme://user:password@host`).
+
+Add your own patterns in Settings. If one of your patterns can't be applied (it isn't a valid regex, or it
+takes longer than 100 ms on a value), nothing is sent and the send log says which pattern to fix. For the
+hosted LLM the request fails, or goes to your local LLM if `fallbackToLocal` is on and one is running.
+Redaction also inspects OTLP byte
 attributes when they contain valid UTF-8 text, while arbitrary binary values remain unchanged. The
 SDK's own `mask` and PII options still apply first, in your process. Every send is logged (Settings →
 Neatlogs Cloud).

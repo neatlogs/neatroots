@@ -376,7 +376,7 @@ export function currentRequest(v: Parameters<typeof preview>[0]): string | undef
 
 /** Search covers this much of each input, output and error: the start and the end of long values. */
 export const SEARCH_LIMIT = { head: 150_000, tail: 50_000 };
-const SEARCH_INDEX_VERSION = 3;
+const SEARCH_INDEX_VERSION = 4;
 /** A store over its size cap is trimmed to this share of the cap, so it isn't trimmed every hour. */
 export const RETENTION_LOW_WATER = 0.9;
 
@@ -444,6 +444,9 @@ export class Store {
     };
     ensure("plans", "body", "TEXT");
     ensure("logs", "event_name", "TEXT");
+    ensure("runs", "content_revision", "INTEGER NOT NULL DEFAULT 0");
+    ensure("decisions", "evidence_hash", "TEXT");
+    this.db.exec("CREATE TABLE IF NOT EXISTS check_progress (trace_id TEXT PRIMARY KEY, state TEXT NOT NULL, updated_ms INTEGER NOT NULL)");
     this.db.exec("CREATE INDEX IF NOT EXISTS logs_span_event ON logs (trace_id, span_id, event_name)");
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
@@ -699,6 +702,8 @@ export class Store {
   ingestLogs(records: OtlpLogRecord[], onUpdate?: (updates: TraceUpdate[]) => void): number {
     const before = new Map<string, { traceId: string; spanId: string; view: SpanView }>();
     for (const r of records) {
+      const name = r.eventName || String(kvToPlain(r.attributes)["event.name"] ?? "");
+      if (!r.traceId || !r.spanId || !name.startsWith("gen_ai.")) continue;
       const key = `${r.traceId}:${r.spanId}`;
       if (!before.has(key)) {
         const view = this.spanView(r.traceId, r.spanId);
@@ -724,7 +729,7 @@ export class Store {
             JSON.stringify(r.attributes),
             resourceId,
             now,
-            (r.eventName ?? String(kvToPlain(r.attributes)["event.name"] ?? "")) || null,
+            (r.eventName || String(kvToPlain(r.attributes)["event.name"] ?? "")) || null,
           );
       }
       for (const old of before.values()) {
@@ -735,13 +740,15 @@ export class Store {
         this.db.prepare("UPDATE spans SET input_preview = ?, output_preview = ?, seq = ? WHERE trace_id = ? AND span_id = ?")
           .run(input, output, ++this.seq, old.traceId, old.spanId);
         this.indexSpan(old.traceId, old.spanId, this.getOtlpSpan(old.traceId, old.spanId)!.span.name, view);
-        this.db.prepare("UPDATE runs SET updated_ms = ? WHERE trace_id = ?").run(now, old.traceId);
+        this.db.prepare("UPDATE runs SET updated_ms = ?, content_revision = content_revision + 1 WHERE trace_id = ?").run(now, old.traceId);
         this.db.prepare("UPDATE runs SET input_preview = ?, output_preview = ? WHERE trace_id = ? AND root_span_id = ?")
           .run(view.input === undefined ? null : currentRequest(view.input) ?? preview(view.input, 300), view.output === undefined ? null : preview(view.output, 300), old.traceId, old.spanId);
         const u = updates.get(old.traceId) ?? { traceId: old.traceId, spans: [], runCreated: false, rootEnded: false, completed: false, contentUpdated: true };
-        u.spans.push({ row: this.getSpans(old.traceId, true).find((r) => r.span_id === old.spanId)!, view, isNew: false });
+        u.spans.push({ row: this.getSpanRow(old.traceId, old.spanId)!, view, isNew: false });
         updates.set(old.traceId, u);
       }
+      // Commit accepted replacement evidence and its recovery receipt together, before bus delivery.
+      for (const traceId of updates.keys()) this.db.prepare("INSERT INTO check_progress (trace_id, state, updated_ms) VALUES (?, 'checking', ?) ON CONFLICT(trace_id) DO UPDATE SET state = excluded.state, updated_ms = excluded.updated_ms").run(traceId, now);
     });
     tx();
     if (updates.size) onUpdate?.([...updates.values()]);
@@ -760,13 +767,18 @@ export class Store {
       const name = r.event_name ?? String(attrs["event.name"] ?? "");
       if (!name.startsWith("gen_ai.")) return [];
       const body = json<Plain>(r.body, r.body);
-      return [{ name, timeUnixNano: r.time_ns, body: body && typeof body === "object" && !Array.isArray(body) ? { ...attrs, ...body } : Object.keys(attrs).length ? { ...attrs, content: body } : body }];
+      return [{ name, timeUnixNano: r.time_ns, body: body && typeof body === "object" && !Array.isArray(body) ? { ...attrs, ...body } : Object.keys(attrs).length ? { ...attrs, ...(attrs.content === undefined && body !== null ? { content: body } : {}) } : body }];
     });
+  }
+
+  /** Build the derived view without reloading an already hydrated span. */
+  viewOf(full: { span: OtlpSpan; resource: OtlpResource }): SpanView {
+    return buildView(full.span, full.resource.attributes, this.genaiEvents(full.span.traceId, full.span.spanId, full.resource.attributes));
   }
 
   spanView(traceId: string, spanId: string): SpanView | undefined {
     const full = this.getOtlpSpan(traceId, spanId);
-    return full ? buildView(full.span, full.resource.attributes, this.genaiEvents(traceId, spanId, full.resource.attributes)) : undefined;
+    return full ? this.viewOf(full) : undefined;
   }
 
   // ------------------------------------------------------------------- reads
@@ -877,7 +889,10 @@ export class Store {
   }
 
   getSpanRow(traceId: string, spanId: string): SpanRow | undefined {
-    return this.getSpans(traceId, true).find((s) => s.span_id === spanId);
+    return this.db.prepare(`SELECT trace_id, span_id, parent_span_id, name, span_kind, otel_kind, start_ns, end_ns, start_ms, end_ms,
+          duration_ms, status_code, status_message, model, provider, tool_name, prompt_tokens, completion_tokens,
+          total_tokens, input_preview, output_preview, error, is_marker, resource_id, scope_id, received_ms, seq
+         FROM spans WHERE trace_id = ? AND span_id = ?`).get(traceId, spanId) as SpanRow | undefined;
   }
 
   /** Reassembles a stored span as OTLP, restoring blob payloads. */
@@ -1114,9 +1129,9 @@ export class Store {
     const row: DecisionRow = { ...d, id: newId("dec"), created_ms: Date.now() };
     this.db
       .prepare(
-        "INSERT INTO decisions (id, trace_id, check_id, span_id, probability, answer, backend, latency_ms, created_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO decisions (id, trace_id, check_id, span_id, probability, answer, backend, latency_ms, created_ms, evidence_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run(row.id, row.trace_id, row.check_id, row.span_id, row.probability, JSON.stringify(row.answer), row.backend, row.latency_ms, row.created_ms);
+      .run(row.id, row.trace_id, row.check_id, row.span_id, row.probability, JSON.stringify(row.answer), row.backend, row.latency_ms, row.created_ms, row.evidence_hash ?? null);
     return row;
   }
 
@@ -1528,6 +1543,8 @@ export class Store {
         if (!full) continue;
         const view = buildView(full.span, full.resource.attributes, this.genaiEvents(full.span.traceId, full.span.spanId, full.resource.attributes));
         if (view.isMarker) continue;
+        this.db.prepare("UPDATE spans SET input_preview = ?, output_preview = ? WHERE trace_id = ? AND span_id = ?").run(view.input === undefined ? null : preview(view.input, 600), view.output === undefined ? null : preview(view.output, 600), r.trace_id, r.span_id);
+        this.db.prepare("UPDATE runs SET input_preview = ?, output_preview = ? WHERE trace_id = ? AND root_span_id = ?").run(view.input === undefined ? null : currentRequest(view.input) ?? preview(view.input, 300), view.output === undefined ? null : preview(view.output, 300), r.trace_id, r.span_id);
         this.indexSpan(r.trace_id, r.span_id, full.span.name, view);
         n++;
       }

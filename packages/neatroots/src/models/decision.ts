@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { RootsConfig } from "../config.js";
 import { isLocalUrl, LlmClient, LlmUnavailableError, type TokenLogprob } from "./llm.js";
+import { RedactionPatternError } from "../relay/redact.js";
 import { log } from "../util/log.js";
 
 /**
@@ -156,19 +157,26 @@ export class JevBackend implements DecisionBackend {
   }
 
   async decide(state: string, questions: DecisionQuestion[]): Promise<DecisionResult> {
-    const redact = this.ep.redact && !isLocalUrl(this.ep.baseUrl()) ? this.ep.redact() : (s: string) => s;
-    const body = {
-      model: this.ep.model(),
-      state: redact(state),
-      questions: Object.fromEntries(
-        questions.map((q) => {
-          const ask = redact(q.ask);
-          if (q.type === "yes_no") return [q.name, { type: "noul", instructions: ask }];
-          if (q.type === "choice") return [q.name, { type: "choice", instructions: ask, criteria: q.options ?? {} }];
-          return [q.name, { type: "score", instructions: ask, criteria: q.levels ?? ["none", "low", "medium", "high", "critical"] }];
-        }),
-      ),
-    };
+    let body: { model: string; state: string; questions: Record<string, unknown> };
+    try {
+      const redact = this.ep.redact && !isLocalUrl(this.ep.baseUrl()) ? this.ep.redact() : (s: string) => s;
+      body = {
+        model: this.ep.model(),
+        state: redact(state),
+        questions: Object.fromEntries(
+          questions.map((q) => {
+            const ask = redact(q.ask);
+            if (q.type === "yes_no") return [q.name, { type: "noul", instructions: ask }];
+            if (q.type === "choice") return [q.name, { type: "choice", instructions: ask, criteria: q.options ?? {} }];
+            return [q.name, { type: "score", instructions: ask, criteria: q.levels ?? ["none", "low", "medium", "high", "critical"] }];
+          }),
+        ),
+      };
+    } catch (err) {
+      // Redaction fails closed: the question isn't sent off the machine.
+      if (err instanceof RedactionPatternError) throw new DecisionUnavailableError(`${this.ep.name}: ${err.message}`);
+      throw err;
+    }
     const started = Date.now();
     let res: Response;
     try {

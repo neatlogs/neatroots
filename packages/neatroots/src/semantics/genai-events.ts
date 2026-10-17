@@ -23,6 +23,36 @@ function message(v: Plain, role: string): Plain | undefined {
   return out;
 }
 
+/** Identity uses message semantics, ignoring exporter metadata and map insertion order. */
+function messageIdentity(v: Plain | undefined): Plain {
+  const m = object(v);
+  return Object.fromEntries(["role", "content", "tool_calls", "tool_call_id", "name"].filter((k) => m[k] !== undefined).map((k) => [k, m[k]]));
+}
+
+function canonical(v: Plain): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}`;
+  return JSON.stringify(v);
+}
+
+function identityBody(name: string, body: Plain): Plain {
+  const b = object(body);
+  const role = /^gen_ai\.(system|user|assistant|tool)\.message$/.exec(name)?.[1];
+  if (role) return messageIdentity(message(body, role));
+  if (name === "gen_ai.choice") return { index: Number(b.index) || 0, message: messageIdentity(message(b.message ?? b, "assistant")) };
+  if (name === "gen_ai.client.inference.operation.details") {
+    const messages = (v: Plain | undefined) => {
+      const parsed = maybeJson(v);
+      const normalized = Array.isArray(parsed) ? normalizeParts(parsed) as Plain[] : [];
+      return normalized.map(messageIdentity);
+    };
+    return { input: messages(b["gen_ai.input.messages"]), output: messages(b["gen_ai.output.messages"]) };
+  }
+  const input = name.endsWith("prompt");
+  const value = maybeJson(b[input ? "gen_ai.prompt" : "gen_ai.completion"] ?? b.content);
+  return { index: Number(b.index) || 0, messages: (Array.isArray(value) ? value : value === undefined ? [] : [value]).map((v) => messageIdentity(message(v, input ? "user" : "assistant"))) };
+}
+
 /** Public OTel GenAI event conventions, including pre-1.37 message events. */
 export function genaiMessages(events: OtlpEvent[], logs: GenaiEvent[]): { input?: Plain; output?: Plain } {
   const all = [
@@ -38,7 +68,7 @@ export function genaiMessages(events: OtlpEvent[], logs: GenaiEvent[]): { input?
   const seen = new Set<string>();
   for (const e of all) {
     // Export retries and an event mirrored as both a span event and a log are one observation.
-    const identity = JSON.stringify([e.name, e.timeUnixNano, e.body]);
+    const identity = canonical([e.name, e.timeUnixNano, identityBody(e.name, e.body)]);
     if (!e.fromSpan && seen.has(identity)) continue;
     seen.add(identity);
     const b = object(e.body);

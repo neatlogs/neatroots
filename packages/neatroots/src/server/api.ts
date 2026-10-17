@@ -7,6 +7,7 @@ import { kvToPlain } from "../otlp/types.js";
 import { hardwareTier, llmErrorMessage } from "../models/llm.js";
 import { regexProblem } from "../util/regex.js";
 import { allowedEndpoint } from "../relay/endpoint.js";
+import { RedactionPatternError } from "../relay/redact.js";
 import { projectSettings, type SteeringMode } from "../config.js";
 import { getCloudKey, setCloudKey, deleteCloudKey, getCloudToken, getSecret } from "../relay/keychain.js";
 import { mountModelsApi } from "./api-models.js";
@@ -75,7 +76,7 @@ export function runDetail(roots: Roots, traceId: string) {
 export function spanDetail(roots: Roots, traceId: string, spanId: string) {
   const full = roots.store.getOtlpSpan(traceId, spanId);
   if (!full) return undefined;
-  const view = roots.store.spanView(traceId, spanId)!;
+  const view = roots.store.viewOf(full);
   return {
     trace_id: traceId,
     span_id: spanId,
@@ -345,7 +346,12 @@ export function mountApi(app: Hono, roots: Roots): void {
   app.post("/api/cloud/preview", async (c) => {
     const b = await body<{ trace_ids?: string[] }>(c);
     if (!b.trace_ids?.length) return err(c, 400, "trace_ids required");
-    return c.json(await roots.relay.preview(b.trace_ids));
+    try {
+      return c.json(await roots.relay.preview(b.trace_ids));
+    } catch (e) {
+      if (e instanceof RedactionPatternError) return err(c, 400, e.message);
+      throw e;
+    }
   });
 
   app.post("/api/cloud/forward", async (c) => {

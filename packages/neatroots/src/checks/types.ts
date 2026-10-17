@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { regexProblem } from "../util/regex.js";
 
 /** Which spans a check looks at. Every field is optional; all given fields must match. */
 export const SpanSelector = z
@@ -104,8 +103,14 @@ export const RuleSpec = z.discriminatedUnion("type", [
     })
     .strict()
     .superRefine((r, ctx) => {
-      const problem = regexProblem(r.pattern, r.flags ?? "i");
-      if (problem) ctx.addIssue({ code: "custom", path: ["pattern"], message: problem });
+      // Loading refuses only a pattern that doesn't compile. One that nests repeats, which checks
+      // saved before 0.2.9 can have, still loads and runs under a time limit (rules.ts); saving a
+      // new one is refused (checkFromInput).
+      try {
+        new RegExp(r.pattern, r.flags ?? "i");
+      } catch (e) {
+        ctx.addIssue({ code: "custom", path: ["pattern"], message: `not a valid regular expression (${(e as Error).message})` });
+      }
     }),
   z
     .object({

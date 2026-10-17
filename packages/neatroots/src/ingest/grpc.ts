@@ -45,9 +45,26 @@ export function startGrpc(roots: Roots): Promise<grpc.Server | null> {
     unary("/opentelemetry.proto.collector.trace.v1.TraceService/Export", () => {}),
     { Export: handler((b) => roots.ingest(decodeTraceProtobuf(b) as ResourceSpansBatch[])) },
   );
+  const logsHandler: grpc.handleUnaryCall<Buffer, Buffer> = (call, callback) => {
+    let records: ReturnType<typeof decodeLogsProtobuf>;
+    try {
+      records = decodeLogsProtobuf(call.request);
+    } catch (err) {
+      log.warn(`rejected OTLP/gRPC logs payload: ${(err as Error).message}`);
+      callback({ code: grpc.status.INVALID_ARGUMENT, details: (err as Error).message });
+      return;
+    }
+    try {
+      roots.ingestLogs(records);
+      callback(null, empty());
+    } catch (err) {
+      log.error("log ingest failed", err);
+      callback({ code: grpc.status.UNAVAILABLE, details: "neatroots could not store these logs" });
+    }
+  };
   server.addService(
     unary("/opentelemetry.proto.collector.logs.v1.LogsService/Export", () => {}),
-    { Export: handler((b) => roots.ingestLogs(decodeLogsProtobuf(b))) },
+    { Export: logsHandler },
   );
   server.addService(unary("/opentelemetry.proto.collector.metrics.v1.MetricsService/Export", () => {}), { Export: handler(() => {}) });
   return new Promise((resolve) => {

@@ -75,7 +75,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
     }
     const full = store.getOtlpSpan(traceId, row.span_id);
     if (!full) continue;
-    const v = store.spanView(traceId, row.span_id)!;
+    const v = store.viewOf(full);
     const info: SpanInfo = {
       id: row.span_id,
       ref: row.span_id.slice(0, 6),

@@ -7,6 +7,7 @@ import { parseTraceFile } from "../src/ingest/importers/index.js";
 import { LayaManager } from "../src/models/laya.js";
 import { endpointProblem } from "../src/relay/endpoint.js";
 import { regexProblem } from "../src/util/regex.js";
+import { checkFromInput } from "../src/server/api-checks.js";
 import { freePort, makeRoots, poll, tmpHome, type TestRoots } from "./helpers.js";
 
 // The findings in issue #23 (Crashtest) that the earlier fixes didn't cover.
@@ -37,16 +38,23 @@ describe("regular expressions people write (#23.8)", () => {
     for (const ok of ["sk-[a-z0-9]{20,}", "\\d{4}-\\d{2}", "(ab)+", "(?:foo|bar)+baz", "[(+*]+", "(ab){3}c+", "\\(a+\\)+"]) expect(regexProblem(ok), ok).toBeNull();
   });
 
-  it("rejects a match check with a bad pattern when it is loaded, naming the field", () => {
-    const { checks, errors } = parseChecks(`
+  it("refuses saving a match check with a nested repeat, but still loads one already saved", () => {
+    const yaml = `
 id: slow-match
 kind: rule
 rule:
   type: match
   pattern: "(a+)+$"
-`);
-    expect(checks).toHaveLength(0);
-    expect(errors[0].message).toMatch(/pattern.*repeated group/);
+`;
+    // Saved before 0.2.9 (in a file): it loads, and runs under the time limit for checks people write.
+    const { checks, errors } = parseChecks(yaml);
+    expect(errors).toEqual([]);
+    expect(checks).toHaveLength(1);
+    // Saved now, through the app, the API or a coding agent: refused, naming the field.
+    expect(checkFromInput(yaml).error).toMatch(/rule\.pattern.*repeated group/);
+    expect(checkFromInput({ check: checks[0] }).error).toMatch(/rule\.pattern.*repeated group/);
+    // A pattern that doesn't compile is still refused when it loads.
+    expect(parseChecks(yaml.replace('"(a+)+$"', '"("')).errors[0].message).toMatch(/pattern.*not a valid regular expression/);
   });
 });
 

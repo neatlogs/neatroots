@@ -1,3 +1,4 @@
+import { sha256 } from "../util/ids.js";
 import type { Roots } from "../core.js";
 import type { TraceUpdate } from "../store/db.js";
 import type { LlmClient } from "../models/llm.js";
@@ -188,9 +189,9 @@ export class Engine {
         const n = (this.jobs.get(traceId) ?? 1) - 1;
         if (n <= 0) {
           this.jobs.delete(traceId);
-          if (this.live.get(traceId)?.endHandled) this.progress.done(traceId);
-          // A debounced trace question still counts as pending; its flush wakes the waiters.
+          // A debounced trace question still counts as pending; retain its recovery receipt.
           if (this.pending(traceId)) return;
+          if (this.live.get(traceId)?.endHandled && !this.hasStaleAnswers(traceId)) this.progress.done(traceId);
           for (const fn of this.idleWaiters.get(traceId) ?? []) fn();
           this.idleWaiters.delete(traceId);
         } else this.jobs.set(traceId, n);
@@ -283,7 +284,10 @@ export class Engine {
     }
     if (u.contentUpdated) {
       run.contentRevision++;
-      run.ended ||= this.roots.store.getRun(u.traceId)?.root_ended === 1;
+      const persisted = this.roots.store.getRun(u.traceId);
+      run.ended ||= persisted?.root_ended === 1 || persisted?.complete === 1;
+      // A reconstructed completed run has no pending original end pass to finish.
+      if (run.ended && !run.endTimer) run.endHandled = true;
       const ids = u.spans.map((s) => s.row.span_id);
       for (const { check } of this.questionsFor(run)) {
         run.answered?.traceChecks.delete(check.id);
@@ -345,13 +349,13 @@ export class Engine {
 
   private async handleContentUpdate(run: LiveRun, ids: string[]): Promise<void> {
     const snap = loadTrace(this.roots.store, run.traceId);
-    this.applyRules(run, snap, run.ended, new Set(ids));
+    this.applyRules(run, snap, run.ended, new Set(ids), true);
     this.ensurePlan(run, snap);
     if (run.planning) await run.planning;
-    this.scheduleQuestions(run, loadTrace(this.roots.store, run.traceId), snap.spans.filter((s) => ids.includes(s.id)), run.ended);
+    this.scheduleQuestions(run, loadTrace(this.roots.store, run.traceId), snap.spans.filter((s) => ids.includes(s.id)), run.ended, true);
   }
 
-  private scheduleQuestions(run: LiveRun, snap: TraceSnapshot, fresh: SpanInfo[], includeEnd = false): void {
+  private scheduleQuestions(run: LiveRun, snap: TraceSnapshot, fresh: SpanInfo[], includeEnd = false, contentUpdate = false): void {
     for (const { check, params } of this.questionsFor(run)) {
       if (check.when === "end" && !includeEnd) continue;
       const sel = check.evidence?.spans;
@@ -369,7 +373,9 @@ export class Engine {
         }
         run.spanQueue.set(check.id, queue);
         if (queue.length) void this.track(run.traceId, this.drainSpanQueue(run, check, params));
-      } else if (fresh.some((s) => matchesSelector(s, sel))) {
+      } else if (contentUpdate || fresh.some((s) => matchesSelector(s, sel))) {
+        // Final output and run goal can change even outside this question's span selector.
+        // askTrace still deduplicates unchanged evidence before making a model call.
         run.dirty.add(check.id);
       }
     }
@@ -440,11 +446,11 @@ export class Engine {
 
   // ----------------------------------------------------------------- rules
 
-  private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>): void {
+  private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, contentOnly = false): void {
     for (const lc of this.registry.rules()) {
       const rule = lc.check as RuleCheck;
       if (!this.appliesTo(rule, run)) continue;
-      if (rule.rule.type === "run_end" && !atEnd) continue;
+      if (rule.rule.type === "run_end" && (!atEnd || (contentOnly && rule.rule.when !== "no_output"))) continue;
       let hit: RuleHit | null;
       try {
         hit = evaluateRule(rule, snap, atEnd, fresh, lc.source !== "library");
@@ -603,6 +609,7 @@ export class Engine {
       check_id: check.id,
       span_id: spanId,
       probability: verdict.probability,
+      evidence_hash: sha256(evidence),
       answer: (answer ? { choice: answer.choice ?? null, score: answer.score ?? null, distribution: answer.distribution } : null) as Plain,
       backend: result.backend,
       latency_ms: result.latencyMs,
@@ -1245,6 +1252,33 @@ ${library}`;
     return { checked, hits, total: runs.length, truncated: checked < runs.length };
   }
 
+  /** Only reuse answers for the evidence currently stored, including after a crash. */
+  private currentAnswers(traceId: string) {
+    const run = this.liveRun(traceId);
+    if (!run) return [];
+    const snap = loadTrace(this.roots.store, traceId);
+    if (!run.plan && snap.run?.plan_id) run.plan = this.roots.store.getPlan(snap.run.plan_id);
+    const questions = new Map(this.questionsFor(run).map(({ check }) => [check.id, check]));
+    const latest = new Map<string, import("../types.js").DecisionRow>();
+    for (const d of this.roots.store.decisionsForTrace(traceId)) latest.set(`${d.check_id}:${d.span_id ?? ""}`, d);
+    return [...latest.values()].filter((d) => {
+      const check = questions.get(d.check_id);
+      if (!check) return true;
+      if (!d.evidence_hash) return !snap.run?.content_revision;
+      const focus = d.span_id ? snap.spans.find((s) => s.id === d.span_id) : undefined;
+      if (d.span_id && !focus) return false;
+      return d.evidence_hash === sha256(buildEvidence(snap, check.evidence, focus ? { focus } : {}).text);
+    });
+  }
+
+  /** Retain the recovery receipt if replacement evidence could not get a new verdict. */
+  private hasStaleAnswers(traceId: string): boolean {
+    if (!this.roots.store.db.open) return true;
+    if (!this.roots.store.getRun(traceId)?.content_revision) return false;
+    const current = new Set(this.currentAnswers(traceId).map((d) => `${d.check_id}:${d.span_id ?? ""}`));
+    return this.roots.store.decisionsForTrace(traceId).some((d) => !current.has(`${d.check_id}:${d.span_id ?? ""}`));
+  }
+
   /** Re-runs the checks for a finished run, e.g. after checks changed. `resume` keeps stored answers. */
   async recheck(traceId: string, opts: { resume?: boolean } = {}): Promise<void> {
     const row = this.roots.store.getRun(traceId);
@@ -1254,7 +1288,7 @@ ${library}`;
     run.ended = row.status !== "running";
     run.rechecked = true;
     if (opts.resume) {
-      const done = this.roots.store.decisionsForTrace(traceId);
+      const done = this.currentAnswers(traceId);
       for (const d of done) if (d.span_id) run.spanDone.add(`${d.check_id}:${d.span_id}`);
       run.answered = {
         traceChecks: new Set(done.filter((d) => !d.span_id).map((d) => d.check_id)),
