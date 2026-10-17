@@ -64,15 +64,21 @@ export class DiagnosticOtlpScalars {
     }
     if (type === "bytes") {
       const bytes = Buffer.from(value, "base64");
-      if (bytes.toString("base64") !== value) return "";
+      const canonical = bytes.toString("base64");
+      const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+      // ProtoJSON accepts standard/URL-safe alphabets, with or without padding.
+      // Validate spelling and pad bits rather than relying on Node's permissive decoder.
+      if (!/^(?:[A-Za-z0-9+/_-]{4})*(?:[A-Za-z0-9+/_-]{2}(?:==)?|[A-Za-z0-9+/_-]{3}=?)?$/.test(value)
+        || normalized.replace(/=+$/, "") !== canonical.replace(/=+$/, "")) return "";
       // Preserve encoded-string privacy as well as decoded-text privacy; both passes
       // consume the same bounded work/match budget and always return valid base64.
       if (redactString(value, this.rules, "", [], this.budget) !== value) return "";
+      if (canonical !== value && redactString(canonical, this.rules, "", [], this.budget) !== canonical) return "";
       const text = bytes.toString("utf8");
       if (Buffer.from(text, "utf8").equals(bytes)) {
         return Buffer.from(redactString(text, this.rules, "", [], this.budget), "utf8").toString("base64");
       }
-      return value;
+      return canonical;
     }
     const redacted = redactString(value, this.rules, "", [], this.budget);
     if (redacted !== value || !/^-?\d+$/.test(value)) return "0";
