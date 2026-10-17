@@ -194,7 +194,7 @@ export function neatlogsCloudSource(base: () => string, auth: () => Promise<Clou
       const k = await auth();
       if (!k) throw new ImportError(NO_CLOUD_TOKEN);
       const b = base();
-      let ids = (o.values.traceIds ?? "").split(/[\s,]+/).filter(Boolean);
+      let ids = [...new Set((o.values.traceIds ?? "").split(/[\s,]+/).filter(Boolean))];
       if (!ids.length) {
         let cursor: string | undefined;
         do {
@@ -202,8 +202,8 @@ export function neatlogsCloudSource(base: () => string, auth: () => Promise<Clou
           ids.push(...page.traces.map((t) => t.traceId));
           cursor = page.nextCursor ?? undefined;
         } while (cursor && ids.length < o.limit);
-        ids = ids.slice(0, o.limit);
       }
+      ids = ids.slice(0, o.limit);
       let failedInARow = 0;
       for (const id of ids) {
         let read: { nodes: SpanNode[]; workflow: string };
