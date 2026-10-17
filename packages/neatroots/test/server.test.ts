@@ -53,6 +53,13 @@ describe("server", () => {
     expect(json.status).toBe(400);
   });
 
+  it("answers 413 for an oversized body on /v1/logs and /v1/trace too, like /v1/traces", async () => {
+    const tb = await served();
+    const big = Buffer.alloc(64 * 1024 * 1024 + 1, 0x61);
+    for (const p of ["/v1/traces", "/v1/logs", "/v1/trace"]) {
+      const res = await fetch(`${tb.url}${p}`, { method: "POST", headers: { "content-type": "application/x-protobuf" }, body: big });
+      expect(res.status, p).toBe(413);
+    }
   it("caps decompression for gzip bodies sniffed by magic bytes", async () => {
     const tb = await served();
     const { t, batches } = sampleRun();

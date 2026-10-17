@@ -78,6 +78,8 @@ export function mountCollector(app: Hono, roots: Roots): void {
     try {
       parsed = JSON.parse((await readBody(c)).toString("utf8"));
     } catch (err) {
+      const status = (err as { status?: number }).status;
+      if (status) return c.json({ error: (err as Error).message }, status as 400);
       return c.json({ error: "Validation error", details: { body: `not JSON: ${(err as Error).message}` } }, 400);
     }
     try {
@@ -97,7 +99,8 @@ export function mountCollector(app: Hono, roots: Roots): void {
       const records = isJson(c) ? decodeLogsJson(JSON.parse(body.toString("utf8"))) : decodeLogsProtobuf(body);
       roots.store.ingestLogs(records);
     } catch (err) {
-      return c.json({ code: 3, message: `invalid OTLP logs payload: ${(err as Error).message}` }, 400);
+      const status = (err as { status?: number }).status ?? 400;
+      return c.json({ code: 3, message: `invalid OTLP logs payload: ${(err as Error).message}` }, status as 400);
     }
     if (isJson(c)) return c.json({ partialSuccess: {} });
     return new Response(new Uint8Array(), { status: 200, headers: { "content-type": "application/x-protobuf" } });
