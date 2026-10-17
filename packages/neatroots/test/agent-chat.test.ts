@@ -53,6 +53,54 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`,
     expect(first).toMatch(/--sandbox workspace-write/);
     expect(second).toMatch(/^exec resume thread_t .*-c sandbox_mode="workspace-write"/);
   });
+
+  it("preserves UTF-8 characters split across stdout chunks", async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
+    process.env.HOME = dir;
+    process.env.NEATROOTS_CODEX_BIN = script(
+      "codex",
+      `echo '{"type":"thread.started","thread_id":"thread_t"}'
+printf '%s' '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"left '
+printf '\\342\\200'
+sleep 0.05
+printf '\\224'
+printf '%s\n' ' right"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`,
+    );
+    t = await makeRoots({ noEngine: true });
+    const s = t.roots.chats.create({ agent: "codex", cwd: dir });
+    await t.roots.chats.send(s.id, "hi");
+    expect(t.roots.chats.events(s.id).find((e) => e.kind === "text")?.text).toBe("left — right");
+  });
+
+  it("preserves UTF-8 characters split across stderr chunks", async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
+    process.env.HOME = dir;
+    process.env.NEATROOTS_CODEX_BIN = script(
+      "codex",
+      `printf '%s' 'bad ' >&2
+printf '\\342\\200' >&2
+sleep 0.05
+printf '\\224' >&2
+printf '%s\n' ' output' >&2
+exit 2`,
+    );
+    t = await makeRoots({ noEngine: true });
+    const s = t.roots.chats.create({ agent: "codex", cwd: dir });
+    await t.roots.chats.send(s.id, "hi");
+    expect(t.roots.chats.events(s.id).find((e) => e.kind === "error")?.text).toBe("bad — output");
+  });
+
+  it("leaves the session recoverable when spawn throws synchronously", async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
+    process.env.HOME = dir;
+    process.env.NEATROOTS_CODEX_BIN = "/bin/echo";
+    t = await makeRoots({ noEngine: true });
+    const s = t.roots.chats.create({ agent: "codex", cwd: dir });
+    await t.roots.chats.send(s.id, "x".repeat(4_000_000));
+    expect(t.roots.chats.get(s.id)?.state).toBe("error");
+    expect(t.roots.chats.events(s.id).find((e) => e.kind === "error")?.text).toMatch(/E2BIG/);
+  });
 });
 
 describe.skipIf(process.platform === "win32")("a chat with Claude Code whose sign-in has expired", () => {
