@@ -283,6 +283,16 @@ describe("store", () => {
     expect(st.listRuns({ limit: 500 }).length).toBe(0);
   });
 
+  it("keeps a run updated after a detached sweep began", () => {
+    const st = store();
+    const traceId = hex(16);
+    st.ingest([batch([span({ traceId, name: "active", kind: "workflow" })])]);
+    const startedMs = Date.now();
+    st.db.prepare("UPDATE runs SET received_ms = 1, ended_ms = 1, updated_ms = ? WHERE trace_id = ?").run(startedMs, traceId);
+    expect(st.sweepDetached(14, Number.POSITIVE_INFINITY, startedMs).removed).toBe(0);
+    expect(st.getRun(traceId)).toBeDefined();
+  });
+
   it("trims to the size cap by removing the oldest runs, not every run", () => {
     // Bytes of data the store holds, measured independently of the code under test: the search
     // index is compacted first (deleted rows leave markers until then), then database pages in use
