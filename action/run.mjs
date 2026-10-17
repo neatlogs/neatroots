@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -70,7 +69,11 @@ export function run(env = process.env, execute = spawnSync, write = console.log)
     if (dirs.length) args.push('--checks', ...dirs);
     // -- ends the variadic --checks option and prevents paths becoming flags.
     args.push('--', ...files);
-    home = fs.mkdtempSync(path.join(os.tmpdir(), 'neatroots-action-'));
+    // Runner job cleanup must contain private residue even if cancellation kills
+    // this wrapper before its finally. Never fall back to account-wide temp.
+    if (typeof env.RUNNER_TEMP !== 'string' || !path.isAbsolute(env.RUNNER_TEMP) ||
+        !noSymlinkStat(env.RUNNER_TEMP).isDirectory()) throw new Error('Expected a job temp directory');
+    home = fs.mkdtempSync(path.join(env.RUNNER_TEMP, 'neatroots-action-'));
     // Node drains writes synchronously to a regular file on supported runners,
     // even when this pinned CLI exits immediately after printing its JSON.
     report = fs.openSync(path.join(home, 'report.json'), 'wx+', 0o600);

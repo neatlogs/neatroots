@@ -71,6 +71,10 @@ file can grow beyond 16 MiB until the CLI exits or reaches the five-minute timeo
 Stderr is discarded, and the capture and isolated home are removed after the call.
 The child's `TMPDIR`, `TMP` and `TEMP` also point into that home, so offline trace
 databases are removed even when the timeout prevents the CLI's own cleanup.
+The private home is created directly inside `RUNNER_TEMP` (an existing absolute
+directory with no symlink ancestors). If job cancellation kills the wrapper before
+its cleanup runs, remaining reports and trace databases stay within the runner's
+job temp directory for runner cleanup; account-wide temp is never a fallback.
 
 Run the action tests with `node --test action/*.test.mjs`. The repository's
 action workflow tests known clean and failing traces through the actual composite

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { filesFor, run as capturedRun } from './run.mjs';
 import { installEnvironment } from './install.mjs';
@@ -177,6 +177,65 @@ for (const size of [16 * 1024 * 1024 - 1, 16 * 1024 * 1024, 16 * 1024 * 1024 + 1
     assert.ok(!published.join('').includes('{"runs"'));
   });
 }
+
+for (const invalid of ['missing', 'empty', 'relative', 'nonexistent', 'file', 'symlink', 'symlink ancestor']) {
+  test(`rejects ${invalid} runner temp before executing the CLI`, t => {
+    const { dir, env } = fixture(t);
+    const target = path.join(dir, 'target');
+    fs.mkdirSync(path.join(target, 'sub'), { recursive: true });
+    const link = path.join(dir, 'link');
+    if (invalid.startsWith('symlink')) fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+    const file = path.join(dir, 'file');
+    fs.writeFileSync(file, '');
+    const temp = { missing: undefined, empty: '', relative: 'relative', nonexistent: path.join(dir, 'absent'),
+      file, symlink: link, 'symlink ancestor': path.join(link, 'sub') }[invalid];
+    let called = false;
+    const output = [];
+    assert.equal(capturedRun({ ...env, RUNNER_TEMP: temp }, () => { called = true; return { status: 0 }; }, x => output.push(x)), 2);
+    assert.equal(called, false);
+    assert.ok(!output.join('').includes(dir), 'Invalid temp diagnostics remain private');
+    assert.ok(!fs.readdirSync(dir).some(name => name.startsWith('neatroots-action-')));
+  });
+}
+
+test('wrapper cancellation leaves private residue only under job temp', async t => {
+  const { dir, env } = fixture(t);
+  const ambient = path.join(dir, 'ambient-temp');
+  const job = path.join(dir, 'job-temp');
+  fs.mkdirSync(ambient);
+  fs.mkdirSync(job);
+  fs.writeFileSync(path.join(ambient, 'sentinel'), 'keep');
+  const receipt = path.join(dir, 'cancel-receipt');
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import fs from 'node:fs'; import path from 'node:path';
+    const { run } = await import(process.env.TEST_MODULE);
+    run(process.env, (binary, args, opts) => {
+      const home = opts.env.NEATROOTS_HOME;
+      const scratch = fs.mkdtempSync(path.join(opts.env.TMPDIR, 'neatroots-check-'));
+      fs.writeFileSync(path.join(scratch, 'trace.db'), 'SECRET trace state');
+      fs.writeSync(opts.stdio[1], 'SECRET raw JSON');
+      fs.writeFileSync(process.env.TEST_RECEIPT, JSON.stringify({ home, scratch }));
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+    });
+  `], { env: { ...process.env, ...env, RUNNER_TEMP: job, TMPDIR: ambient, TMP: ambient, TEMP: ambient,
+    TEST_MODULE: new URL('./run.mjs', import.meta.url).href, TEST_RECEIPT: receipt }, stdio: 'ignore', shell: false });
+  t.after(() => child.kill());
+  const exited = new Promise((resolve, reject) => { child.once('exit', resolve); child.once('error', reject); });
+  const deadline = Date.now() + 10_000;
+  while (!fs.existsSync(receipt) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(fs.existsSync(receipt), 'Wrapper reached blocked execution');
+  assert.equal(child.kill('SIGTERM'), true);
+  await exited;
+  const { home, scratch } = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+  assert.equal(fs.readFileSync(path.join(home, 'report.json'), 'utf8'), 'SECRET raw JSON', 'Wrapper finally did not run');
+  assert.equal(fs.readFileSync(path.join(scratch, 'trace.db'), 'utf8'), 'SECRET trace state');
+  assert.equal(path.dirname(home), job, 'Cancellation residue belongs to runner job cleanup');
+  assert.equal(path.dirname(scratch), home);
+  assert.deepEqual(fs.readdirSync(ambient), ['sentinel']);
+  fs.rmSync(job, { recursive: true });
+  assert.ok(!fs.existsSync(home) && !fs.existsSync(scratch), 'Job cleanup removes all private residue');
+  assert.equal(fs.readFileSync(path.join(ambient, 'sentinel'), 'utf8'), 'keep');
+});
 
 test('terminated child scratch stays inside the removed private home', t => {
   const { dir, env } = fixture(t);
