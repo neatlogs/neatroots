@@ -19,8 +19,10 @@ Needs no agent and no setup, only an LLM configured in neatroots (local or hoste
 
 neatroots re-sends the call's recorded messages, with your changes, through its own LLM and stores
 the request and answer as a new run (with `neatroots.replay.of_trace` and `neatroots.replay.of_span`
-pointing at the original). The call goes without tool definitions, so the model answers in text;
-earlier tool calls and results in the conversation are kept, as text.
+pointing at the original). The call carries the tool definitions it was recorded with, and earlier
+tool calls and results keep their ids, so a replay can reproduce or test a tool-choice decision and
+the answer comes back as a tool call when the model makes one. For a text-only replay, as before,
+pass `--no-tools` on the CLI or `tools: false` to the `replay` tool or the replay route.
 
 ## The whole agent
 

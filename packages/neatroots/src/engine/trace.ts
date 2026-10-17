@@ -1,5 +1,5 @@
 import type { Store } from "../store/db.js";
-import { buildView, isSystemRole, preview, type SpanKind } from "../semantics/view.js";
+import { buildView, isSystemRole, preview, type SpanKind, type ToolDefinition } from "../semantics/view.js";
 import type { Plain } from "../otlp/types.js";
 import type { Evidence, EvidenceField, SpanSelector } from "../checks/types.js";
 import type { RunRow, SpanRow } from "../types.js";
@@ -23,6 +23,7 @@ export interface SpanInfo {
   output?: Plain;
   toolCalls?: { id?: string; name: string; arguments: Plain }[];
   tools?: string[];
+  toolDefinitions?: ToolDefinition[];
   seq: number;
 }
 
@@ -94,6 +95,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
       output: v.output,
       toolCalls: v.toolCalls,
       tools: v.tools,
+      toolDefinitions: v.toolDefinitions,
       seq: row.seq,
     };
     cache.set(row.span_id, info);

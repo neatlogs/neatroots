@@ -102,11 +102,12 @@ export function registerDataCommands(program: Command): void {
     .option("--input <text>", "run the agent with this input instead")
     .option("--model <model>")
     .option("--system <prompt>", "system prompt override")
+    .option("--no-tools", "do not send the call's recorded tool definitions (text-only replay)")
     .action(async (traceId: string, opts) => {
       const p = await needRunning();
       const r = await api<{ id: string; state: string; new_trace_id: string | null; output_preview: string | null; error: string | null }>(p, `/api/runs/${traceId}/replay`, {
         method: "POST",
-        body: JSON.stringify({ span_id: opts.span, input: opts.input, model: opts.model, system: opts.system }),
+        body: JSON.stringify({ span_id: opts.span, input: opts.input, model: opts.model, system: opts.system, tools: opts.tools }),
       });
       let cur = r;
       while (cur.state === "running") {

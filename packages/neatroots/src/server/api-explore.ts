@@ -201,9 +201,9 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   });
   app.post("/api/runs/:traceId/replay", async (c) => {
     const traceId = c.req.param("traceId");
-    const b = await body<{ span_id?: string; messages?: { role: string; content: string }[]; edit?: { from: string; to: string }; input?: string; model?: string; system?: string }>(c);
+    const b = await body<{ span_id?: string; messages?: { role: string; content: string }[]; edit?: { from: string; to: string }; input?: string; model?: string; system?: string; tools?: boolean }>(c);
     try {
-      if (b.span_id) return c.json(await roots.replays.replayLlm(traceId, b.span_id, { messages: b.messages, edit: b.edit, model: b.model || undefined, system: b.system || undefined }));
+      if (b.span_id) return c.json(await roots.replays.replayLlm(traceId, b.span_id, { messages: b.messages, edit: b.edit, model: b.model || undefined, system: b.system || undefined, tools: b.tools }));
       const { replay } = roots.replays.startRun(traceId, { input: b.input, model: b.model || undefined, system: b.system || undefined });
       return c.json(replay, 202);
     } catch (e) {

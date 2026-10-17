@@ -47,10 +47,16 @@ describe("run as a chat", () => {
 
 describe("replay", () => {
   it("turns recorded messages into chat turns", () => {
-    expect(toChat([{ role: "system", content: "s" }, { role: "assistant", content: "", tool_calls: [{ name: "f", arguments: { a: 1 } }] }, { role: "tool", name: "f", content: "ok" }])).toEqual([
+    const recorded = [{ role: "system", content: "s" }, { role: "assistant", content: "", tool_calls: [{ name: "f", arguments: { a: 1 } }] }, { role: "tool", name: "f", content: "ok" }];
+    expect(toChat(recorded)).toEqual([
       { role: "system", content: "s" },
       { role: "assistant", content: '[called f({"a":1})]' },
       { role: "user", content: "[tool result from f]\nok" },
+    ]);
+    expect(toChat(recorded, { structuredToolTurns: true })).toEqual([
+      { role: "system", content: "s" },
+      { role: "assistant", content: "", tool_calls: [{ id: "replay_tool_0", name: "f", arguments: '{"a":1}' }] },
+      { role: "tool", content: "ok", tool_call_id: "replay_tool_0", name: "f" },
     ]);
   });
 
@@ -65,6 +71,66 @@ describe("replay", () => {
     expect(t.roots.replays.originOf(r.new_trace_id!)?.id).toBe(r.id);
     expect(t.roots.replays.forRun(x.traceId)).toHaveLength(1);
     await expect(t.roots.replays.replayLlm(x.traceId, x.t1.spanId)).rejects.toThrow(/only LLM spans/);
+  });
+
+  it("sends the recorded tool definitions and records a tool-call answer", async () => {
+    llm = await mockLlm({ toolCall: { name: "issue_refund", args: { order_id: "4512" } } });
+    t = await makeRoots({ llmUrl: llm.url, noEngine: true });
+    const traceId = hex(16);
+    const root = span({ traceId, name: "refunds", kind: "workflow" });
+    const tools = [
+      { name: "lookup_order", description: "Look up an order", input_schema: { type: "object", properties: { order_id: { type: "string" } } } },
+      { name: "issue_refund", description: "Refund an order", input_schema: { type: "object", properties: { order_id: { type: "string" } } } },
+    ];
+    const call = llmSpan(traceId, root.spanId, {
+      messages: [
+        { role: "user", content: "Please refund order 4512" },
+        { role: "assistant", content: "", tool_calls: [{ id: "call_9", name: "lookup_order", arguments: { order_id: "4512" } }] },
+        { role: "tool", name: "lookup_order", tool_call_id: "call_9", content: '{"status":"delivered"}' },
+      ],
+      tools,
+    });
+    t.roots.ingest([batch([root, call], "refund-agent")]);
+    const r = await t.roots.replays.replayLlm(traceId, call.spanId);
+    expect(r).toMatchObject({ state: "succeeded", kind: "llm" });
+    const sent = llm.requests.at(-1);
+    expect(sent.tools.map((x: { function: { name: string } }) => x.function.name)).toEqual(["lookup_order", "issue_refund"]);
+    expect(sent.messages).toMatchObject([
+      { role: "user", content: "Please refund order 4512" },
+      { role: "assistant", tool_calls: [{ id: "call_9", type: "function", function: { name: "lookup_order" } }] },
+      { role: "tool", tool_call_id: "call_9" },
+    ]);
+    const replayed = loadTrace(t.roots.store, r.new_trace_id!);
+    const llmCall = replayed.spans.find((sp) => sp.kind === "LLM")!;
+    expect(llmCall.toolCalls).toMatchObject([{ name: "issue_refund" }]);
+    expect(llmCall.toolDefinitions?.map((d) => d.name)).toEqual(["lookup_order", "issue_refund"]);
+    expect(r.output_preview).toContain("issue_refund");
+  });
+
+  it("replays in text-only mode when tools are turned off", async () => {
+    llm = await mockLlm({ toolCall: { name: "issue_refund", args: { order_id: "4512" } } });
+    t = await makeRoots({ llmUrl: llm.url, noEngine: true });
+    const traceId = hex(16);
+    const root = span({ traceId, name: "refunds", kind: "workflow" });
+    const call = llmSpan(traceId, root.spanId, {
+      messages: [
+        { role: "user", content: "Please refund order 4512" },
+        { role: "assistant", content: "", tool_calls: [{ name: "lookup_order", arguments: { order_id: "4512" } }] },
+        { role: "tool", name: "lookup_order", content: '{"status":"delivered"}' },
+      ],
+      tools: [{ name: "lookup_order" }],
+    });
+    t.roots.ingest([batch([root, call], "refund-agent")]);
+    const r = await t.roots.replays.replayLlm(traceId, call.spanId, { tools: false });
+    expect(r.state).toBe("succeeded");
+    const sent = llm.requests.at(-1);
+    expect(sent.tools).toBeUndefined();
+    expect(sent.messages).toEqual([
+      { role: "user", content: "Please refund order 4512" },
+      { role: "assistant", content: '[called lookup_order({"order_id":"4512"})]' },
+      { role: "user", content: '[tool result from lookup_order]\n{"status":"delivered"}' },
+    ]);
+    expect(loadTrace(t.roots.store, r.new_trace_id!).spans.find((sp) => sp.kind === "LLM")?.toolCalls).toBeUndefined();
   });
 
   it("re-runs the agent through its registered command and links the run it sends", async () => {
