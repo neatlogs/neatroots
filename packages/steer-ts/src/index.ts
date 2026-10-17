@@ -55,7 +55,6 @@ interface State {
   url: string;
   disabled: boolean;
   mode: string;
-  modeCheckedAt: number;
   modeTraceId?: string;
   downUntil: number;
   /** Requests in a row that timed out: neatroots is busy, not stopped, until there are a few. */
@@ -66,7 +65,6 @@ const state: State = {
   url: defaultUrl(),
   disabled: typeof process !== "undefined" && ["0", "off", "false", "no"].includes(String(process.env.NEATROOTS_STEER ?? "").toLowerCase()),
   mode: "unknown",
-  modeCheckedAt: 0,
   downUntil: 0,
   timeouts: 0,
 };
@@ -83,7 +81,6 @@ export function configure(opts: { url?: string; disabled?: boolean; traceId?: ()
   if (opts.neatlogs) neatlogsMod = opts.neatlogs as NeatlogsModule;
   if (opts.disabled !== undefined) state.disabled = opts.disabled;
   state.mode = "unknown";
-  state.modeCheckedAt = 0;
   state.modeTraceId = undefined;
   state.downUntil = 0;
   state.timeouts = 0;
@@ -233,7 +230,6 @@ export async function guidance(traceId?: string): Promise<Note | undefined> {
   }
   // A cached mode belongs only to the trace that supplied it. New runs must flush and ask.
   const mode = state.modeTraceId === traceId ? state.mode : "unknown";
-  if (mode === "off" && Date.now() - state.modeCheckedAt < 10_000) return undefined;
   let gateMs: number | undefined;
   if (mode === "gate" || mode === "unknown") {
     await flushSdk();
@@ -242,7 +238,6 @@ export async function guidance(traceId?: string): Promise<Note | undefined> {
   const res = await post<{ mode: string; note: Note | null }>("/api/steer/claim", { trace_id: traceId, span_id: spanId, gate_ms: gateMs }, gateMs ? gateMs + 500 : 500);
   if (!res) return undefined;
   state.mode = res.mode || "unknown";
-  state.modeCheckedAt = Date.now();
   state.modeTraceId = traceId;
   if (!res.note) return undefined;
   await record(res.note);
