@@ -6,6 +6,7 @@ import type { Roots } from "../core.js";
 import { kvToPlain } from "../otlp/types.js";
 import { buildView } from "../semantics/view.js";
 import { hardwareTier, llmErrorMessage } from "../models/llm.js";
+import { TRUST_MIN_SAMPLES, TRUST_MIN_AGREEMENT } from "../models/decision.js";
 import { regexProblem } from "../util/regex.js";
 import { allowedEndpoint } from "../relay/endpoint.js";
 import { RedactionPatternError } from "../relay/redact.js";
