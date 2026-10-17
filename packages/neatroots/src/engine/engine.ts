@@ -42,6 +42,13 @@ import { verifyFlag } from "./verify.js";
 /** Default library questions when no LLM is available to plan. */
 export const DEFAULT_PLAN = ["ignored-tool-error", "repeat-without-progress", "unfinished-task", "contradicts-tool-output"];
 
+export type PreviewRunResult = {
+  trace_id: string;
+  root_name: string | null;
+  status: "hit" | "clear" | "skipped" | "error";
+  reason?: "no_hit" | "no_evidence" | "model_error" | "aborted" | "time_budget";
+};
+
 const TRIAGE_LEVELS = [
   "fine, nothing to look at",
   "minor, cosmetic only",
@@ -1161,6 +1168,9 @@ ${library}`;
   async previewCheck(check: QuestionCheck | RuleCheck, opts: { limit?: number; workflow?: string; project?: string; timeBudgetMs?: number; signal?: AbortSignal } = {}): Promise<{
     checked: number;
     hits: { trace_id: string; probability: number | null; evidence_span_ids: string[]; root_name: string | null }[];
+    skipped: Record<string, number>;
+    errors: Record<string, number>;
+    results: PreviewRunResult[];
     total: number;
     truncated: boolean;
   }> {
@@ -1174,34 +1184,86 @@ ${library}`;
       .slice(0, limit);
     const deadline = Date.now() + (opts.timeBudgetMs ?? 90_000);
     const hits: { trace_id: string; probability: number | null; evidence_span_ids: string[]; root_name: string | null }[] = [];
+    const skipped: Record<string, number> = {};
+    const errors: Record<string, number> = {};
+    const results: PreviewRunResult[] = [];
     let checked = 0;
+    let stopped: "aborted" | "time_budget" | undefined;
+    const count = (counts: Record<string, number>, reason: string) => { counts[reason] = (counts[reason] ?? 0) + 1; };
     for (const r of runs) {
-      if (Date.now() > deadline) break;
+      if (!stopped) {
+        if (opts.signal?.aborted) stopped = "aborted";
+        else if (Date.now() > deadline) stopped = "time_budget";
+      }
+      if (stopped) {
+        count(skipped, stopped);
+        results.push({ trace_id: r.trace_id, root_name: r.root_name, status: "skipped", reason: stopped });
+        continue;
+      }
       const snap = loadTrace(this.roots.store, r.trace_id);
-      checked++;
       if (isRule(check)) {
         const hit = evaluateRule(check, snap, true);
-        if (hit) hits.push({ trace_id: r.trace_id, probability: null, evidence_span_ids: hit.evidenceSpanIds, root_name: r.root_name });
+        if (hit && !hit.satisfied) {
+          checked++;
+          hits.push({ trace_id: r.trace_id, probability: null, evidence_span_ids: hit.evidenceSpanIds, root_name: r.root_name });
+          results.push({ trace_id: r.trace_id, root_name: r.root_name, status: "hit" });
+        } else {
+          checked++;
+          results.push({ trace_id: r.trace_id, root_name: r.root_name, status: "clear", reason: "no_hit" });
+        }
         continue;
       }
       const targets = check.scope === "span" ? selectSpans(snap.spans, check.evidence?.spans).slice(-5) : [undefined];
+      let evaluated = false;
+      let noEvidence = targets.length === 0;
+      let modelError = false;
+      let foundHit = false;
+      let interrupted: "aborted" | "time_budget" | undefined;
       for (const focus of targets) {
+        if (opts.signal?.aborted) { interrupted = "aborted"; break; }
+        if (Date.now() > deadline) { interrupted = "time_budget"; break; }
         const ev = buildEvidence(snap, check.evidence, { focus });
-        if (!ev.spanIds.length && !check.evidence?.final_output) continue;
+        if (!ev.spanIds.length && !check.evidence?.final_output) {
+          noEvidence = true;
+          continue;
+        }
         try {
-          if (opts.signal?.aborted) break;
           const res = await this.decisions.decide(ev.text, [toQuestion(check, check.params ?? {})], { priority: "interactive", signal: opts.signal });
+          evaluated = true;
           const v = flagged(check, res);
           if (v.flagged) {
             hits.push({ trace_id: r.trace_id, probability: v.probability, evidence_span_ids: ev.spanIds, root_name: r.root_name });
+            foundHit = true;
             break;
           }
         } catch (err) {
           if (err instanceof DecisionUnavailableError) throw err;
+          if (opts.signal?.aborted) { interrupted = "aborted"; break; }
+          modelError = true;
         }
       }
+      if (foundHit) {
+        checked++;
+        results.push({ trace_id: r.trace_id, root_name: r.root_name, status: "hit" });
+      } else if (interrupted) {
+        stopped = interrupted;
+        count(skipped, interrupted);
+        results.push({ trace_id: r.trace_id, root_name: r.root_name, status: "skipped", reason: interrupted });
+      } else if (modelError) {
+        count(errors, "model_error");
+        results.push({ trace_id: r.trace_id, root_name: r.root_name, status: "error", reason: "model_error" });
+      } else if (noEvidence) {
+        count(skipped, "no_evidence");
+        results.push({ trace_id: r.trace_id, root_name: r.root_name, status: "skipped", reason: "no_evidence" });
+      } else if (evaluated) {
+        checked++;
+        results.push({ trace_id: r.trace_id, root_name: r.root_name, status: "clear", reason: "no_hit" });
+      } else {
+        count(skipped, "no_evidence");
+        results.push({ trace_id: r.trace_id, root_name: r.root_name, status: "skipped", reason: "no_evidence" });
+      }
     }
-    return { checked, hits, total: runs.length, truncated: checked < runs.length };
+    return { checked, hits, skipped, errors, results, total: runs.length, truncated: stopped !== undefined };
   }
 
   /** Re-runs the checks for a finished run, e.g. after checks changed. `resume` keeps stored answers. */

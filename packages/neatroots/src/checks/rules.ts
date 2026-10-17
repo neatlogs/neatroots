@@ -5,6 +5,8 @@ import { preview } from "../semantics/view.js";
 export interface RuleHit {
   /** Whether the condition holds now, looking at the latest spans. */
   firing: boolean;
+  /** All guarded calls have a prerequisite; returned so a live finding can resolve. */
+  satisfied?: boolean;
   evidenceSpanIds: string[];
   params: Record<string, string>;
   title?: string;
@@ -92,7 +94,8 @@ function matchTexts(v: unknown): string[] {
 
 /**
  * Evaluates one rule against a trace. Returns null when the rule has never held in this
- * trace; otherwise `firing` says whether it still holds for the newest spans, which is how
+ * trace (except a satisfied requires_before, used to resolve live findings); otherwise
+ * `firing` says whether it still holds for the newest spans, which is how
  * a finding later resolves. `fresh` names the spans that just arrived: a streak they complete
  * fires even if a later span in the same batch already ended it.
  */
@@ -217,7 +220,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       const missed = guarded.filter((g) => !needed.some((n) => n.id !== g.id && n.startMs <= g.startMs));
       // Spans can arrive out of order: once a late prerequisite covers every call, say so,
       // so a finding raised before it arrived resolves.
-      if (!missed.length) return { firing: false, evidenceSpanIds: guarded.map((s) => s.id), params: {} };
+      if (!missed.length) return { firing: false, satisfied: true, evidenceSpanIds: guarded.map((s) => s.id), params: {} };
       const first = missed[0];
       return {
         firing: true,

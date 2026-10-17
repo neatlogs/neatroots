@@ -14,6 +14,14 @@ export interface PreviewResult {
   total: number;
   hits: { trace_id: string; probability: number | null; root_name: string | null }[];
   hit_rate: number | null;
+  skipped: Record<string, number>;
+  errors: Record<string, number>;
+  results: {
+    trace_id: string;
+    root_name: string | null;
+    status: "hit" | "clear" | "skipped" | "error";
+    reason?: string;
+  }[];
   truncated: boolean;
   /** What the check can't see (e.g. a question about the answer that only looks at tool calls). */
   warnings?: string[];

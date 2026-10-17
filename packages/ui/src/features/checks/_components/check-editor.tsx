@@ -14,6 +14,30 @@ import { useCheckActions, type PreviewResult } from "../_services/check-queries"
 
 const aborted = (e: unknown) => (e as Error)?.name === "AbortError";
 
+function reasonLabel(reason?: string): string {
+  switch (reason) {
+    case "no_hit": return "Evaluated; no hit";
+    case "no_evidence": return "No evidence for this check";
+    case "model_error": return "Judge error";
+    case "aborted": return "Preview canceled";
+    case "time_budget": return "Time limit reached";
+    default: return reason?.replaceAll("_", " ") ?? "Not evaluated";
+  }
+}
+
+function notEvaluatedSummary(skipped: Record<string, number>, errors: Record<string, number>): string {
+  const labels: Record<string, string> = {
+    no_evidence: "had no evidence",
+    model_error: "had a judge error",
+    aborted: "were canceled",
+    time_budget: "reached the time limit",
+  };
+  return [
+    ...Object.entries(skipped).map(([reason, count]) => `${count} ${labels[reason] ?? reason.replaceAll("_", " ")}`),
+    ...Object.entries(errors).map(([reason, count]) => `${count} ${labels[reason] ?? reason.replaceAll("_", " ")}`),
+  ].join(", ");
+}
+
 /** Write a check: describe it, let the LLM draft the YAML, preview it on recent runs, save. */
 export function CheckEditor({ open, initialYaml, userDir, onClose }: { open: boolean; initialYaml: string; userDir?: string; onClose: () => void }) {
   const a = useCheckActions();
@@ -25,6 +49,8 @@ export function CheckEditor({ open, initialYaml, userDir, onClose }: { open: boo
   const waiting = a.draft.isPending || a.preview.isPending;
   const { data: status } = useQuery({ queryKey: appKeys.status, queryFn: () => api<Status>("/api/status"), enabled: open, refetchInterval: waiting ? 3000 : false });
   const busy = Math.max(0, (status?.engine?.llm.busy ?? 0) - 1);
+  const hitsByRun = new Map((preview?.hits ?? []).map((hit) => [hit.trace_id, hit]));
+  const notEvaluated = preview ? Object.values(preview.skipped).reduce((sum, count) => sum + count, 0) + Object.values(preview.errors).reduce((sum, count) => sum + count, 0) : 0;
   const start = () => {
     ctrl.current?.abort();
     ctrl.current = new AbortController();
@@ -108,25 +134,38 @@ export function CheckEditor({ open, initialYaml, userDir, onClose }: { open: boo
           {preview && (
             <div className="flex flex-col gap-1.5 rounded-lg bg-surface-subtle px-3 py-2.5">
               <span className="text-sm text-foreground tabular-nums">
-                Fires on {preview.hits.length} of {preview.checked} runs · hit rate {pct(preview.hit_rate)}
+                Fires on {preview.hits.length} of {preview.checked} evaluated runs · hit rate {pct(preview.hit_rate)}
                 {preview.truncated ? ` (stopped early; ${preview.total} available)` : ""}
               </span>
+              {notEvaluated > 0 && (
+                <span className="text-xs text-muted-foreground">
+                  {notEvaluated} of {preview.total} runs were not evaluated: {notEvaluatedSummary(preview.skipped, preview.errors)}.
+                </span>
+              )}
               {preview.checked > 0 && preview.hits.length === 0 && (
-                <span className="text-xs text-muted-foreground">It fired on none of these runs. If one of them has the problem, make sure the check's evidence includes what it asks about.</span>
+                <span className="text-xs text-muted-foreground">It did not fire on the evaluated runs. If you expected a hit, check that the evidence includes what the question asks about.</span>
               )}
               <div className="flex max-h-40 flex-col overflow-y-auto">
-                {preview.hits.map((h) => (
+                {preview.results.map((result) => {
+                  const hit = hitsByRun.get(result.trace_id);
+                  const label = result.status === "hit"
+                    ? "Fired"
+                    : reasonLabel(result.reason);
+                  return (
                   <button
-                    key={h.trace_id}
+                    key={result.trace_id}
                     type="button"
-                    onClick={() => go(`runs/${h.trace_id}`)}
+                    aria-label={`${result.root_name ?? result.trace_id}: ${label}`}
+                    onClick={() => go(`runs/${result.trace_id}`)}
                     className="flex h-7 shrink-0 cursor-pointer items-center gap-2 text-left text-xs text-muted-foreground hover:text-foreground"
                   >
-                    <span className="font-mono">{h.trace_id.slice(0, 8)}</span>
-                    <span className="truncate">{h.root_name}</span>
-                    {h.probability !== null && <span className="ml-auto tabular-nums">{pct(h.probability)}</span>}
+                    <span className="font-mono">{result.trace_id.slice(0, 8)}</span>
+                    <span className="truncate">{result.root_name ?? "Run"}</span>
+                    <span className="ml-auto max-w-[48%] truncate" title={label}>{label}</span>
+                    {hit?.probability !== null && hit?.probability !== undefined && <span className="tabular-nums">{pct(hit.probability)}</span>}
                   </button>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
