@@ -405,4 +405,30 @@ describe("server", () => {
     expect(msg).toMatch(/Settings → Models|neatroots llm use/);
     expect(msg).not.toMatch(/fetch failed/);
   });
+
+  it("returns 413 for oversized bodies on /v1/traces, /v1/trace, and /v1/logs", async () => {
+    const tb = await served();
+    const oversized = Buffer.alloc(64 * 1024 * 1024 + 1);
+
+    const rTraces = await fetch(`${tb.url}/v1/traces`, {
+      method: "POST",
+      headers: { "content-type": "application/x-protobuf" },
+      body: oversized,
+    });
+    expect(rTraces.status).toBe(413);
+
+    const rTrace = await fetch(`${tb.url}/v1/trace`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: oversized,
+    });
+    expect(rTrace.status).toBe(413);
+
+    const rLogs = await fetch(`${tb.url}/v1/logs`, {
+      method: "POST",
+      headers: { "content-type": "application/x-protobuf" },
+      body: oversized,
+    });
+    expect(rLogs.status).toBe(413);
+  });
 });
