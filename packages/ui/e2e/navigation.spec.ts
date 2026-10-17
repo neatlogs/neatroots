@@ -9,6 +9,7 @@ test.describe("app shell", () => {
       ["runs", "Runs"],
       ["search", "Search"],
       ["checks", "Checks"],
+      ["finding reviews", "Finding reviews"],
       ["coding agents", "Coding agents"],
       ["add data", "Add data"],
       ["settings", "Settings"],
@@ -16,6 +17,10 @@ test.describe("app shell", () => {
     ] as const) {
       await page.getByRole("link", { name: link, exact: true }).click();
       await expect(page.getByText(heading, { exact: true }).first()).toBeVisible();
+    }
+    for (const route of ["unknown-page", "constructor"]) {
+      await open(page, route);
+      await expect(page.getByText("Home", { exact: true }).first()).toBeVisible();
     }
     expect(errors).toEqual([]);
   });

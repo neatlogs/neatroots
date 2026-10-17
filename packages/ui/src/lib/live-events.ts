@@ -24,6 +24,8 @@ export function useLiveEvents(): { connected: boolean; spanTick: number } {
     let retry: ReturnType<typeof setTimeout> | undefined;
     const flush = () => {
       void qc.invalidateQueries({ queryKey: runKeys.lists() });
+      // Refresh the queue, but keep an open review's evidence version until explicit reload.
+      void qc.invalidateQueries({ queryKey: ["reviews"] });
       for (const id of pending.current) void qc.invalidateQueries({ queryKey: runKeys.detail(id) });
       pending.current.clear();
     };
