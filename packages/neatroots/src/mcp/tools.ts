@@ -117,7 +117,7 @@ export function jsonPath(value: unknown, path: string): unknown {
     }
     cur = next.filter((x) => x !== undefined);
   }
-  return tokens.includes("*") ? cur : cur[0];
+  return tokens.includes("*") ? cur : (cur[0] ?? null);
 }
 
 function outline(roots: Roots, traceId: string, maxSpans: number) {
