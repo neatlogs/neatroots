@@ -90,7 +90,10 @@ function normValue(v: any): AnyValue {
   if (!v || typeof v !== "object") return {};
   const pick = (a: string, b: string) => (a in v ? v[a] : v[b]);
   if ("stringValue" in v || "string_value" in v) return { stringValue: String(pick("stringValue", "string_value") ?? "") };
-  if ("boolValue" in v || "bool_value" in v) return { boolValue: Boolean(pick("boolValue", "bool_value")) };
+  if ("boolValue" in v || "bool_value" in v) {
+    const value = pick("boolValue", "bool_value");
+    return typeof value === "boolean" ? { boolValue: value } : {};
+  }
   if ("intValue" in v || "int_value" in v) return { intValue: longToString(pick("intValue", "int_value")) };
   if ("doubleValue" in v || "double_value" in v) return { doubleValue: Number(pick("doubleValue", "double_value")) };
   if ("bytesValue" in v || "bytes_value" in v) {

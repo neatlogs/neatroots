@@ -1,9 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { decodeTraceJson, decodeTraceProtobuf, encodeTraceRequest } from "../src/otlp/codec.js";
+import { decodeLogsJson, decodeTraceJson, decodeTraceProtobuf, encodeTraceRequest } from "../src/otlp/codec.js";
 import type { ResourceSpansBatch } from "../src/otlp/types.js";
 import { batch, hex, s, span } from "./helpers.js";
 
 describe("OTLP codec", () => {
+  it.each(["boolValue", "bool_value"])("keeps %s strictly boolean, including nested values and logs", (key) => {
+    for (const flag of [true, false, "true", "false", "", 1, 0, null, {}, []]) {
+      const wire = { [key]: flag };
+      const expected = typeof flag === "boolean" ? { boolValue: flag } : {};
+      const original = structuredClone(wire);
+      const [decoded] = decodeTraceJson({ resourceSpans: [{
+        resource: { attributes: [{ key: "flag", value: wire }] },
+        scopeSpans: [{ scope: { name: "strict-booleans" }, spans: [{
+          traceId: hex(16), spanId: hex(8), name: "test",
+          attributes: [
+            { key: "flag", value: wire },
+            { key: "array", value: { arrayValue: { values: [wire] } } },
+            { key: "map", value: { kvlistValue: { values: [{ key: "flag", value: wire }] } } },
+          ],
+        }] }],
+      }] });
+      expect(decoded.resource.attributes[0].value).toEqual(expected);
+      expect(decoded.spans[0].attributes.map((a) => a.value)).toEqual([
+        expected, { arrayValue: { values: [expected] } }, { kvlistValue: { values: [{ key: "flag", value: expected }] } },
+      ]);
+      const [log] = decodeLogsJson({ resourceLogs: [{ scopeLogs: [{ logRecords: [{ body: wire }] }] }] });
+      expect(log.body).toEqual(expected);
+      expect(wire).toEqual(original);
+    }
+  });
+
   it("round-trips every value type through protobuf without loss", () => {
     const traceId = hex(16);
     const sp = span({
