@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import { BlobStore } from "./blobs.js";
 import { sha256, newId } from "../util/ids.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
+import { finalReply } from "../semantics/langchain.js";
 import { kvToPlain, type KeyValue, type OtlpResource, type OtlpScope, type OtlpSpan, type Plain, type ResourceSpansBatch } from "../otlp/types.js";
 import type {
   Annotation,
@@ -656,7 +657,9 @@ export class Store {
       p.root = span.spanId;
       p.rootName = span.name;
       p.inp = view.input !== undefined ? (currentRequest(view.input) ?? preview(view.input, 300)) : null;
-      p.out = view.output !== undefined ? preview(view.output, 300) : null;
+      // A root that ends with the conversation (a LangGraph state) is previewed by its answer.
+      const answer = finalReply(view.output);
+      p.out = view.output !== undefined ? preview(answer || view.output, 300) : null;
       if (view.workflow) {
         sets.push("workflow = @wf");
         p.wf = view.workflow;

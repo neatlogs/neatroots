@@ -35,6 +35,7 @@ flowchart TB
 | --- | --- |
 | `otlp/codec.ts` | OTLP protobuf/JSON decode and lossless encode (vendored opentelemetry-proto) |
 | `semantics/view.ts` | Span kind, input/output, model, tokens from public `neatlogs.*`, OpenInference and GenAI attributes |
+| `semantics/langchain.ts` | LangChain's serialized messages (`message_to_dict`, `dumpd`, `model_dump`, pydantic `str()`) and OpenLLMetry's callback envelopes read as plain tool arguments, results and messages, so LangGraph runs check like any other |
 | `store/db.ts`, `store/blobs.ts` | SQLite (WAL): sessions, runs, spans, findings, notes, plans, checks, decisions, explanations, summaries, annotations, forwards; FTS5 search; retention |
 | `server/collector.ts`, `server/readback.ts` | `/v1/traces`, `/v1/logs`, `/v1/trace`, doctor read-back |
 | `ingest/` | The HTTP trace API and OTLP/gRPC (`http-trace.ts`, `grpc.ts`), span trees to OTLP (`build.ts`), and imports of trace files and Neatlogs Cloud traces (`importers/`; cloud imports run as cancellable jobs) |
