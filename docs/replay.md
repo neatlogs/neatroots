@@ -81,7 +81,28 @@ replay; outside one it changes nothing. Install the hooks from the bundle:
 
 `examples/python-replay` is a complete agent set up this way.
 
+### Replay correlation
+
+A whole-agent replay prefers a new run carrying that replay's exact `neatroots.replay.id` in
+resource attributes or the root span's attributes. For a command target, preserve the entry in
+`OTEL_RESOURCE_ATTRIBUTES` or set it through the SDK's resource configuration. For an HTTP target,
+add the received `replay_id` to the new trace's resource attributes or root attributes. The HTTP trace
+API (`/v1/trace`) and Browser SDK trace shape can use
+`attributes: { "neatroots.replay.id": replay_id }` on the root. If an agent or framework replaces
+`OTEL_RESOURCE_ATTRIBUTES`, merge the replay entry into its own resource attributes.
+
+Only runs first received during the replay are considered; a root can arrive after its children.
+Conflicting explicit IDs are rejected. An ID on a child span alone does not establish correlation.
+
 ### Linking without the variables
 
-If the agent drops `OTEL_RESOURCE_ATTRIBUTES` (some frameworks set their own resource), neatroots
-links the first new run of that project that starts after the replay began.
+After the agent answers or exits, neatroots waits up to ten seconds for explicit correlation.
+If none arrives, it links a run without an ID only when exactly one new same-project candidate
+appeared and no other replay overlapped this replay at any point. A run carrying a different
+explicit ID is never a fallback candidate. Multiple candidates or any overlapping replay disable
+this fallback, even if the other replay has already finished. A matching explicit ID takes priority
+over uncorrelated candidates and works during concurrent replays.
+
+The fallback cannot prove which process produced a lone same-project run. Use explicit correlation
+when other agents send telemetry to the same project. If neither matching correlation nor the
+constrained fallback is available, the replay fails with the existing no new run reached neatroots error.
