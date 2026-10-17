@@ -64,7 +64,8 @@
     span: { type: llm }
     field: output
     flags: ''
-    pattern: '(sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
+    # Key prefixes must start a token, so words like task-… or risk-… don't read as an sk- key.
+    pattern: '((?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|xox[abprs]-[A-Za-z0-9-]{10,})|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
   guidance: Do not repeat credentials or keys in your replies. Refer to them by name instead.
 
 - id: unrecovered-tool-failure
@@ -85,7 +86,7 @@
     type: match
     span: { type: [tool, mcp_tool] }
     field: output
-    pattern: '(sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|Bearer [A-Za-z0-9._~+/=-]{24,})'
+    pattern: '((?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|xox[abprs]-[A-Za-z0-9-]{10,})|-----BEGIN [A-Z ]*PRIVATE KEY-----|Bearer [A-Za-z0-9._~+/=-]{24,})'
     flags: ''
   guidance: A tool result contains what looks like a credential. Do not repeat it in your reply or pass it to other tools. Refer to it by name instead.
 
