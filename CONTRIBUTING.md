@@ -91,4 +91,5 @@ with `NEATROOTS_URL=http://localhost:4112`. Examples use mocks unless `REAL_LLM=
 Explain the problem and resulting behavior, link the issue, and list validation results.
 Include regression coverage for behavioral fixes and screenshots for UI changes.
 Keep affected documentation current. For documentation-only changes, check links, command
-accuracy, and `git diff --check`; application tests are unnecessary unless behavior changes.
+accuracy, and `git diff --check`. Follow the testing requirement in `MAINTAINERS.md`
+for every pull request, including documentation-only changes.
