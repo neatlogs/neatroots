@@ -66,7 +66,9 @@ export class Roots {
     this.imports = new ImportJobs(this);
     this.replays = new Replays(this);
     this.chats = new AgentChats(this);
-    this.store.reindexSearch((n) => n && log.info(`search now covers whole inputs and outputs (${n} spans re-indexed)`));
+    this.store.reindexSearch(({ indexed, complete }) => {
+      if (complete && indexed) log.info(`search now covers whole inputs and outputs (${indexed} spans re-indexed)`);
+    });
     if (!opts.noEngine) {
       const engine = new Engine(this, this.llm, this.decisions, this.checks, this.steering);
       this.engine = engine;

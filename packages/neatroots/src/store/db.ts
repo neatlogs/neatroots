@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { BlobStore } from "./blobs.js";
+import { BlobReadError, BlobStore, type BlobReadErrorKind } from "./blobs.js";
 import { sha256, newId } from "../util/ids.js";
+import { log } from "../util/log.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
 import { kvToPlain, type KeyValue, type OtlpResource, type OtlpScope, type OtlpSpan, type Plain, type ResourceSpansBatch } from "../otlp/types.js";
 import type {
@@ -1461,28 +1462,38 @@ export class Store {
 
   /**
    * Re-indexes spans stored before the index covered whole values (it kept 4,000 characters of
-   * each), a few hundred at a time so startup isn't held up. Runs once per database.
+   * each), a few hundred at a time so startup isn't held up. Runs once per database when complete.
    */
-  reindexSearch(onDone?: (n: number) => void): void {
+  reindexSearch(onDone?: (result: { indexed: number; skipped: number; complete: boolean }) => void): void {
     if (this.getMeta("search_index") === String(SEARCH_INDEX_VERSION)) return;
     let after = 0;
     let n = 0;
+    let skipped = 0;
+    const skippedByKind: Record<BlobReadErrorKind, number> = { missing: 0, corrupt: 0, unreadable: 0 };
     const step = () => {
       if (!this.db.open) return;
       const rows = this.db.prepare("SELECT seq, trace_id, span_id FROM spans WHERE seq > ? ORDER BY seq LIMIT 300").all(after) as { seq: number; trace_id: string; span_id: string }[];
       for (const r of rows) {
         after = r.seq;
-        const full = this.getOtlpSpan(r.trace_id, r.span_id);
-        if (!full) continue;
-        const view = buildView(full.span, full.resource.attributes);
-        if (view.isMarker) continue;
-        this.indexSpan(r.trace_id, r.span_id, full.span.name, view);
-        n++;
+        try {
+          const full = this.getOtlpSpan(r.trace_id, r.span_id);
+          if (!full) continue;
+          const view = buildView(full.span, full.resource.attributes);
+          if (view.isMarker) continue;
+          this.indexSpan(r.trace_id, r.span_id, full.span.name, view);
+          n++;
+        } catch (err) {
+          if (!(err instanceof BlobReadError)) throw err;
+          skipped++;
+          skippedByKind[err.kind]++;
+        }
       }
       if (rows.length) setImmediate(step);
       else {
-        this.setMeta("search_index", String(SEARCH_INDEX_VERSION));
-        onDone?.(n);
+        const complete = skipped === 0;
+        if (complete) this.setMeta("search_index", String(SEARCH_INDEX_VERSION));
+        else log.warn(`search reindex incomplete: skipped ${skipped} span(s) with unavailable payloads (missing ${skippedByKind.missing}, corrupt ${skippedByKind.corrupt}, unreadable ${skippedByKind.unreadable}); index remains incomplete for retry after restoration`);
+        onDone?.({ indexed: n, skipped, complete });
       }
     };
     setImmediate(step);

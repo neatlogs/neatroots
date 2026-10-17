@@ -5,6 +5,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { serve, type ServerType } from "@hono/node-server";
 import type { Roots } from "../core.js";
+import { BlobReadError } from "../store/blobs.js";
 import { mountCollector } from "./collector.js";
 import { mountApi } from "./api.js";
 import { mountMcpHttp } from "../mcp/http.js";
@@ -90,6 +91,10 @@ export function createApp(roots: Roots): Hono {
   // unexpected as a 500 (logged, never with a stack in the response).
   app.onError((e, c) => {
     if (e instanceof HTTPException) return c.json({ error: e.message }, e.status);
+    if (e instanceof BlobReadError) {
+      log.error(`${c.req.method} ${c.req.path} failed: ${e.message}`);
+      return c.json({ error: "stored_payload_unavailable", reason: e.kind, sha: e.sha, message: e.message }, 500);
+    }
     log.error(`${c.req.method} ${c.req.path} failed: ${e.message}`);
     return c.json({ error: "internal error" }, 500);
   });

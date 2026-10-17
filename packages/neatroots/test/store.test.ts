@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { BlobReadError } from "../src/store/blobs.js";
 import { Store } from "../src/store/db.js";
 import { traceReadback } from "../src/server/readback.js";
 import { batch, closeTrackedStores, hex, llmSpan, markerSpan, s, span, tmpHome, toolSpan, trackedStore } from "./helpers.js";
@@ -96,6 +97,31 @@ describe("store", () => {
     expect(back.resource).toEqual(b.resource);
     st.deleteRun(t);
     expect(st.blobs.size()).toBe(0);
+  });
+
+  it("reports a removed blob instead of restoring an empty payload", () => {
+    const st = store();
+    const t = hex(16);
+    const payload = `large prompt ${"x".repeat(40_000)}`;
+    st.ingest([batch([span({ traceId: t, name: "big", kind: "tool", attrs: [s("payload", payload)] })])]);
+    const raw = st.db.prepare("SELECT attributes, blobs FROM spans WHERE trace_id = ?").get(t) as { attributes: string; blobs: string };
+    const attributes = JSON.parse(raw.attributes) as { key: string; value: { blobRef?: { sha: string; len: number } } }[];
+    const ref = attributes.find((a) => a.key === "payload")!.value.blobRef!;
+
+    expect(ref.len).toBe(payload.length);
+    const [intact] = st.batchesForTraces([t]);
+    expect(intact.spans[0].attributes.find((a) => a.key === "payload")!.value).toEqual({ stringValue: payload });
+
+    fs.unlinkSync(path.join(homes.at(-1)!, "data", "blobs", ref.sha.slice(0, 2), ref.sha.slice(2)));
+    let error: unknown;
+    try {
+      st.batchesForTraces([t]);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(BlobReadError);
+    expect(error).toMatchObject({ kind: "missing", sha: ref.sha });
+    expect(st.db.prepare("SELECT attributes, blobs FROM spans WHERE trace_id = ?").get(t)).toEqual(raw);
   });
 
   it("reclaims superseded payloads through repeated updates and run deletion", () => {
@@ -266,8 +292,8 @@ describe("store", () => {
     st.db.prepare("UPDATE span_fts SET body = substr(body, 1, 4000)").run();
     st.db.prepare("DELETE FROM meta WHERE key = 'search_index'").run();
     expect(st.searchSpans("OLD_TAIL")).toEqual([]);
-    const n = await new Promise<number>((r) => st.reindexSearch(r));
-    expect(n).toBe(1);
+    const result = await new Promise<{ indexed: number; skipped: number; complete: boolean }>((r) => st.reindexSearch(r));
+    expect(result).toEqual({ indexed: 1, skipped: 0, complete: true });
     expect(st.searchSpans("OLD_TAIL").map((h) => h.trace_id)).toEqual([t]);
   });
 

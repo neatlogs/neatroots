@@ -10,6 +10,19 @@ export interface BlobRef {
   blobRef: { sha: string; len: number };
 }
 
+export type BlobReadErrorKind = "missing" | "corrupt" | "unreadable";
+
+export class BlobReadError extends Error {
+  constructor(
+    readonly kind: BlobReadErrorKind,
+    readonly sha: string,
+    cause?: unknown,
+  ) {
+    super(`Stored blob ${sha} is ${kind}.`, cause === undefined ? undefined : { cause });
+    this.name = "BlobReadError";
+  }
+}
+
 export class BlobStore {
   constructor(private readonly dir: string) {
     fs.mkdirSync(dir, { recursive: true });
@@ -29,12 +42,20 @@ export class BlobStore {
     return sha;
   }
 
-  get(sha: string): string | undefined {
+  get(ref: BlobRef["blobRef"]): string {
+    const { sha, len } = ref;
+    if (!/^[0-9a-f]{64}$/.test(sha) || !Number.isSafeInteger(len) || len < 0) throw new BlobReadError("corrupt", sha);
+    let value: string;
     try {
-      return fs.readFileSync(this.file(sha), "utf8");
-    } catch {
-      return undefined;
+      value = fs.readFileSync(this.file(sha), "utf8");
+    } catch (cause) {
+      const code = typeof cause === "object" && cause !== null && "code" in cause ? cause.code : undefined;
+      if (code === "ENOENT") throw new BlobReadError("missing", sha, cause);
+      if (code === "ENOTDIR" || code === "EISDIR") throw new BlobReadError("corrupt", sha, cause);
+      throw new BlobReadError("unreadable", sha, cause);
     }
+    if (value.length !== len || sha256(value) !== sha) throw new BlobReadError("corrupt", sha);
+    return value;
   }
 
   delete(sha: string): void {
@@ -88,8 +109,14 @@ export class BlobStore {
   }
 
   private rehydrateValue(v: AnyValue): AnyValue {
-    const ref = (v as unknown as BlobRef).blobRef;
-    if (ref) return { stringValue: this.get(ref.sha) ?? "" };
+    const ref = (v as unknown as { blobRef?: unknown }).blobRef;
+    if (ref !== undefined) {
+      if (typeof ref !== "object" || ref === null) throw new BlobReadError("corrupt", "invalid");
+      const sha = "sha" in ref && typeof ref.sha === "string" ? ref.sha : "invalid";
+      const len = "len" in ref ? ref.len : undefined;
+      if (typeof len !== "number" || !Number.isSafeInteger(len) || len < 0) throw new BlobReadError("corrupt", sha);
+      return { stringValue: this.get({ sha, len }) };
+    }
     if ("arrayValue" in v) return { arrayValue: { values: v.arrayValue.values.map((x) => this.rehydrateValue(x)) } };
     if ("kvlistValue" in v) return { kvlistValue: { values: this.rehydrate(v.kvlistValue.values) } };
     return v;
