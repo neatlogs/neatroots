@@ -345,3 +345,52 @@ it("preview_check by id previews the pending version", async () => {
     await client.close();
   }
 });
+
+it.each(["user", "project"])("persists the effective %s target discovered after a stale registry load", (source) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-effective-target-"));
+  const userDir = path.join(dir, "checks");
+  const projectDir = path.join(dir, "project");
+  const destinationDir = source === "project" ? projectDir : userDir;
+  let store = new Store(path.join(dir, "data"));
+  try {
+    let registry = new CheckRegistry(store, userDir, () => [projectDir]);
+    const check = { id: "late-target", kind: "rule", action: "flag", rule: { type: "count", at_least: 1 } } as Check;
+    expect(registry.get(check.id)).toBeUndefined();
+    fs.mkdirSync(destinationDir, { recursive: true });
+    const file = path.join(destinationDir, "shared.yaml");
+    const original = ruleYaml(check.id, "flag", 3) + "---\n" + ruleYaml("untouched-target-entry", "flag", 9);
+    fs.writeFileSync(file, original);
+    const proposal = registry.proposeMcp(check, null);
+    expect(proposal.target_dir).toBe(destinationDir);
+    expect(proposal.has_active_version).toBe(true);
+    expect(fs.readFileSync(file, "utf8")).toBe(original);
+    store.close(); store = new Store(path.join(dir, "data"));
+    registry = new CheckRegistry(store, userDir, () => [projectDir]);
+    expect(registry.pendingMcpCheck(check.id)).toMatchObject({ target_dir: destinationDir, revision: proposal.revision });
+    const approved = registry.approvePendingMcp(check.id, proposal.revision);
+    expect(approved?.path).toBe(file);
+    expect(registry.get("untouched-target-entry")?.check).toMatchObject({ rule: { at_least: 9 } });
+    expect(registry.get(check.id)?.check).toMatchObject({ rule: { at_least: 1 } });
+    if (source === "project") expect(fs.existsSync(path.join(userDir, `${check.id}.yaml`))).toBe(false);
+  } finally { store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+it.each(["user", "project"])("MCP and Checks API show the refreshed %s proposal target", async (source) => {
+  const t = await makeRoots({ serve: true, noEngine: true });
+  cleanup.push(t.close);
+  const userDir = path.join(t.roots.home, "checks");
+  const projectDir = path.join(t.roots.home, "project-checks");
+  t.roots.config.checkDirs.push(projectDir);
+  t.roots.checks.reload();
+  const client = await connect(t.url);
+  try {
+    const target = source === "project" ? projectDir : userDir;
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, "late-api.yaml"), ruleYaml("late-api", "flag", 3));
+    expect(t.roots.checks.get("late-api")).toBeUndefined();
+    const result = resultJson(await client.callTool({ name: "create_check", arguments: { check: ruleYaml("late-api", "flag", 1) } }));
+    expect(result).toMatchObject({ target_dir: target, active_version_unchanged: true, pending_approval: true });
+    const listed = await (await fetch(`${t.url}/api/checks`)).json() as { pending_mcp_checks: { id: string; target_dir: string }[] };
+    expect(listed.pending_mcp_checks.find((p) => p.id === "late-api")?.target_dir).toBe(target);
+  } finally { await client.close(); }
+});

@@ -297,6 +297,7 @@ export class CheckRegistry {
     const parsed = AnyCheck.parse(check) as Check;
     this.reload();
     const active = this.get(parsed.id);
+    targetDir ??= active?.path && active.source !== "library" ? path.dirname(active.path) : this.userDir;
     assertNoHaltFromAgent(parsed, active?.check);
     if (active?.path && active.source !== "library" && targetDir && path.resolve(targetDir) !== path.resolve(path.dirname(active.path))) throw new Error("MCP edits must target the active check directory");
     this.store.upsertMcpCheckProposal(parsed.id, checkToYaml(parsed), targetDir, newId("proposal"), this.approvalFingerprint(parsed.id, targetDir, parsed));
@@ -304,7 +305,6 @@ export class CheckRegistry {
     if (!proposal) throw new Error(`could not save MCP check proposal ${parsed.id}`);
     return proposal;
   }
-
   private activeFingerprint(id: string): string {
     const active = this.get(id);
     return sha256(JSON.stringify(active ? [checkToYaml(active.check), active.path, active.source, this.store.checkStats()[id]?.enabled] : null));
