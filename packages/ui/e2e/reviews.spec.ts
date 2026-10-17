@@ -96,3 +96,101 @@ test("queue and review sheet fit light, dark and 390px layouts", async ({ page }
   const box = await page.getByRole("dialog").boundingBox();
   expect(box!.width).toBeLessThanOrEqual(390);
 });
+
+test("reopening a finding loads its latest saved judgment", async ({ page }) => {
+  const { route } = await seedReviewRun();
+  await open(page, `${route}&state=all`);
+  const first = page.locator("tbody tr").first().getByRole("button");
+  const title = (await first.textContent())!;
+  await first.click();
+  const sheet = page.getByRole("dialog");
+  await expect(sheet.getByRole("textbox", { name: "Review reason" })).toBeVisible();
+  const id = new URLSearchParams(new URL(page.url()).hash.split("?")[1]).get("item")!;
+  await page.keyboard.press("Escape");
+  const current = await api<{ evidence_version: string }>(`/api/reviews/${id}`);
+  await api(`/api/reviews/${id}`, { method: "POST", body: JSON.stringify({ verdict: "incorrect", reason: "Updated from another client", source: "tool", evidence_version: current.evidence_version }) });
+  await page.getByRole("button", { name: title, exact: true }).click();
+  await expect(sheet.getByRole("radio", { name: "False positive", exact: true })).toBeChecked();
+  await expect(sheet.getByRole("textbox", { name: "Review reason" })).toHaveValue("Updated from another client");
+});
+
+test("queue and long evidence fit narrow, wide and short landscape windows", async ({ page }, testInfo) => {
+  const { route } = await seedReviewRun();
+  // Real findings with deliberately long display content exercise wrapping and internal scrolling.
+  await page.route("**/api/reviews/*", async (intercept) => {
+    const response = await intercept.fetch();
+    const item = await response.json();
+    item.finding.title = "Repeated lookup " + "LongFindingName".repeat(18);
+    item.finding.detail.quote = "EvidenceWithoutSpaces".repeat(40);
+    await intercept.fulfill({ response, json: item });
+  });
+  await open(page, route);
+  const sizes = [[320, 568], [360, 640], [390, 844], [568, 320], [667, 375], [768, 1024], [1024, 768], [1440, 900], [1920, 1080]];
+  for (const [width, height] of sizes) {
+    await page.setViewportSize({ width, height });
+    await expect(page.locator("tbody tr").first()).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const rowHeights = await page.locator("tbody tr").evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().height));
+    expect(new Set(rowHeights).size).toBe(1);
+    await page.locator("tbody tr").first().getByRole("button").click();
+    const sheet = page.getByRole("dialog");
+    await expect(sheet.getByRole("heading", { name: /^Repeated lookup/ })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath(`review-${width}x${height}.png`), animations: "disabled" });
+    await expect(sheet).toBeInViewport({ ratio: 1 });
+    expect(await sheet.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    const reason = sheet.getByRole("textbox", { name: "Review reason" });
+    await reason.scrollIntoViewIfNeeded();
+    await reason.fill("Reason remains reachable after resizing");
+    await expect(reason).toBeInViewport();
+    await expect(sheet.getByRole("button", { name: "Save review and next" })).toBeInViewport();
+    await page.keyboard.press("Escape");
+  }
+});
+
+test("keyboard review and failed saves preserve the draft", async ({ page }) => {
+  const { route } = await seedReviewRun();
+  await open(page, route);
+  const first = page.locator("tbody tr").first().getByRole("button");
+  await first.focus();
+  await page.keyboard.press("Enter");
+  const sheet = page.getByRole("dialog");
+  const radio = sheet.getByRole("radio", { name: "Unsure", exact: true });
+  await radio.focus();
+  await page.keyboard.press("Space");
+  await expect(radio).toBeChecked();
+  const reason = sheet.getByRole("textbox", { name: "Review reason" });
+  await reason.fill("Keep this draft after a failed request");
+  await page.route("**/api/reviews/*", async (intercept) => {
+    if (intercept.request().method() === "POST") await intercept.fulfill({ status: 503, json: { error: "Review store unavailable" } });
+    else await intercept.continue();
+  });
+  await sheet.getByRole("button", { name: "Save review and next" }).click();
+  await expect(sheet.getByRole("alert")).toHaveText("Review store unavailable");
+  await expect(reason).toHaveValue("Keep this draft after a failed request");
+  await expect(radio).toBeChecked();
+  await expect(sheet.getByRole("button", { name: "Save review and next" })).toBeEnabled();
+});
+
+test("paging and save-and-next cross the page boundary without skipping a finding", async ({ page }) => {
+  const { route, project } = await seedReviewRun();
+  // A one-item page reaches the same cursor boundary without a large, slow fixture.
+  await open(page, `${route}&limit=1`);
+  await expect(page.locator("tbody tr")).toHaveCount(1);
+  await page.getByRole("button", { name: "Next page", exact: true }).click();
+  await expect(page).toHaveURL(/cursor=/);
+  await page.getByRole("button", { name: "Restart queue", exact: true }).click();
+  await expect(page).not.toHaveURL(/cursor=/);
+  await page.locator("tbody tr").first().getByRole("button").click();
+  const sheet = page.getByRole("dialog");
+  await expect(sheet.getByRole("radio", { name: "Unsure", exact: true })).toBeVisible();
+  const previous = new URLSearchParams(new URL(page.url()).hash.split("?")[1]).get("item")!;
+  const before = await api<{ items: { finding: { id: string } }[] }>(`/api/reviews?project=${project}`);
+  const expected = before.items[before.items.findIndex((item) => item.finding.id === previous) + 1].finding.id;
+  await sheet.getByRole("radio", { name: "Unsure", exact: true }).check();
+  await sheet.getByRole("button", { name: "Save review and next" }).click();
+  await expect.poll(() => new URLSearchParams(new URL(page.url()).hash.split("?")[1]).get("item")).toBe(expected);
+  await expect(page).toHaveURL(/cursor=/);
+  await expect(sheet.getByTestId("review-evidence")).toContainText("4512");
+  const saved = await api<{ review: { verdict: string } }>(`/api/reviews/${previous}`);
+  expect(saved.review.verdict).toBe("uncertain");
+});

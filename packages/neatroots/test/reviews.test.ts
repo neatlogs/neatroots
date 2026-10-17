@@ -113,10 +113,11 @@ describe("local finding reviews", () => {
       const item = await (await get(`/api/reviews/${finding.id}`)).json();
       expect((await get("/api/reviews?state=wrong")).status).toBe(400);
       expect((await get("/api/reviews?cursor=wrong")).status).toBe(400);
-      for (const patch of [{ verdict: "yes" }, { reason: 12 }, { reason: "x".repeat(4001) }, { source: "bot" }, { evidence_version: "invalid" }]) {
+      for (const patch of [{ verdict: "yes" }, { reason: 12 }, { reason: null }, { reason: "x".repeat(4001) }, { source: "bot" }, { evidence_version: "invalid" }]) {
         expect((await request(`/api/reviews/${finding.id}`, { ...judgment, evidence_version: item.evidence_version, ...patch })).status).toBe(400);
       }
       expect((await request(`/api/reviews/${finding.id}`, { ...judgment, evidence_version: item.evidence_version })).status).toBe(200);
+      expect((await request(`/api/reviews/${finding.id}`, { verdict: "uncertain", source: "tool", evidence_version: item.evidence_version })).status).toBe(200);
       tb.roots.store.ingest([batch([sp])]);
       expect((await request(`/api/reviews/${finding.id}`, { ...judgment, evidence_version: item.evidence_version })).status).toBe(409);
       expect((await request("/api/reviews/missing", { ...judgment, evidence_version: item.evidence_version })).status).toBe(404);

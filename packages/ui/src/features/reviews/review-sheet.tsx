@@ -12,7 +12,8 @@ import { api, post, type SpanDetail } from "@/lib/api";
 import { REVIEW_LABELS, VERDICTS, type ReviewItem, type Verdict } from "./types";
 
 export function ReviewSheet({ id, onClose, onSaved }: { id: string; onClose: () => void; onSaved: (id: string) => Promise<void> }) {
-  const { data, error, refetch } = useQuery({ queryKey: ["review", id], queryFn: () => api<ReviewItem>(`/api/reviews/${encodeURIComponent(id)}`), refetchOnWindowFocus: false });
+  // Each opening starts from the saved review, while an open draft keeps its evidence version.
+  const { data, error, refetch } = useQuery({ queryKey: ["review", id], queryFn: () => api<ReviewItem>(`/api/reviews/${encodeURIComponent(id)}`), gcTime: 0, refetchOnWindowFocus: false });
   return (
     <Sheet open onOpenChange={(v) => !v && onClose()}>
       <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-2xl">

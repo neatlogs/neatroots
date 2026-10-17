@@ -25,12 +25,13 @@ export function mountReviewsApi(app: Hono, roots: Roots): void {
 
   app.post("/api/reviews/:id", async (c) => {
     const b = await body<Record<string, unknown>>(c);
+    const reason = b.reason === undefined ? "" : b.reason;
     if (!REVIEW_VERDICTS.some((verdict) => verdict === b.verdict)) return err(c, 400, "verdict must be correct, incorrect or uncertain");
-    if (typeof b.reason !== "string" || b.reason.length > 4000) return err(c, 400, "reason must be text of at most 4000 characters");
+    if (typeof reason !== "string" || reason.length > 4000) return err(c, 400, "reason must be text of at most 4000 characters");
     if (b.source !== "human" && b.source !== "tool") return err(c, 400, "source must be human or tool");
     if (typeof b.evidence_version !== "string" || !/^[a-f0-9]{64}$/.test(b.evidence_version)) return err(c, 400, "evidence_version is required; reload the finding");
     const result = saveReview(roots.store, c.req.param("id"), b.evidence_version,
-      { verdict: b.verdict as ReviewVerdict, reason: b.reason.trim(), source: b.source });
+      { verdict: b.verdict as ReviewVerdict, reason: reason.trim(), source: b.source });
     if (result === "missing") return err(c, 404, "finding not found");
     if (result === "stale") return err(c, 409, "Evidence changed. Reload the finding before saving a review.");
     return c.json(result);
