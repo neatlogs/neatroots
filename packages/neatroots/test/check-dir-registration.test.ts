@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import type { RootsConfig } from "../src/config.js";
@@ -178,6 +181,33 @@ it("registers a real checks directory and loads its checks", async () => {
   // resolves to the same place on the next start.
   expect((await save(tb, { check_dir: `  ${dir}${path.sep}  ` })).status).toBe(200);
   expect(tb.roots.config.checkDirs).toEqual([dir]);
+});
+
+it("neatroots init registers its checks directory with a running server", async () => {
+  const tb = await served();
+  tb.roots.saveConfig();
+  const project = path.join(scratch, "project");
+  const dir = path.join(project, ".neatroots", "checks");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "team.yaml"), "id: init-check\nkind: rule\nrule: { type: count, span: { type: tool }, at_least: 3 }\n");
+  const packageDir = fileURLToPath(new URL("..", import.meta.url));
+  const tsx = fileURLToPath(import.meta.resolve("tsx"));
+  const child = spawn(process.execPath, ["--import", tsx, path.join(packageDir, "src", "cli.ts"), "init"], {
+    cwd: project,
+    env: { ...process.env, NEATROOTS_HOME: tb.roots.home },
+    stdio: "pipe",
+  });
+  let output = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => (output += chunk));
+  child.stderr.on("data", (chunk: string) => (output += chunk));
+  const [code] = (await once(child, "close")) as [number];
+
+  expect(code, output).toBe(0);
+  expect(tb.roots.config.checkDirs).toEqual([dir]);
+  expect(tb.roots.checks.get("init-check")).toBeTruthy();
+  expect(savedConfig(tb).checkDirs).toEqual([dir]);
 });
 
 it("refuses a registered check_dir that stopped being a directory", async () => {
