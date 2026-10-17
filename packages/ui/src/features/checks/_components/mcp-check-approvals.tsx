@@ -32,7 +32,7 @@ export function McpCheckApprovals({ proposals, userDir }: { proposals: CheckAppr
                 <span className="min-w-0 break-all text-sm font-medium text-foreground">{proposal.title}</span>
                 <span className="font-mono text-2xs text-muted-foreground">{proposal.id}</span>
                 <StatusPill size="sm" tone={proposal.has_active_version ? "info" : "muted"}>
-                  {proposal.has_active_version ? "Edit · current version stays active" : "New · inactive"}
+                  {proposal.has_active_version ? "Edit · current version stays active" : "Inactive until approval"}
                 </StatusPill>
               </div>
               <pre data-testid="proposal-yaml" className="max-h-48 overflow-auto rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs whitespace-pre-wrap break-words">{proposal.yaml}</pre>

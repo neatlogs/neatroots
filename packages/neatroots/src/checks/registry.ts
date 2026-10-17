@@ -278,7 +278,7 @@ export class CheckRegistry {
     const { checks } = parseChecks(row.body);
     const check = checks.find((c) => c.id === row.id);
     if (!check) return undefined;
-    return { check, revision: row.revision, created_ms: row.created_ms, target_dir: row.target_dir, has_active_version: !!this.get(row.id) };
+    return { check, revision: row.revision, created_ms: row.created_ms, target_dir: row.target_dir, has_active_version: this.enabled().some((c) => c.check.id === row.id) };
   }
 
   pendingMcp(): PendingMcpCheck[] {

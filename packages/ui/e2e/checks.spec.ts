@@ -79,6 +79,7 @@ test.describe("checks", () => {
     await open(page, "checks");
     const edit = page.getByTestId("mcp-check-proposal").filter({ hasText: "pending-edit" });
     await expect(edit.getByText("Edit · current version stays active")).toBeVisible();
+    await expect(page.getByTestId("mcp-check-proposal").filter({ hasText: "pending-new" }).getByText("Inactive until approval")).toBeVisible();
     if (testInfo.repeatEachIndex === 0) {
       await page.screenshot({ path: testInfo.outputPath("mcp-approval-light.png"), fullPage: true });
       await page.emulateMedia({ colorScheme: "dark" });
