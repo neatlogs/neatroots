@@ -6,16 +6,17 @@ import { loadTrace } from "../src/engine/trace.js";
 import { evaluateRule } from "../src/checks/rules.js";
 import { parseChecks } from "../src/checks/registry.js";
 import type { RuleCheck } from "../src/checks/types.js";
-import { batch, hex, llmSpan, s, span, tmpHome } from "./helpers.js";
+import { batch, closeTrackedStores, hex, llmSpan, s, span, tmpHome, trackedStore } from "./helpers.js";
 
 const homes: string[] = [];
 afterEach(() => {
+  closeTrackedStores();
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 function store(): Store {
   const h = tmpHome();
   homes.push(h);
-  return new Store(path.join(h, "data"));
+  return trackedStore(path.join(h, "data"));
 }
 
 const yaml = `

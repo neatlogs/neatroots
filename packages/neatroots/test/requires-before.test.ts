@@ -6,10 +6,11 @@ import { loadTrace } from "../src/engine/trace.js";
 import { evaluateRule } from "../src/checks/rules.js";
 import { parseChecks } from "../src/checks/registry.js";
 import type { RuleCheck } from "../src/checks/types.js";
-import { batch, hex, tmpHome, toolSpan } from "./helpers.js";
+import { batch, closeTrackedStores, hex, tmpHome, toolSpan, trackedStore } from "./helpers.js";
 
 const homes: string[] = [];
 afterEach(() => {
+  closeTrackedStores();
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 
@@ -37,14 +38,18 @@ function run(calls: Call[]) {
   const h = tmpHome();
   homes.push(h);
   const st = new Store(path.join(h, "data"));
-  const t = hex(16);
-  const root = hex(8);
-  const spans = calls.map((c) => (c.fail ? toolSpan(t, root, c.tool, "{}", undefined, "HTTP 500") : toolSpan(t, root, c.tool, "{}", '{"ok":true}')));
-  calls.forEach((c, i) => {
-    if (c.parallel && i > 0) spans[i].startTimeUnixNano = spans[i - 1].startTimeUnixNano;
-  });
-  st.ingest([batch(spans)]);
-  return evaluateRule(check, loadTrace(st, t), false);
+  try {
+    const t = hex(16);
+    const root = hex(8);
+    const spans = calls.map((c) => (c.fail ? toolSpan(t, root, c.tool, "{}", undefined, "HTTP 500") : toolSpan(t, root, c.tool, "{}", '{"ok":true}')));
+    calls.forEach((c, i) => {
+      if (c.parallel && i > 0) spans[i].startTimeUnixNano = spans[i - 1].startTimeUnixNano;
+    });
+    st.ingest([batch(spans)]);
+    return evaluateRule(check, loadTrace(st, t), false);
+  } finally {
+    st.close();
+  }
 }
 
 describe("requires_before", () => {
@@ -54,7 +59,7 @@ describe("requires_before", () => {
   });
 
   it("stays quiet when the lookup came first", () => {
-    expect(run([{ tool: "lookup_order" }, { tool: "issue_refund" }])).toBeNull();
+    expect(run([{ tool: "lookup_order" }, { tool: "issue_refund" }])?.firing).toBe(false);
   });
 
   it("fires when the refund has no lookup at all", () => {
@@ -66,13 +71,13 @@ describe("requires_before", () => {
   it("counts a lookup whose status is unset", () => {
     const h = tmpHome();
     homes.push(h);
-    const st = new Store(path.join(h, "data"));
+    const st = trackedStore(path.join(h, "data"));
     const t = hex(16);
     const root = hex(8);
     const lookup = toolSpan(t, root, "lookup_order", "{}", '{"ok":true}');
     lookup.status = { code: 0 };
     st.ingest([batch([lookup, toolSpan(t, root, "issue_refund", "{}", '{"ok":true}')])]);
-    expect(evaluateRule(check, loadTrace(st, t), false)).toBeNull();
+    expect(evaluateRule(check, loadTrace(st, t), false)?.firing).toBe(false);
   });
 
   it("fires when the lookup failed", () => {
@@ -92,7 +97,7 @@ describe("requires_before", () => {
   });
 
   it("does not guess when the two calls started together", () => {
-    expect(run([{ tool: "lookup_order" }, { tool: "issue_refund", parallel: true }])).toBeNull();
+    expect(run([{ tool: "lookup_order" }, { tool: "issue_refund", parallel: true }])?.firing).toBe(false);
   });
 
   it("labeled smoke: 120 generated runs, every verdict matches the label", () => {

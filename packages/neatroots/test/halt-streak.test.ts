@@ -6,7 +6,7 @@ import { loadTrace } from "../src/engine/trace.js";
 import { evaluateRule } from "../src/checks/rules.js";
 import { parseChecks } from "../src/checks/registry.js";
 import type { RuleCheck } from "../src/checks/types.js";
-import { batch, hex, llmSpan, makeRoots, mockLlm, tmpHome, toolSpan, until, type TestRoots } from "./helpers.js";
+import { batch, closeTrackedStores, hex, llmSpan, makeRoots, mockLlm, tmpHome, toolSpan, trackedStore, until, type TestRoots } from "./helpers.js";
 
 // A user's halt rule whose streak ends before the agent's next LLM call (#84).
 
@@ -30,14 +30,15 @@ const rule = (id: string) => rules.find((c) => c.id === id)!;
 const homes: string[] = [];
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
-  for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
   for (const c of cleanup.splice(0)) await c();
+  closeTrackedStores();
+  for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 
 function store(): Store {
   const h = tmpHome();
   homes.push(h);
-  return new Store(path.join(h, "data"));
+  return trackedStore(path.join(h, "data"));
 }
 
 async function setup(withUserRules = true) {
@@ -48,6 +49,8 @@ async function setup(withUserRules = true) {
     await llm.close();
   });
   if (withUserRules) for (const c of rules) tb.roots.checks.save(c, "user");
+  // Halts reach the agent only while steering is on for the project (off sends nothing).
+  tb.roots.steering.setMode("test-agent", "advisory");
   const t = hex(16);
   const root = hex(8);
   tb.roots.ingest([batch([llmSpan(t, root, { system: "You are a billing agent.", user: "Charge order 4512" })])]);

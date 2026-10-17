@@ -22,7 +22,7 @@ rule:
   at_least: 3
 guidance: >-
   You have called {tool} {count} times with the same arguments ({args}) ...
-action: flag              # or halt (your own rules only)
+action: flag              # or halt (your own rules only; needs steering on for the project)
 ```
 
 | type | Fires when |
@@ -32,8 +32,8 @@ action: flag              # or halt (your own rules only)
 | `count` | the run has `at_least` matching spans |
 | `slow` | a matching span took at least `at_least_ms` milliseconds (one slow tool call, not the whole run; use `threshold` with `duration_ms` for the run) |
 | `threshold` | a run metric (`total_tokens`, `llm_calls`, `duration_ms`, …) reaches `at_least` |
-| `match` | a regex matches a span's `input`, `output`, `error` or `name`; an MCP tool result's `content[].text` items are read like plain output too |
-| `requires_before` | a `span` call has no earlier successful `requires` call in the same run, for example a refund with no order lookup |
+| `match` | a regex matches a span's `input`, `output`, `error` or `name`; an MCP tool result's `content[].text` items are read like plain output too (the first 200,000 characters in all). A pattern that doesn't compile, or that nests repeats like `(a+)+` and could freeze neatroots, is rejected when the check is saved. That check catches the common slow shape, not every one, so patterns from checks you or a coding agent write also run under a 50 ms limit per span: a pattern that takes longer, such as a repeat over overlapping alternatives like `(a\|aa)+`, is skipped with a warning in the log until neatroots restarts |
+| `requires_before` | a `span` call has no earlier successful `requires` call in the same run, for example a refund with no order lookup. Spans can arrive out of order, so during a run it waits 250 ms for a late `requires` span before it raises (or halts), and a finding resolves if the earlier call turns up later |
 | `unrecovered_error` | at run end, the last call of a tool failed (no later success of that tool) and the run still produced a final answer that does not say anything failed (a words check, so it is a hint, not proof) |
 | `run_end` | the run ended with `error`, `no_output` or `interrupted` |
 
@@ -90,7 +90,9 @@ is the expected level, not necessarily a whole number.
   Plans are cached per workflow and redone when new tools appear.
 - **You**: describe a concern in the app (Checks → New check) and the LLM drafts the question; preview
   it on recent runs before saving.
-- **Coding agents**: `create_check` and `preview_check` over MCP.
+- **Coding agents**: `create_check` and `preview_check` over MCP. A coding agent can save `flag` rules and
+  questions, but not halt rules: it can't create one, turn a check into one, or change yours. Switch a
+  rule to `action: halt` yourself in the app or CLI.
 
 ## Findings
 

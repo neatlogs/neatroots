@@ -4,15 +4,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Store } from "../src/store/db.js";
 import { computeInsights } from "../src/store/insights.js";
 import { digestData, groundedNumbers } from "../src/engine/digest.js";
-import { batch, hex, llmSpan, span, tmpHome, toolSpan } from "./helpers.js";
+import { batch, closeTrackedStores, hex, llmSpan, span, tmpHome, toolSpan, trackedStore } from "./helpers.js";
 
 const homes: string[] = [];
 function store(): Store {
   const h = tmpHome();
   homes.push(h);
-  return new Store(path.join(h, "data"));
+  return trackedStore(path.join(h, "data"));
 }
 afterEach(() => {
+  closeTrackedStores();
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 
@@ -72,7 +73,6 @@ describe("insights", () => {
 
     // Runs filtered by a problem's check.
     expect(st.listRuns({ checkId: "ignored-tool-error" }).map((r) => r.trace_id).sort()).toEqual([runs[0], runs[1]].sort());
-    st.close();
   });
 
   it("leaves quiet findings out of the problems list, the trend and the clean lists", () => {
@@ -98,8 +98,6 @@ describe("insights", () => {
     expect(q.problems).toHaveLength(0);
     expect(q.totals.with_problems).toBe(0);
     expect(q.passing.map((p) => p.check_id)).not.toContain("ignored-tool-error");
-    st.close();
-    quietOnly.close();
   });
 
   it("lets the digest quote only numbers that are in the data", () => {
@@ -108,6 +106,5 @@ describe("insights", () => {
     const data = JSON.stringify(digestData(computeInsights(st.db, "24h", CHECKS)));
     expect(groundedNumbers("lookup_order failed on 1 of 1 calls (100 percent).", data)).toBe(true);
     expect(groundedNumbers("Problems rose 340% this week.", data)).toBe(false);
-    st.close();
   });
 });

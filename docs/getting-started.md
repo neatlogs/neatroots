@@ -106,7 +106,7 @@ Rules are instant. Questions take as long as the model answering them: with a lo
 Checks are yes/no questions, so neatroots uses a decision model built for them. Pick one:
 
 - **Laya** (local): an open 421M-parameter model on this machine. Free and private; a one-time download of about 1.4 GB. It starts in shadow mode and takes over each question once it agrees with your LLM on 90% of 30 answers. `neatroots laya install` downloads it now; `neatroots laya skip` records that you don't want it.
-- **Jev cloud** (hosted, opt-in): TypeSafe's typed-decision API. The span content a question needs is sent to TypeSafe.
+- **Jev cloud** (hosted, opt-in): TypeSafe's typed-decision API. The span content a question needs is sent to TypeSafe. Credentials are removed first, as for a hosted LLM (`llm.external.redact`); a Jev server on this machine gets the original text.
 
 Without either, your LLM answers every question, which works but is slower. To use Jev cloud:
 
@@ -158,7 +158,7 @@ const client = neatlogs.wrapOpenAI(new OpenAI()); // use this client for your ca
 - `flush_interval=0.5` (`flushInterval` in TypeScript) sends spans every half second, so neatroots can check a run while it is still going.
 - In production, unset `NEATLOGS_ENDPOINT` and the same code sends to Neatlogs Cloud.
 
-In your agent's repository, `neatroots init --project refund-agent --write-env` writes the two variables to `.env` and adds a `.neatroots/checks/` folder for checks your team shares. To check the path end to end with the SDK's own doctor: `python -m neatlogs doctor --probe`.
+In your agent's repository, `neatroots init --project refund-agent --write-env` writes the two variables to `.env` and adds a `.neatroots/checks/` folder for checks your team shares. The SDKs read the environment, not `.env`, so load it when you start the agent: `set -a; . ./.env; set +a` in the shell, `dotenv run -- python agent.py` (or `load_dotenv()` before `neatlogs.init`), or `node --env-file=.env agent.js`. Without that the agent runs normally and neatroots records nothing. To check the path end to end with the SDK's own doctor: `python -m neatlogs doctor --probe`.
 
 ### Other ways in
 
@@ -279,7 +279,7 @@ For TypeScript, run `npm install ~/.neatroots/app/steer/ts` and see [steering.md
 
 Limits:
 - At most one note per LLM call and three per run.
-- Only rules you write with `action: halt` can stop a run.
+- Only rules you write with `action: halt` can stop a run, and only while steering is on for the project.
 - `neatroots steering stop` turns steering off everywhere at once. The sidebar switch does the same.
 
 ## 9. Coding agents
@@ -334,7 +334,7 @@ Importing goes the other way and needs a different credential: a Neatlogs servic
 | --- | --- | --- |
 | Collector, rules, Laya, local LLM, storage, app, MCP | On | Nothing; all local |
 | Hosted LLM | Off | Run content each LLM task needs, minus secrets, to the provider you choose |
-| Jev cloud | Off | Span content a question needs, to api.typesafe.ai |
+| Jev cloud | Off | Span content a question needs, credentials removed, to api.typesafe.ai |
 | Neatlogs Cloud forward | Off | Runs you send or a project you forward, redacted first, to ingest.neatlogs.com |
 | Neatlogs Cloud import | Off | Requests to app.neatlogs.com with your service-account token |
 | Coding agents in the app | Off | Whatever Claude Code or Codex sends to their providers, as when you run them yourself |

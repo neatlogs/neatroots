@@ -1,15 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Store } from "../src/store/db.js";
 import { loadTrace } from "../src/engine/trace.js";
 import { evaluateRule } from "../src/checks/rules.js";
 import { parseChecks } from "../src/checks/registry.js";
 import type { RuleCheck } from "../src/checks/types.js";
-import { batch, hex, s, span, tmpHome, toolSpan } from "./helpers.js";
+import { batch, closeTrackedStores, hex, s, span, tmpHome, trackedStore, toolSpan } from "./helpers.js";
 
 const homes: string[] = [];
 afterEach(() => {
+  closeTrackedStores();
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 const check = (parseChecks(fs.readFileSync(new URL("../library/rules.yaml", import.meta.url), "utf8")).checks as RuleCheck[]).find(
@@ -20,7 +20,7 @@ const check = (parseChecks(fs.readFileSync(new URL("../library/rules.yaml", impo
 function fires(answer: string): boolean {
   const h = tmpHome();
   homes.push(h);
-  const st = new Store(path.join(h, "data"));
+  const st = trackedStore(path.join(h, "data"));
   const t = hex(16);
   const root = hex(8);
   st.ingest([

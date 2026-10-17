@@ -20,9 +20,13 @@ function fires(output: string): boolean {
   const h = tmpHome();
   homes.push(h);
   const st = new Store(path.join(h, "data"));
-  const t = hex(16);
-  st.ingest([batch([llmSpan(t, hex(8), { user: "hi", out: output })])]);
-  return evaluateRule(check, loadTrace(st, t), false) !== null;
+  try {
+    const t = hex(16);
+    st.ingest([batch([llmSpan(t, hex(8), { user: "hi", out: output })])]);
+    return evaluateRule(check, loadTrace(st, t), false) !== null;
+  } finally {
+    st.close();
+  }
 }
 
 const KEYS = [

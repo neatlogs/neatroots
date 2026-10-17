@@ -106,4 +106,23 @@ describe("checkFiles", () => {
     });
     expect({ tp, fn, fp, tn }).toEqual({ tp: 60, fn: 0, fp: 0, tn: 60 });
   });
+
+  it("gives each file its own verdict when two files share a trace id, in either order", () => {
+    const checks = path.join(dir, "same-trace-checks");
+    fs.mkdirSync(checks, { recursive: true });
+    fs.writeFileSync(path.join(checks, "bad-name.yaml"), "id: bad-name\nkind: rule\nrule: {type: match, field: name, pattern: '^bad$'}\n");
+    const one = (file: string, spanId: string, name: string) => {
+      const span = { traceId: "0123456789abcdef0123456789abcdef", spanId, name, kind: 1, startTimeUnixNano: "1700000000000000000", endTimeUnixNano: "1700000000010000000", attributes: [], status: { code: 1 } };
+      const p = path.join(dir, file);
+      fs.writeFileSync(p, JSON.stringify({ resourceSpans: [{ resource: { attributes: [] }, scopeSpans: [{ scope: { name: "t" }, spans: [span] }] }] }));
+      return p;
+    };
+    const bad = one("same-bad.json", "0123456789abcdef", "bad");
+    const clean = one("same-clean.json", "fedcba9876543210", "clean");
+    const verdicts = (files: string[]) =>
+      checkFiles(files, { dirs: [checks], only: ["bad-name"] }).runs.map((r) => [path.basename(r.file), r.findings.flatMap((f) => f.evidence_span_ids)]);
+    expect(verdicts([clean])).toEqual([["same-clean.json", []]]);
+    expect(verdicts([bad, clean])).toEqual([["same-bad.json", ["0123456789abcdef"]], ["same-clean.json", []]]);
+    expect(verdicts([clean, bad])).toEqual([["same-clean.json", []], ["same-bad.json", ["0123456789abcdef"]]]);
+  });
 });

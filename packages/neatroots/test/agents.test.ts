@@ -5,10 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { agentBin, signInHelp } from "../src/agents/chat.js";
 
 let home: string;
-const saved = { HOME: process.env.HOME, PATH: process.env.PATH, NEATROOTS_CODEX_BIN: process.env.NEATROOTS_CODEX_BIN };
+const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, PATH: process.env.PATH, NEATROOTS_CODEX_BIN: process.env.NEATROOTS_CODEX_BIN };
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-agents-"));
   process.env.HOME = home;
+  if (process.platform === "win32") process.env.USERPROFILE = home;
   process.env.PATH = "/usr/bin:/bin";
   delete process.env.NEATROOTS_CODEX_BIN;
 });
@@ -28,11 +29,20 @@ function fakeBin(dir: string, name: string): string {
 }
 
 describe("finding a coding agent's CLI", () => {
-  it("looks past the PATH: an npm install under any nvm Node, or ~/.local/bin", () => {
+  // These discovery fixtures use POSIX executable scripts and shell PATH lookup.
+  it.skipIf(process.platform === "win32")("looks past the PATH: an npm install under any nvm Node, or ~/.local/bin", () => {
     const nvm = fakeBin(path.join(home, ".nvm", "versions", "node", "v24.14.1", "bin"), "codex");
     expect(agentBin("codex")).toBe(nvm);
     const local = fakeBin(path.join(home, ".local", "bin"), "codex");
     expect(agentBin("codex")).toBe(local);
+  });
+
+  it("accepts an explicit native executable override without PATH lookup", () => {
+    process.env.PATH = "";
+    process.env.NEATROOTS_CODEX_BIN = process.execPath;
+    expect(agentBin("codex")).toBe(process.execPath);
+    process.env.NEATROOTS_CODEX_BIN = path.join(home, "missing");
+    expect(agentBin("codex")).toBeNull();
   });
 
   const chatgpt = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex";
@@ -40,7 +50,7 @@ describe("finding a coding agent's CLI", () => {
     expect(agentBin("codex")).toBe(chatgpt);
   });
 
-  it("prefers the PATH, and NEATROOTS_CODEX_BIN over everything", () => {
+  it.skipIf(process.platform === "win32")("prefers the PATH, and NEATROOTS_CODEX_BIN over everything", () => {
     const onPath = fakeBin(path.join(home, "bin"), "codex");
     fakeBin(path.join(home, ".local", "bin"), "codex");
     process.env.PATH = `${path.join(home, "bin")}:/usr/bin:/bin`;

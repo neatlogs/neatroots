@@ -26,6 +26,8 @@ import { log } from "./util/log.js";
 
 const program = new Command();
 program.name("neatroots").description("neatroots: local, private checks for AI agents while they run").version(VERSION);
+// Root options only before the command, so `neatroots update --version <tag>` reaches update.
+program.enablePositionalOptions();
 
 // ------------------------------------------------------------------- start
 
@@ -155,6 +157,13 @@ program
       set("NEATLOGS_API_KEY", "neatroots-local", true);
       fs.writeFileSync(envPath, text);
       console.log(`✓ .env points the Neatlogs SDK at neatroots`);
+      // The SDKs read the environment, not .env, so without one of these the agent sends nothing (#49).
+      console.log(
+        `→ the SDK doesn't read .env on its own; load it when you start the agent:\n` +
+          `    set -a; . ./.env; set +a          # then run it as usual\n` +
+          `    dotenv run -- python agent.py     # or python-dotenv's load_dotenv() before neatlogs.init\n` +
+          `    node --env-file=.env agent.js`,
+      );
     } else {
       console.log(`→ point the Neatlogs SDK at neatroots (or rerun with --write-env):\n    ${envLines.join("\n    ")}`);
     }
