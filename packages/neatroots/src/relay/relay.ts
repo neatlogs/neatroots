@@ -4,7 +4,7 @@ import type { Roots } from "../core.js";
 import { encodeTraceRequest } from "../otlp/codec.js";
 import { plainToAny, type KeyValue, type OtlpSpan, type ResourceSpansBatch } from "../otlp/types.js";
 import { COMPLETE_MARKER } from "../semantics/view.js";
-import { compileRules, redactBatches, type RedactionHit } from "./redact.js";
+import { compileRules, redactBatches, RedactionPatternError, type RedactionHit } from "./redact.js";
 import { getCloudKey } from "./keychain.js";
 import { projectSettings } from "../config.js";
 import type { ForwardRow } from "../types.js";
@@ -200,7 +200,8 @@ export class Relay {
     try {
       enc = this.encode(traceIds);
     } catch (err) {
-      return this.roots.store.insertForward({ ...base, status: "error", http_status: null, span_count: 0, bytes: 0, redactions: 0, error: `encode failed: ${(err as Error).message}` });
+      const error = err instanceof RedactionPatternError ? err.message : `encode failed: ${(err as Error).message}`;
+      return this.roots.store.insertForward({ ...base, status: "error", http_status: null, span_count: 0, bytes: 0, redactions: 0, error });
     }
     const send = async (body: Uint8Array) => {
       const gz = zlib.gzipSync(body);

@@ -11,18 +11,31 @@ const escape = value => String(value).replace(/%/g, '%25').replace(/\r/g, '%0D')
 const id = (value, pattern) => typeof value === 'string' && pattern.test(value) ? value : '[withheld]';
 const traceId = value => id(value, /^[a-fA-F0-9]{32}$/);
 const spanId = value => id(value, /^[a-fA-F0-9]{16}$/);
-const checkId = value => id(value, /^[a-z][a-z0-9-]{0,79}$/);
+const checkId = value => id(value, /^[a-z0-9][a-z0-9_.-]{0,79}$/);
+
+function noSymlinkStat(file) {
+  // Preserve dot/parent components until each preceding component is checked.
+  if (!path.isAbsolute(file)) file = `${process.cwd()}${path.sep}${file}`;
+  const root = path.parse(file).root;
+  let current = root;
+  let stat = fs.lstatSync(current);
+  for (const part of file.slice(root.length).split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    stat = fs.lstatSync(current);
+    if (stat.isSymbolicLink()) throw new Error('Symbolic links are not supported');
+  }
+  return stat;
+}
 
 export function filesFor(inputs) {
   const files = new Set();
-  function visit(file, explicit = false) {
-    const stat = fs.lstatSync(file);
+  function visit(file, explicit = false, stat = fs.lstatSync(file)) {
     if (stat.isSymbolicLink()) throw new Error('Symbolic links are not supported');
     if (stat.isDirectory()) {
       for (const entry of fs.readdirSync(file).sort()) visit(path.join(file, entry));
     } else if (stat.isFile() && (explicit || /\.jsonl?$/i.test(file))) files.add(path.resolve(file));
   }
-  for (const file of lines(inputs)) visit(path.resolve(file), true);
+  for (const file of lines(inputs)) visit(path.resolve(file), true, noSymlinkStat(file));
   if (!files.size) throw new Error('No saved runs');
   return [...files];
 }
@@ -35,7 +48,10 @@ export function run(env = process.env, execute = spawnSync, write = console.log)
     const files = filesFor(env.INPUT_RUNS);
     const args = ['check', '--json'];
     if (env.INPUT_ONLY?.trim()) args.push('--only', env.INPUT_ONLY.trim());
-    const dirs = lines(env.INPUT_CHECKS).map(dir => path.resolve(dir));
+    const dirs = lines(env.INPUT_CHECKS).map(dir => {
+      if (!noSymlinkStat(dir).isDirectory()) throw new Error('Expected a check directory');
+      return path.resolve(dir);
+    });
     if (dirs.length) args.push('--checks', ...dirs);
     // -- ends the variadic --checks option and prevents paths becoming flags.
     args.push('--', ...files);

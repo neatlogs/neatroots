@@ -18,7 +18,7 @@ test('installer ignores ambient source, bundle, repo and runtime overrides', () 
 });
 
 function fixture(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'action-test-'));
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'action-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   fs.mkdirSync(path.join(dir, 'runs'));
   fs.writeFileSync(path.join(dir, 'runs', 'trace.json'), '{}');
@@ -35,14 +35,16 @@ for (const status of [0, 1, 2]) test(`preserves CLI exit ${status} and contains 
 });
 test('uses argument arrays and terminates variadic checks before file paths', t => {
   const { env, dir } = fixture(t);
-  env.INPUT_CHECKS = 'checks with spaces\nother';
+  const dirs = ['checks with spaces', 'other'].map(name => path.join(dir, name));
+  dirs.forEach(dir => fs.mkdirSync(dir));
+  env.INPUT_CHECKS = dirs.join('\n');
   env.INPUT_ONLY = 'hit,$(touch unwanted)';
   assert.equal(run(env, (binary, args, opts) => {
     assert.equal(binary, process.execPath);
     assert.equal(args[0], path.join(dir, 'neatroots-action-install', 'src', 'packages', 'neatroots', 'dist', 'cli.js'));
     assert.equal(opts.shell, false);
     assert.equal(args[4], env.INPUT_ONLY);
-    assert.deepEqual(args.slice(5, 9), ['--checks', path.resolve('checks with spaces'), path.resolve('other'), '--']);
+    assert.deepEqual(args.slice(5, 9), ['--checks', ...dirs, '--']);
     assert.equal(args[9], path.join(dir, 'runs', 'trace.json'));
     assert.notEqual(opts.env.NEATROOTS_HOME, env.NEATROOTS_HOME);
     return { status: 0, stdout: '{"runs":[],"rules":[],"errors":[]}' };
@@ -68,4 +70,53 @@ test('withholds malformed identifiers and workflow command characters', t => {
   assert.equal(run(env, () => ({ status: 1, stdout: JSON.stringify({ rules: [], errors: [], runs: [{ trace_id: 'SECRET\n::error::injected', findings: [{ check_id: 'SECRET|<script>', evidence_span_ids: ['SECRET'] }] }] }) }), x => output.push(x)), 1);
   assert.ok(!output.join('').includes('SECRET'));
   assert.ok(!fs.readFileSync(env.GITHUB_STEP_SUMMARY, 'utf8').includes('<script>'));
+});
+
+for (const invalid of ['missing', 'file', 'mixed']) test(`rejects ${invalid} explicit check directories before CLI execution`, t => {
+  const { env, dir } = fixture(t);
+  const missing = path.join(dir, 'SECRET-missing-checks');
+  const regular = path.join(dir, 'SECRET-file');
+  fs.writeFileSync(regular, 'SECRET');
+  env.INPUT_CHECKS = invalid === 'missing' ? missing : invalid === 'file' ? regular : `${dir}\n${missing}`;
+  let executed = false;
+  const output = [];
+  assert.equal(run(env, () => { executed = true; return { status: 0, stdout: '{"runs":[],"rules":[],"errors":[]}' }; }, x => output.push(x)), 2);
+  assert.equal(executed, false);
+  assert.ok(!(output.join('') + fs.readFileSync(env.GITHUB_STEP_SUMMARY, 'utf8')).includes('SECRET'));
+});
+
+test('reports schema-safe check IDs and retains identifier bounds', t => {
+  const { env } = fixture(t);
+  const output = [];
+  const safe = ['pii_leak', 'a.rule', '2fa-check', 'a'.repeat(80)];
+  const unsafe = ['a'.repeat(81), '_leading', '.leading', 'bad\n::error::INJECT', 'bad|<script>'];
+  const findings = [...safe, ...unsafe].map(check_id => ({ check_id, evidence_span_ids: [] }));
+  assert.equal(run(env, () => ({ status: 1, stdout: JSON.stringify({ rules: [], errors: [], runs: [{ trace_id: 'a'.repeat(32), findings }] }) }), x => output.push(x)), 1);
+  const summary = fs.readFileSync(env.GITHUB_STEP_SUMMARY, 'utf8');
+  for (const check of safe) {
+    assert.ok(output.some(line => line.includes(`check ${check};`)), check);
+    assert.ok(summary.includes(`| ${check} |`), check);
+  }
+  for (const check of unsafe) assert.ok(!(output.join('') + summary).includes(check), check);
+  assert.equal(output.filter(line => line.includes('check [withheld];')).length, unsafe.length);
+});
+
+for (const input of ['file', 'directory', 'checks', 'parent traversal']) test(`rejects symlink ancestors for explicit ${input} inputs`, t => {
+  const { env, dir } = fixture(t);
+  const target = path.join(dir, 'target');
+  fs.mkdirSync(path.join(target, 'sub'), { recursive: true });
+  fs.writeFileSync(path.join(target, 'sub', 'run.json'), '{}');
+  const link = path.join(dir, 'linked');
+  fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+  if (input === 'checks') {
+    env.INPUT_CHECKS = path.join(link, 'sub');
+    let executed = false;
+    assert.equal(run(env, () => { executed = true; return { status: 0, stdout: '{"runs":[],"rules":[],"errors":[]}' }; }, () => {}), 2);
+    assert.equal(executed, false);
+  } else if (input === 'parent traversal') {
+    // Keep the link component in the input: path.join would erase it.
+    assert.throws(() => filesFor(`${link}${path.sep}..${path.sep}runs`), /Symbolic links/);
+  } else {
+    assert.throws(() => filesFor(path.join(link, 'sub', ...(input === 'file' ? ['run.json'] : []))), /Symbolic links/);
+  }
 });
