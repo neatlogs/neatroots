@@ -57,6 +57,13 @@ describe("secret-in-tool-output", () => {
     expect(run("{}", "here is sk-abcdefghijklmnopqrstuvwxyz123456")).toBeNull();
   });
 
+  it("does not flag ordinary hyphenated words ending in sk (issue #356)", () => {
+    expect(run("I created branch task-add-user-authentication-flow")).toBeNull();
+    expect(run("Saved the file as risk-assessment-report-q3-2026")).toBeNull();
+    expect(run("Set the kiosk-mode-configuration-for-lobby")).toBeNull();
+    expect(run("Added the class desk-top-navigation-container")).toBeNull();
+  });
+
   it("labeled smoke: 120 generated tool results, no misses and no false alarms", () => {
     let tp = 0, fn = 0, fp = 0, tn = 0;
     for (let i = 0; i < 120; i++) {
