@@ -411,7 +411,7 @@ export class Store {
   readonly blobs: BlobStore;
   private readonly searchIds: SearchIds;
   private seq = 0;
-  private trustFlush?: () => void;
+  private readonly trustFlushes = new Set<() => void>();
   readonly dir: string;
   readonly file: string;
 
@@ -439,7 +439,8 @@ export class Store {
   }
 
   close(): void {
-    this.trustFlush?.();
+    for (const flush of this.trustFlushes) flush();
+    this.trustFlushes.clear();
     this.db.close();
   }
 
@@ -1443,29 +1444,9 @@ export class Store {
     };
   }
 
-  /** Laya-vs-LLM agreement per question, persisted so trust survives restarts. */
-  trustStore(): import("../models/decision.js").TrustStore {
-    let data: Record<string, { n: number; agree: number }> = json(this.getMeta("laya_trust"), {});
-    let timer: NodeJS.Timeout | undefined;
-    const persist = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => this.setMeta("laya_trust", JSON.stringify(data)), 1000);
-      timer.unref();
-    };
-    return {
-      get: (q) => data[q] ?? { n: 0, agree: 0 },
-      record: (q, agreed) => {
-        const cur = data[q] ?? { n: 0, agree: 0 };
-        data = { ...data, [q]: { n: cur.n + 1, agree: cur.agree + (agreed ? 1 : 0) } };
-        persist();
-      },
-      all: () => ({ ...data }),
-    };
-  }
-
   /** Laya-vs-LLM agreement per question definition, persisted so trust survives restarts. */
   trustStore(): TrustStore {
-    this.trustFlush?.();
+    for (const flush of this.trustFlushes) flush();
     const initial = json<Record<string, unknown>>(this.getMeta("laya_trust"), {});
     let timer: NodeJS.Timeout | undefined;
     let pending: unknown;
@@ -1475,11 +1456,33 @@ export class Store {
         timer = undefined;
       }
       if (pending !== undefined && this.db.open) {
-        this.setMeta("laya_trust", JSON.stringify(pending));
+        const existing = json<Record<string, Record<string, unknown>>>(this.getMeta("laya_trust"), {});
+        const updated = pending as Record<string, Record<string, unknown>>;
+        const merged: Record<string, unknown> = { ...existing };
+        for (const [k, v] of Object.entries(updated)) {
+          if (!merged[k]) {
+            merged[k] = v;
+          } else {
+            const m = merged[k] as Record<string, unknown>;
+            const existingDefs = (m.defs ?? {}) as Record<string, { n: number; agree: number }>;
+            const newDefs = (v.defs ?? {}) as Record<string, { n: number; agree: number }>;
+            const combinedDefs = { ...existingDefs };
+            for (const [sig, st] of Object.entries(newDefs)) {
+              const cur = combinedDefs[sig] ?? { n: 0, agree: 0 };
+              combinedDefs[sig] = { n: Math.max(cur.n, st.n), agree: Math.max(cur.agree, st.agree) };
+            }
+            merged[k] = {
+              ...m,
+              activeSig: v.activeSig ?? m.activeSig,
+              defs: combinedDefs,
+            };
+          }
+        }
+        this.setMeta("laya_trust", JSON.stringify(merged));
         pending = undefined;
       }
     };
-    this.trustFlush = writeNow;
+    this.trustFlushes.add(writeNow);
     return createTrustStore(initial, (data) => {
       pending = data;
       clearTimeout(timer);
