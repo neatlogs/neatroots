@@ -10,6 +10,7 @@ import { projectSettings, type SteeringMode } from "../config.js";
 import { getCloudKey, setCloudKey, deleteCloudKey, getCloudToken, getSecret } from "../relay/keychain.js";
 import { mountModelsApi } from "./api-models.js";
 import { mountChecksApi } from "./api-checks.js";
+import { mountReviewsApi } from "./api-reviews.js";
 import { mountInsightsApi } from "./api-insights.js";
 import { mountAgentsApi } from "./api-agents.js";
 import { importSource, mountExploreApi } from "./api-explore.js";
@@ -128,6 +129,7 @@ export function mountApi(app: Hono, roots: Roots): void {
   const engine = roots.engine;
   mountModelsApi(app, roots);
   mountChecksApi(app, roots);
+  mountReviewsApi(app, roots);
   mountInsightsApi(app, roots);
   mountAgentsApi(app);
   mountExploreApi(app, roots);
