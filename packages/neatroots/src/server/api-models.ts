@@ -127,6 +127,7 @@ export function mountModelsApi(app: Hono, roots: Roots): void {
   app.post("/api/classifier/laya", async (c) => {
     const b = await body<{ action?: string }>(c);
     if (b.action === "install") {
+      roots.persistRuntimeSetting("layaEnabled");
       roots.config.classifier.laya.enabled = true;
       roots.config.classifier.laya.consent = "yes";
       roots.saveConfig();
