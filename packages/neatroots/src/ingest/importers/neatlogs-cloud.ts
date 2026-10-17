@@ -202,8 +202,8 @@ export function neatlogsCloudSource(base: () => string, auth: () => Promise<Clou
           ids.push(...page.traces.map((t) => t.traceId));
           cursor = page.nextCursor ?? undefined;
         } while (cursor && ids.length < o.limit);
-        ids = ids.slice(0, o.limit);
       }
+      ids = ids.slice(0, o.limit);
       let failedInARow = 0;
       for (const id of ids) {
         let read: { nodes: SpanNode[]; workflow: string };
