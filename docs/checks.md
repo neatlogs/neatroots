@@ -90,9 +90,20 @@ is the expected level, not necessarily a whole number.
   Plans are cached per workflow and redone when new tools appear.
 - **You**: describe a concern in the app (Checks → New check) and the LLM drafts the question; preview
   it on recent runs before saving.
-- **Coding agents**: `create_check` and `preview_check` over MCP. A coding agent can save `flag` rules and
-  questions, but not halt rules: it can't create one, turn a check into one, or change yours. Switch a
-  rule to `action: halt` yourself in the app or CLI.
+- **Coding agents**: `create_check` and `preview_check` over MCP. Saved proposals for `flag` rules and
+  questions appear in Checks for approval; `save=false` remains a draft only. A coding agent cannot
+  create a halt rule, turn a check into one, or change yours. Switch a rule to `action: halt` yourself
+  in the app or CLI.
+
+MCP-created checks are inactive until a person approves them in the local Checks page. A pending edit does not change the active check; the existing version keeps running until approval, and rejection discards only the proposal. Approved checks retain their MCP origin in the Checks list. UI saves made by a person remain immediate; the existing CLI `checks` commands continue to list or validate files. Approve or reject the exact revision shown: if the proposal or current check changes, refresh and review again. Approval applies to that definition and target file; it is not a blanket grant for later agent edits. Previously saved halt proposals cannot be approved; save halt rules yourself in the app or CLI.
+
+MCP origin follows the check ID when a file is renamed, moved between registered check directories,
+or shadowed by another file with the same ID. The approval still requires the exact definition and
+path, so a moved or changed version stays inactive until reviewed again. A same-ID collision is
+treated conservatively as MCP-origin content; save it explicitly in the app to take ownership as a
+human-authored check. A successful human save clears the origin and approval metadata; a failed save
+does not. Legacy file-backed MCP records follow the same rule, but never restore a missing file or
+load one from an unregistered directory. Shipped library checks retain their library identity.
 
 ## Findings
 

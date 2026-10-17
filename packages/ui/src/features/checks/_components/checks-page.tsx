@@ -12,6 +12,7 @@ import { useCheckActions, useChecks } from "../_services/check-queries";
 import { CheckEditor } from "./check-editor";
 import { CheckSheet } from "./check-sheet";
 import { ChecksTable } from "./checks-table";
+import { McpCheckApprovals } from "./mcp-check-approvals";
 
 type Group = "all" | "rules" | "yours" | "planner" | "library";
 
@@ -67,6 +68,7 @@ export function ChecksPage() {
         </div>
       }
     >
+      {!!data?.pending_mcp_checks?.length && <McpCheckApprovals proposals={data.pending_mcp_checks} userDir={data.user_dir} />}
       {!!data?.errors.length && (
         <div role="alert" className="mx-6 mt-3 flex max-h-32 shrink-0 flex-col gap-1 overflow-y-auto rounded-lg border border-danger-border bg-danger-surface px-4 py-3">
           <span className="text-sm font-medium text-danger-fg">Some check files didn't load</span>

@@ -48,6 +48,7 @@ describe("create_check over MCP (#256)", () => {
     expect(r.isError).toBe(true);
     expect(r.content[0].text).toMatch(/halt rules must be created or enabled by you in the app or CLI/);
     expect(tb.roots.checks.get("mcp-halt")).toBeUndefined();
+    expect(tb.roots.checks.pendingMcpCheck("mcp-halt")).toBeUndefined();
     expect(fs.existsSync(userFile(tb, "mcp-halt"))).toBe(false);
   });
 
@@ -62,6 +63,13 @@ describe("create_check over MCP (#256)", () => {
   it("saves a flag rule, but refuses to turn it into a halt rule", async () => {
     const { tb, mcp } = await setup();
     expect((await call(mcp, { check: rule("mcp-flag", "flag") })).isError).toBeFalsy();
+    expect(tb.roots.checks.get("mcp-flag")).toBeUndefined();
+    const proposal = tb.roots.checks.pendingMcpCheck("mcp-flag")!;
+    expect(proposal.check).toMatchObject({ action: "flag" });
+    const approved = await fetch(`${tb.url}/api/checks/mcp-flag/approve`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ revision: proposal.revision }),
+    });
+    expect(approved.status).toBe(200);
     expect((tb.roots.checks.get("mcp-flag")?.check as { action?: string }).action).toBe("flag");
     const r = await call(mcp, { check: rule("mcp-flag", "halt") });
     expect(r.isError).toBe(true);
@@ -80,6 +88,7 @@ describe("create_check over MCP (#256)", () => {
       expect(r.isError).toBe(true);
     }
     expect(fs.readFileSync(userFile(tb, "user-halt"), "utf8")).toBe(before);
+    expect(tb.roots.checks.pendingMcpCheck("user-halt")).toBeUndefined();
   });
 });
 

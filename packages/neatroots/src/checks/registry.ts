@@ -1,10 +1,12 @@
 import fs from "node:fs";
+import { newId, sha256 } from "../util/ids.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { AnyCheck, isQuestion, isRule, type Check, type CheckSource, type LoadedCheck } from "./types.js";
-import type { Store } from "../store/db.js";
+import type { McpCheckProposalRow, Store } from "../store/db.js";
 import { log } from "../util/log.js";
+import { assertNoHaltFromAgent } from "./agent-policy.js";
 
 function findLibraryDir(): string {
   let dir = path.dirname(fileURLToPath(import.meta.url));
@@ -80,6 +82,20 @@ export function checkDirState(dir: string): { ok: true } | { ok: false; missing:
   }
 }
 
+export interface PendingMcpCheck {
+  check: Check;
+  revision: string;
+  created_ms: number;
+  target_dir: string | null;
+  has_active_version: boolean;
+}
+
+type CheckDestinationSnapshot =
+  | { kind: "missing" }
+  | { kind: "file"; bytes: Buffer }
+  | { kind: "other" }
+  | { kind: "unreadable"; code: string };
+
 /** Parses YAML holding one check, a list of checks, or `{checks: [...]}`. */
 export function parseChecks(text: string): { checks: Check[]; errors: { id?: string; message: string }[] } {
   const checks: Check[] = [];
@@ -153,7 +169,7 @@ export function checkToYaml(check: Check): string {
 
 /**
  * All checks in force: the shipped library, then ~/.neatroots/checks, then each project's
- * .neatroots/checks, then checks written by the planner or over MCP. A later source replaces
+ * .neatroots/checks, then planner checks and MCP checks approved in the Checks page. A later source replaces
  * an earlier check with the same id.
  */
 export class CheckRegistry {
@@ -197,19 +213,31 @@ export class CheckRegistry {
         }
         const { checks, errors: errs } = parseChecks(text);
         for (const e of errs) errors.push({ path: p, ...e });
-        for (const c of checks) next.set(c.id, { check: c, source, path: p });
+        for (const c of checks) {
+          const origin = this.store.getMeta(`mcp_origin:${c.id}`);
+          // Provenance follows the ID across moves and shadows; only a human save clears it.
+          const authoredByMcp = source !== "library" && origin !== undefined;
+          next.set(c.id, { check: c, source: authoredByMcp ? "mcp" : source, path: p });
+        }
       }
     };
     loadDir(this.libraryDir, "library");
     loadDir(this.userDir, "user");
     for (const d of this.projectDirs()) loadDir(d, "project");
     const rows = this.store.db
-      .prepare("SELECT id, source, body FROM checks WHERE source IN ('planner', 'mcp')")
-      .all() as { id: string; source: CheckSource; body: string }[];
+      .prepare("SELECT id, source, path, body FROM checks WHERE source IN ('planner', 'mcp')")
+      .all() as { id: string; source: CheckSource; path: string | null; body: string }[];
     for (const r of rows) {
-      if (next.has(r.id)) continue;
+      const loaded = next.get(r.id);
+      if (r.source === "mcp" && r.path) {
+        // Approved MCP checks stay file-backed, while this row preserves their origin. The file
+        // remains the source of truth; a missing or unregistered file must not revive a stale copy.
+        if (loaded?.path && loaded.source !== "library") next.set(r.id, { ...loaded, source: "mcp" });
+        continue;
+      }
+      if (loaded) continue;
       const { checks } = parseChecks(r.body);
-      if (checks[0]) next.set(r.id, { check: checks[0], source: r.source, path: null });
+      if (checks[0]) next.set(r.id, { check: checks[0], source: r.source, path: r.path });
     }
     for (const [id, lc] of next) {
       this.store.upsertCheckRow({ id, kind: lc.check.kind === "rule" ? "rule" : "question", source: lc.source, path: lc.path, body: checkToYaml(lc.check), enabled: lc.check.enabled });
@@ -230,7 +258,7 @@ export class CheckRegistry {
 
   enabled(): LoadedCheck[] {
     const stats = this.store.checkStats();
-    return this.all().filter((c) => c.check.enabled !== false && (stats[c.check.id]?.enabled ?? 1) === 1);
+    return this.all().filter((c) => (c.source !== "mcp" || this.isApprovedMcp(c.check.id)) && c.check.enabled !== false && (stats[c.check.id]?.enabled ?? 1) === 1);
   }
 
   rules(): LoadedCheck[] {
@@ -245,6 +273,150 @@ export class CheckRegistry {
     return this.all().filter((c) => c.source === "library" && isQuestion(c.check));
   }
 
+  private fromMcpProposal(row: McpCheckProposalRow): PendingMcpCheck | undefined {
+    if (row.target_dir === "") return undefined; // Legacy blank targets must be resubmitted for review.
+    const { checks } = parseChecks(row.body);
+    const check = checks.find((c) => c.id === row.id);
+    if (!check) return undefined;
+    return { check, revision: row.revision, created_ms: row.created_ms, target_dir: row.target_dir, has_active_version: this.enabled().some((c) => c.check.id === row.id) };
+  }
+
+  pendingMcp(): PendingMcpCheck[] {
+    return this.store.listMcpCheckProposals().flatMap((row) => {
+      const proposal = this.fromMcpProposal(row);
+      return proposal ? [proposal] : [];
+    });
+  }
+
+  pendingMcpCheck(id: string): PendingMcpCheck | undefined {
+    const row = this.store.getMcpCheckProposal(id);
+    return row ? this.fromMcpProposal(row) : undefined;
+  }
+
+  proposeMcp(check: Check, targetDir: string | null): PendingMcpCheck {
+    if (targetDir === "") targetDir = null;
+    const parsed = AnyCheck.parse(check) as Check;
+    this.reload();
+    const active = this.get(parsed.id);
+    targetDir ??= active?.path && active.source !== "library" ? path.dirname(active.path) : this.userDir;
+    assertNoHaltFromAgent(parsed, active?.check);
+    if (active?.path && active.source !== "library" && targetDir && path.resolve(targetDir) !== path.resolve(path.dirname(active.path))) throw new Error("MCP edits must target the active check directory");
+    this.store.upsertMcpCheckProposal(parsed.id, checkToYaml(parsed), targetDir, newId("proposal"), this.approvalFingerprint(parsed.id, targetDir, parsed));
+    const proposal = this.pendingMcpCheck(parsed.id);
+    if (!proposal) throw new Error(`could not save MCP check proposal ${parsed.id}`);
+    return proposal;
+  }
+  private activeFingerprint(id: string): string {
+    const active = this.get(id);
+    return sha256(JSON.stringify(active ? [checkToYaml(active.check), active.path, active.source, this.store.checkStats()[id]?.enabled] : null));
+  }
+
+  private approvalDestination(id: string, targetDir: string | null, check: Check): string {
+    const active = this.get(id);
+    const dir = targetDir || this.userDir;
+    const canUpdateActive =
+      active?.path &&
+      (active.source === "user" || active.source === "project" || active.source === "mcp") &&
+      (!targetDir || path.resolve(path.dirname(active.path)) === path.resolve(dir)) &&
+      fs.existsSync(active.path);
+    if (canUpdateActive && active?.path) {
+      const existing = fs.readFileSync(active.path, "utf8");
+      if (replaceInYaml(existing, check) !== undefined) return active.path;
+    }
+    return path.join(dir, `${id}.yaml`);
+  }
+
+  private destinationSnapshot(file: string): CheckDestinationSnapshot {
+    try {
+      const stat = fs.lstatSync(file);
+      return stat.isFile() ? { kind: "file", bytes: fs.readFileSync(file) } : { kind: "other" };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return code === "ENOENT" ? { kind: "missing" } : { kind: "unreadable", code: code ?? "unknown" };
+    }
+  }
+
+  private destinationFingerprint(file: string, snapshot: CheckDestinationSnapshot): string {
+    const state = snapshot.kind === "file" ? [snapshot.kind, sha256(snapshot.bytes)] : snapshot.kind === "unreadable" ? [snapshot.kind, snapshot.code] : [snapshot.kind];
+    return sha256(JSON.stringify([path.resolve(file), state]));
+  }
+
+  private approvalFingerprint(id: string, targetDir: string | null, check: Check): string {
+    const destination = this.approvalDestination(id, targetDir, check);
+    const snapshot = this.destinationSnapshot(destination);
+    return JSON.stringify({ active: this.activeFingerprint(id), destination: this.destinationFingerprint(destination, snapshot) });
+  }
+
+  private saveApprovedMcp(check: Check, destination: string, snapshot: CheckDestinationSnapshot): LoadedCheck {
+    const parsed = AnyCheck.parse(check) as Check;
+    assertNoHaltFromAgent(parsed, this.get(parsed.id)?.check);
+    if (snapshot.kind === "other") throw new Error("approval target conflict; destination is not a regular file");
+    if (snapshot.kind === "unreadable") throw new Error("approval target conflict; destination cannot be read");
+    const text = snapshot.kind === "file" ? replaceInYaml(snapshot.bytes.toString("utf8"), parsed) : checkToYaml(parsed);
+    if (text === undefined) throw new Error("approval target conflict; existing destination content does not contain this check ID");
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    const originKey = `mcp_origin:${parsed.id}`;
+    const previousOrigin = this.store.getMeta(originKey);
+    this.store.setMeta(originKey, JSON.stringify([checkToYaml(parsed), path.resolve(destination)]));
+    try {
+      if (snapshot.kind === "missing") fs.writeFileSync(destination, text, { encoding: "utf8", flag: "wx" });
+      else fs.writeFileSync(destination, text, "utf8");
+    } catch (error) {
+      const exclusiveConflict = snapshot.kind === "missing" && (error as NodeJS.ErrnoException).code === "EEXIST";
+      // Restore only proven no-writes; changed or unreadable content retains MCP provenance.
+      if (exclusiveConflict || this.destinationFingerprint(destination, this.destinationSnapshot(destination)) === this.destinationFingerprint(destination, snapshot)) {
+        if (previousOrigin === undefined) this.store.db.prepare("DELETE FROM meta WHERE key = ?").run(originKey);
+        else this.store.setMeta(originKey, previousOrigin);
+      }
+      if (exclusiveConflict) throw new Error("approval target changed; destination was created during approval");
+      throw error;
+    }
+    this.store.upsertCheckRow({ id: parsed.id, kind: parsed.kind === "rule" ? "rule" : "question", source: "mcp", path: destination, body: checkToYaml(parsed), enabled: parsed.enabled });
+    this.reload();
+    return this.checks.get(parsed.id) ?? { check: parsed, source: "mcp", path: destination };
+  }
+
+  isApprovedMcp(id: string): boolean {
+    const active = this.get(id);
+    return !!active?.path && this.store.getMeta(`approved_mcp:${id}`) === sha256(JSON.stringify([checkToYaml(active.check), path.resolve(active.path)]));
+  }
+
+  approvePendingMcp(id: string, revision: string): LoadedCheck | undefined {
+    const proposal = this.pendingMcpCheck(id);
+    if (!proposal) return undefined;
+    if (!revision || proposal.revision !== revision) throw new Error("proposal changed; refresh and review it again");
+    this.reload();
+    const row = this.store.getMcpCheckProposal(id)!;
+    const dir = proposal.target_dir;
+    const destination = this.approvalDestination(id, dir, proposal.check);
+    const snapshot = this.destinationSnapshot(destination);
+    let expected: { active?: string; destination?: string } | undefined;
+    try { expected = JSON.parse(row.active_fingerprint) as { active?: string; destination?: string }; } catch { /* proposals from the previous fingerprint format must be reviewed again */ }
+    if (expected?.active !== this.activeFingerprint(id)) throw new Error("active check changed; ask the agent to submit a new proposal");
+    if (expected.destination !== this.destinationFingerprint(destination, snapshot)) throw new Error("approval target changed; review the destination and submit a new proposal");
+    if (dir && path.resolve(dir) !== path.resolve(this.userDir) && !this.projectDirs().some((p) => path.resolve(p) === path.resolve(dir))) throw new Error("approval target changed; submit a new proposal for a registered directory");
+    const state = checkDirState(dir || this.userDir);
+    if (!state.ok && !state.creatable) throw new Error(`approval target changed; that directory ${state.reason}`);
+    const beforeWrite = this.destinationSnapshot(destination);
+    if (expected.destination !== this.destinationFingerprint(destination, beforeWrite)) throw new Error("approval target changed; review the destination and submit a new proposal");
+    const approved = this.saveApprovedMcp(proposal.check, destination, beforeWrite);
+    if (!approved.path || checkToYaml(approved.check) !== checkToYaml(proposal.check)) throw new Error("approval target changed; another file shadows the proposed definition");
+    if (dir && path.resolve(path.dirname(approved.path)) !== path.resolve(dir)) throw new Error("approval target changed; another file shadows the proposed destination");
+    this.store.db.transaction(() => {
+      this.store.setMeta(`approved_mcp:${id}`, sha256(JSON.stringify([checkToYaml(approved.check), path.resolve(approved.path!)])));
+      this.store.deleteMcpCheckProposal(id);
+    })();
+    this.reload();
+    return this.get(id) ?? approved;
+  }
+
+  rejectPendingMcp(id: string, revision: string): boolean {
+    const pending = this.pendingMcpCheck(id);
+    if (!pending) return false;
+    if (!revision || pending.revision !== revision) throw new Error("proposal changed; refresh and review it again");
+    return this.store.deleteMcpCheckProposal(id);
+  }
+
   /**
    * Saves a check. `target` is "user" (~/.neatroots/checks), a project checks directory, or
    * "db" for planner-written checks that live only in the database until a person keeps them.
@@ -255,6 +427,15 @@ export class CheckRegistry {
     const parsed = AnyCheck.parse(check) as Check;
     if (source === "mcp") assertNoHaltFromAgent(parsed, this.checks.get(parsed.id)?.check);
     let p: string | null = null;
+    const recordOrigin = (file: string) => {
+      if (source === "mcp") {
+        // Commit provenance before touching the file: interrupted approval must never
+        // reload a partly saved MCP rule as a trusted human-authored rule.
+        this.store.setMeta(`mcp_origin:${parsed.id}`, JSON.stringify([checkToYaml(parsed), path.resolve(file)]));
+      } else {
+        this.store.db.prepare("DELETE FROM meta WHERE key IN (?, ?)").run(`mcp_origin:${parsed.id}`, `approved_mcp:${parsed.id}`);
+      }
+    };
     if (target === "db") {
       this.store.upsertCheckRow({ id: parsed.id, kind: parsed.kind === "rule" ? "rule" : "question", source, path: null, body: checkToYaml(parsed) });
     } else {
@@ -264,21 +445,25 @@ export class CheckRegistry {
       const current = this.checks.get(parsed.id);
       const inPlace =
         current?.path &&
-        (current.source === "user" || current.source === "project") &&
+        (current.source === "user" || current.source === "project" || current.source === "mcp") &&
         (target === "user" || path.resolve(path.dirname(current.path)) === path.resolve(dir)) &&
         fs.existsSync(current.path)
           ? replaceInYaml(fs.readFileSync(current.path, "utf8"), parsed)
           : undefined;
       if (inPlace !== undefined) {
         p = current!.path!;
+        if (source === "mcp") recordOrigin(p);
         fs.writeFileSync(p, inPlace, "utf8");
+        if (source !== "mcp") recordOrigin(p);
       } else {
         fs.mkdirSync(dir, { recursive: true });
         p = path.join(dir, `${parsed.id}.yaml`);
+        if (source === "mcp") recordOrigin(p);
         fs.writeFileSync(p, checkToYaml(parsed), "utf8");
+        if (source !== "mcp") recordOrigin(p);
       }
-      if (source === "planner" || source === "mcp") source = target === "user" ? "user" : "project";
-      this.store.db.prepare("DELETE FROM checks WHERE id = ? AND source IN ('planner', 'mcp')").run(parsed.id);
+      if (source === "planner") source = target === "user" ? "user" : "project";
+      this.store.upsertCheckRow({ id: parsed.id, kind: parsed.kind === "rule" ? "rule" : "question", source, path: p, body: checkToYaml(parsed), enabled: parsed.enabled });
     }
     this.reload();
     return this.checks.get(parsed.id) ?? { check: parsed, source, path: p };
@@ -296,6 +481,7 @@ export class CheckRegistry {
       }
     }
     this.store.db.prepare("DELETE FROM checks WHERE id = ?").run(id);
+    this.store.db.prepare("DELETE FROM meta WHERE key IN (?, ?)").run(`mcp_origin:${id}`, `approved_mcp:${id}`);
     this.reload();
     return true;
   }
@@ -307,14 +493,4 @@ export class CheckRegistry {
     const precision = 1 - s.dismissed / s.hits;
     return { hits: s.hits, dismissed: s.dismissed, precision, noisy: s.hits >= 5 && precision < 0.4 };
   }
-}
-
-/**
- * A halt rule stops the user's agent with the user's authority, so a coding agent (MCP) may not
- * create one, turn a check into one, or change one the user made (#256).
- */
-function assertNoHaltFromAgent(next: Check, current: Check | undefined): void {
-  const halts = (c: Check | undefined) => !!c && isRule(c) && c.action === "halt";
-  if (halts(next)) throw new Error("halt rules must be created or enabled by you in the app or CLI; save it with action: flag, and the user can switch it to halt in the app");
-  if (halts(current)) throw new Error(`"${next.id}" is a halt rule; halt rules must be created or changed by you in the app or CLI`);
 }

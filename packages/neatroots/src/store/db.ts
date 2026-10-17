@@ -154,6 +154,15 @@ CREATE TABLE IF NOT EXISTS checks (
   updated_ms INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS pending_mcp_checks (
+  id TEXT PRIMARY KEY,
+  body TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  active_fingerprint TEXT NOT NULL,
+  target_dir TEXT,
+  created_ms INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS decisions (
   id TEXT PRIMARY KEY,
   trace_id TEXT NOT NULL,
@@ -271,6 +280,15 @@ export interface TraceUpdate {
   runCreated: boolean;
   rootEnded: boolean;
   completed: boolean;
+}
+
+export interface McpCheckProposalRow {
+  id: string;
+  revision: string;
+  active_fingerprint: string;
+  body: string;
+  target_dir: string | null;
+  created_ms: number;
 }
 
 export interface RunFilter {
@@ -1206,6 +1224,25 @@ export class Store {
          ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, source = excluded.source, path = excluded.path, body = excluded.body, updated_ms = excluded.updated_ms`,
       )
       .run(c.id, c.kind, c.source, c.path, c.body, c.enabled === false ? 0 : 1, now, now);
+  }
+
+  upsertMcpCheckProposal(id: string, body: string, targetDir: string | null, revision: string, activeFingerprint: string): void {
+    this.db.prepare(
+      `INSERT INTO pending_mcp_checks (id, body, target_dir, created_ms, revision, active_fingerprint) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET body = excluded.body, target_dir = excluded.target_dir, created_ms = excluded.created_ms, revision = excluded.revision, active_fingerprint = excluded.active_fingerprint`,
+    ).run(id, body, targetDir, Date.now(), revision, activeFingerprint);
+  }
+
+  getMcpCheckProposal(id: string): McpCheckProposalRow | undefined {
+    return this.db.prepare("SELECT id, body, target_dir, created_ms, revision, active_fingerprint FROM pending_mcp_checks WHERE id = ?").get(id) as McpCheckProposalRow | undefined;
+  }
+
+  listMcpCheckProposals(): McpCheckProposalRow[] {
+    return this.db.prepare("SELECT id, body, target_dir, created_ms, revision, active_fingerprint FROM pending_mcp_checks ORDER BY created_ms DESC, id").all() as McpCheckProposalRow[];
+  }
+
+  deleteMcpCheckProposal(id: string): boolean {
+    return this.db.prepare("DELETE FROM pending_mcp_checks WHERE id = ?").run(id).changes > 0;
   }
 
   checkStats(): Record<string, { hits: number; dismissed: number; confirmed: number; enabled: number }> {

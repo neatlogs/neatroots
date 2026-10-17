@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, del, post, type CheckRow } from "../../../lib/api";
+import { api, del, post, type CheckApprovalRow, type CheckRow } from "../../../lib/api";
 import { appKeys } from "../../runs/_services/run-keys";
 
 export interface ChecksResponse {
@@ -7,6 +7,7 @@ export interface ChecksResponse {
   errors: { path: string; id?: string; message: string }[];
   user_dir: string;
   project_dirs: string[];
+  pending_mcp_checks?: CheckApprovalRow[];
 }
 
 export interface PreviewResult {
@@ -29,6 +30,8 @@ export function useCheckActions() {
   return {
     toggle: useMutation({ mutationFn: (v: { id: string; enabled: boolean }) => post(`/api/checks/${v.id}/enabled`, { enabled: v.enabled }), onSettled: refresh }),
     remove: useMutation({ mutationFn: (id: string) => del(`/api/checks/${id}`), onSettled: refresh }),
+    approve: useMutation({ mutationFn: (v: { id: string; revision: string }) => post(`/api/checks/${encodeURIComponent(v.id)}/approve`, { revision: v.revision }), onSettled: refresh }),
+    reject: useMutation({ mutationFn: (v: { id: string; revision: string }) => post(`/api/checks/${encodeURIComponent(v.id)}/reject`, { revision: v.revision }), onSettled: refresh }),
     // Both wait on the model; a signal lets the person cancel, which also frees its place in the queue.
     draft: useMutation({ mutationFn: (v: { concern: string; signal?: AbortSignal }) => api<{ yaml: string; warnings?: string[] }>("/api/checks/draft", { method: "POST", json: { concern: v.concern }, signal: v.signal }) }),
     preview: useMutation({ mutationFn: (v: { yaml: string; signal?: AbortSignal }) => api<PreviewResult>("/api/checks/preview", { method: "POST", json: { yaml: v.yaml, limit: 50 }, signal: v.signal }) }),

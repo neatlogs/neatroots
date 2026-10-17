@@ -691,8 +691,8 @@ export class Engine {
 
   private onFindingRaised(run: LiveRun, f: Finding, lc: LoadedCheck, params: Record<string, string>, snap: TraceSnapshot): void {
     const c = lc.check;
-    // Only rules the user wrote may stop a run.
-    if (isRule(c) && c.action === "halt" && (lc.source === "user" || lc.source === "project") && !run.ended) {
+    // MCP-origin checks only enter the active registry after a person approves the proposal.
+    if (isRule(c) && c.action === "halt" && (lc.source === "user" || lc.source === "project" || (lc.source === "mcp" && this.registry.isApprovedMcp(c.id))) && !run.ended) {
       this.steering.push({ traceId: run.traceId, findingId: f.id, kind: "halt", text: this.renderGuidance(c, params, f.title) });
     } else if (!run.ended && this.steering.mode(run.project) !== "off" && !this.overlapsNotedFinding(run.traceId, f) && this.roots.store.getRun(run.traceId)?.status === "running") {
       const template = this.steering.push({ traceId: run.traceId, findingId: f.id, kind: "template", text: this.renderGuidance(c, params, f.title) });

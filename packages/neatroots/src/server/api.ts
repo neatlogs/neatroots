@@ -393,7 +393,7 @@ export function mountApi(app: Hono, roots: Roots): void {
           data.created = u.runCreated;
           data.ended = u.rootEnded;
         }
-        if (event === "finding" || event === "note") data.id = p.id;
+        if (event === "finding" || event === "note" || event === "checks") data.id = p.id;
         if (event === "settings") data.project = p.project ?? null;
         if (event === "navigate") data.path = p.path;
         if (event === "chat") Object.assign(data, { session_id: p.session_id, event: p.event, state: p.state });

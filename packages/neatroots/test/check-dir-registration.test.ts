@@ -133,12 +133,25 @@ it("registers a checks directory that isn't there yet, and the first save create
   expect(fs.existsSync(saved)).toBe(true);
   expect(tb.roots.checks.get("fresh-check")).toBeTruthy();
 
-  // The MCP tool takes the same route to the same directory.
+  // MCP proposals defer file creation until a person approves the exact revision.
   const mcpDir = path.join(scratch, "fresh-mcp", "checks");
   tb.roots.config.checkDirs.push(mcpDir);
-  const out = (await tool("create_check").run(tb.roots, { check: yaml.replace("fresh-check", "mcp-check"), dir: mcpDir })) as { path: string };
-  expect(out.path).toBe(path.join(mcpDir, "mcp-check.yaml"));
-  expect(fs.existsSync(out.path)).toBe(true);
+  const out = (await tool("create_check").run(tb.roots, { check: yaml.replace("fresh-check", "mcp-check"), dir: mcpDir })) as { path: null; revision: string; pending_approval: boolean };
+  expect(out.path).toBeNull();
+  expect(out.pending_approval).toBe(true);
+  expect(fs.existsSync(mcpDir)).toBe(false);
+  expect(tb.roots.checks.get("mcp-check")).toBeUndefined();
+  const approval = await fetch(`${tb.url}/api/checks/mcp-check/approve`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ revision: out.revision }),
+  });
+  expect(approval.status).toBe(200);
+  const mcpPath = path.join(mcpDir, "mcp-check.yaml");
+  expect(((await approval.json()) as { path: string }).path).toBe(mcpPath);
+  expect(fs.existsSync(mcpPath)).toBe(true);
+  expect(tb.roots.checks.get("mcp-check")?.source).toBe("mcp");
+  expect(tb.roots.checks.isApprovedMcp("mcp-check")).toBe(true);
 });
 
 it("refuses a save into a registered directory a save can't use", async () => {

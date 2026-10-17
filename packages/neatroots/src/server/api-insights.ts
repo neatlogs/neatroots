@@ -10,12 +10,12 @@ function windowKey(v: unknown): WindowKey {
 }
 
 function insights(roots: Roots, key: WindowKey) {
-  const stats = roots.store.checkStats();
+  const enabled = new Set(roots.checks.enabled().map((lc) => lc.check.id));
   const checks = roots.checks.all().map((lc) => ({
     id: lc.check.id,
     title: checkTitle(lc.check),
     kind: lc.check.kind,
-    enabled: lc.check.enabled !== false && (stats[lc.check.id]?.enabled ?? 1) === 1,
+    enabled: enabled.has(lc.check.id),
   }));
   return computeInsights(roots.store.db, key, checks);
 }

@@ -9,6 +9,8 @@ export interface RootsEvents {
   explanation: Explanation;
   summary: { trace_id: string; text: string };
   plan: { workflow: string; plan_id: string; trace_id?: string };
+  /** The Checks page data changed (for example, a new MCP approval proposal). */
+  checks: { id: string };
   settings: { project?: string };
   activity: { trace_id?: string; kind: string; message: string };
   /** An import job's progress (ingest/importers). */

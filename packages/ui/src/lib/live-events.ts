@@ -34,7 +34,11 @@ export function useLiveEvents(): { connected: boolean; spanTick: number } {
     };
     const open = () => {
       es = new EventSource("/api/events");
-      es.onopen = () => setConnected(true);
+      es.onopen = () => {
+        setConnected(true);
+        // Reconcile the initial subscription gap as well as missed events on reconnect.
+        void qc.invalidateQueries({ queryKey: appKeys.checks });
+      };
       es.onerror = () => {
         setConnected(false);
         es?.close();
@@ -57,6 +61,7 @@ export function useLiveEvents(): { connected: boolean; spanTick: number } {
         void qc.invalidateQueries({ queryKey: appKeys.status });
         void qc.invalidateQueries({ queryKey: appKeys.projects });
       });
+      on("checks", () => void qc.invalidateQueries({ queryKey: appKeys.checks }));
       on("replay", (d) => {
         schedule(d.trace_id);
         if (typeof d.new_trace_id === "string") schedule(d.new_trace_id);
