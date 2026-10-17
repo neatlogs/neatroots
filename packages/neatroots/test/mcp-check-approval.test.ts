@@ -394,3 +394,59 @@ it.each(["user", "project"])("MCP and Checks API show the refreshed %s proposal 
     expect(listed.pending_mcp_checks.find((p) => p.id === "late-api")?.target_dir).toBe(target);
   } finally { await client.close(); }
 });
+
+it.each([false, true])("MCP rejects an empty target directory without modifying existing=%s checks", async (existing) => {
+  const t = await makeRoots({ serve: true, noEngine: true }); cleanup.push(t.close);
+  const project = path.join(t.roots.home, "project"); t.roots.config.checkDirs.push(project);
+  if (existing) { fs.mkdirSync(project, { recursive: true }); fs.writeFileSync(path.join(project, "empty-target.yaml"), ruleYaml("empty-target", "flag", 3)); }
+  const client = await connect(t.url);
+  try {
+    const result = await client.callTool({ name: "create_check", arguments: { check: ruleYaml("empty-target", "flag", 1), dir: "" } });
+    expect(result.isError).toBe(true);
+    expect(t.roots.checks.pendingMcpCheck("empty-target")).toBeUndefined();
+    if (existing) expect(fs.readFileSync(path.join(project, "empty-target.yaml"), "utf8")).toBe(ruleYaml("empty-target", "flag", 3));
+  } finally { await client.close(); }
+});
+
+it("MCP preserves a registered directory whose name contains surrounding spaces", async () => {
+  const t = await makeRoots({ serve: true, noEngine: true }); cleanup.push(t.close);
+  const dir = path.join(t.roots.home, " spaced checks "); t.roots.config.checkDirs.push(dir);
+  const client = await connect(t.url);
+  try {
+    const result = resultJson(await client.callTool({ name: "create_check", arguments: { check: ruleYaml("spaced-target", "flag", 1), dir } }));
+    expect(result.target_dir).toBe(dir);
+    const proposal = t.roots.checks.pendingMcpCheck("spaced-target")!;
+    expect(proposal.target_dir).toBe(dir);
+    expect(t.roots.checks.approvePendingMcp("spaced-target", proposal.revision)?.path).toBe(path.join(dir, "spaced-target.yaml"));
+  } finally { await client.close(); }
+});
+
+it("legacy blank-target proposals require resubmission before approval", async () => {
+  const t = await makeRoots({ serve: true, noEngine: true }); cleanup.push(t.close);
+  const dir = path.join(t.roots.home, "project-checks"); t.roots.config.checkDirs.push(dir);
+  fs.mkdirSync(dir, { recursive: true }); const file = path.join(dir, "legacy-blank.yaml");
+  const original = ruleYaml("legacy-blank", "flag", 3); fs.writeFileSync(file, original);
+  const check = { id: "legacy-blank", kind: "rule", action: "flag", rule: { type: "count", at_least: 1 } } as Check;
+  const proposal = t.roots.checks.proposeMcp(check, dir);
+  t.roots.store.db.prepare("UPDATE pending_mcp_checks SET target_dir='' WHERE id=?").run(check.id);
+  expect.soft(t.roots.checks.pendingMcpCheck(check.id)).toBeUndefined();
+  const listed = await (await fetch(`${t.url}/api/checks`)).json() as { pending_mcp_checks: { id: string }[] };
+  expect.soft(listed.pending_mcp_checks.some((p) => p.id === check.id)).toBe(false);
+  const approval = await fetch(`${t.url}/api/checks/${check.id}/approve`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ revision: proposal.revision }) });
+  expect.soft(approval.status).toBe(404);
+  expect.soft(fs.readFileSync(file, "utf8")).toBe(original);
+  const client = await connect(t.url);
+  try {
+    const fresh = resultJson(await client.callTool({ name: "create_check", arguments: { check: ruleYaml(check.id, "flag", 1) } }));
+    expect(fresh.target_dir).toBe(dir);
+    expect(t.roots.checks.approvePendingMcp(check.id, String(fresh.revision))?.path).toBe(file);
+  } finally { await client.close(); }
+});
+
+it("registry normalizes an empty directory before persisting its effective target", async () => {
+  const t = await makeRoots({ noEngine: true }); cleanup.push(t.close);
+  const check = { id: "direct-empty", kind: "rule", rule: { type: "count", at_least: 1 } } as Check;
+  const proposal = t.roots.checks.proposeMcp(check, "");
+  expect(proposal.target_dir).toBe(path.join(t.roots.home, "checks"));
+  expect(t.roots.checks.approvePendingMcp(check.id, proposal.revision)?.path).toBe(path.join(t.roots.home, "checks", `${check.id}.yaml`));
+});

@@ -274,6 +274,7 @@ export class CheckRegistry {
   }
 
   private fromMcpProposal(row: McpCheckProposalRow): PendingMcpCheck | undefined {
+    if (row.target_dir === "") return undefined; // Legacy blank targets must be resubmitted for review.
     const { checks } = parseChecks(row.body);
     const check = checks.find((c) => c.id === row.id);
     if (!check) return undefined;
@@ -293,6 +294,7 @@ export class CheckRegistry {
   }
 
   proposeMcp(check: Check, targetDir: string | null): PendingMcpCheck {
+    if (targetDir === "") targetDir = null;
     const parsed = AnyCheck.parse(check) as Check;
     this.reload();
     const active = this.get(parsed.id);
@@ -461,11 +463,7 @@ export class CheckRegistry {
         if (source !== "mcp") recordOrigin(p);
       }
       if (source === "planner") source = target === "user" ? "user" : "project";
-      if (source === "mcp") {
-        this.store.upsertCheckRow({ id: parsed.id, kind: parsed.kind === "rule" ? "rule" : "question", source, path: p, body: checkToYaml(parsed), enabled: parsed.enabled });
-      } else {
-        this.store.db.prepare("DELETE FROM checks WHERE id = ? AND source IN ('planner', 'mcp')").run(parsed.id);
-      }
+      this.store.upsertCheckRow({ id: parsed.id, kind: parsed.kind === "rule" ? "rule" : "question", source, path: p, body: checkToYaml(parsed), enabled: parsed.enabled });
     }
     this.reload();
     return this.checks.get(parsed.id) ?? { check: parsed, source, path: p };

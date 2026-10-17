@@ -363,7 +363,7 @@ export const TOOLS = [
       check: z.string().optional().describe("YAML or JSON check definition"),
       workflow: z.string().optional(),
       save: z.boolean().optional(),
-      dir: z.string().optional().describe("A registered project checks directory"),
+      dir: z.string().min(1, "dir must not be empty").optional().describe("A registered project checks directory"),
     },
     run: async (roots, a) => {
       let check;
