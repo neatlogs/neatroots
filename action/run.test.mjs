@@ -17,6 +17,22 @@ test('installer ignores ambient source, bundle, repo and runtime overrides', () 
   assert.equal(env.PATH, '/bin');
 });
 
+test('installer isolates user state and platform home paths inside runner temp', () => {
+  const keys = ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR'];
+  const source = Object.fromEntries(keys.map(key => [key, `/host/${key}`]));
+  const runner = path.resolve('runner temp');
+  const env = installEnvironment({ ...source, RUNNER_TEMP: runner, NEATROOTS_HOME: '/host/state' }, 'a'.repeat(40));
+  const install = path.join(runner, 'neatroots-action-install');
+  for (const key of [...keys, 'NEATROOTS_HOME']) {
+    const relative = path.relative(install, env[key]);
+    assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative), key);
+    assert.notEqual(env[key], source[key], key);
+  }
+  assert.equal(env.HOME, env.USERPROFILE);
+  assert.equal(env.NEATROOTS_SERVICE, '0');
+  assert.equal(env.NEATROOTS_LAYA, 'no');
+});
+
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'action-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

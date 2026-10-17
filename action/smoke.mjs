@@ -38,6 +38,11 @@ try {
     assert.equal(result.status, 1);
     assert.ok(result.stdout.includes(`check ${id};`), `Missing safe ID ${id}`);
   }
+  fs.writeFileSync(path.join(checks, 'hit.yaml'), template.replace('action-fixture-hit', 'legacy-repeat').replace('fixture-fail', '(fixture-+)+fail'));
+  assert.equal(check(clean, checks, 'legacy-repeat').status, 0, 'Legacy nested-repeat rule should load on clean input');
+  assert.equal(check(failing, checks, 'legacy-repeat').status, 1, 'Legacy nested-repeat rule should still fire');
+  fs.writeFileSync(path.join(checks, 'hit.yaml'), template.replace('fixture-fail', '['));
+  assert.equal(check(clean, checks, 'action-fixture-hit').status, 2, 'Invalid regex syntax must fail closed');
   const target = path.join(dir, 'target');
   fs.mkdirSync(path.join(target, 'sub'), { recursive: true });
   fs.copyFileSync(clean, path.join(target, 'sub', 'run.json'));
