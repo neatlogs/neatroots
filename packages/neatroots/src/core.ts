@@ -87,7 +87,7 @@ export class Roots {
 
   ingestLogs(records: OtlpLogRecord[]): number {
     return this.store.ingestLogs(records, (updates) => {
-      for (const u of updates) this.bus.emit("trace", u);
+      for (const u of updates) this.bus.emitCommittedTrace(u);
     });
   }
 

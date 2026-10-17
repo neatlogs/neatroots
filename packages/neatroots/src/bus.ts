@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { log } from "./util/log.js";
 import type { TraceUpdate } from "./store/db.js";
 import type { Explanation, Finding, Note } from "./types.js";
 
@@ -31,6 +32,22 @@ export class Bus {
   emit<K extends keyof RootsEvents>(event: K, payload: RootsEvents[K]): void {
     this.ee.emit(event, payload);
     this.ee.emit("*", { event, payload });
+  }
+
+  /** Logs and their recovery receipts are already committed: subscriber failure must not request a retry. */
+  emitCommittedTrace(payload: TraceUpdate): void {
+    const failed = () => log.warn("committed log trace notification failed; pending checks can resume on restart");
+    for (const [event, data] of [["trace", payload], ["*", { event: "trace", payload }]] as const) {
+      for (const listener of this.ee.listeners(event)) {
+        try {
+          const result: unknown = listener.call(this.ee, data);
+          // Subscribers may be async even though ordinary event delivery is synchronous.
+          if (result && typeof (result as PromiseLike<unknown>).then === "function") void Promise.resolve(result).catch(failed);
+        } catch {
+          failed();
+        }
+      }
+    }
   }
 
   on<K extends keyof RootsEvents>(event: K, fn: (payload: RootsEvents[K]) => void): () => void {
