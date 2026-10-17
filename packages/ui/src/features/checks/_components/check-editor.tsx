@@ -14,6 +14,22 @@ import { useCheckActions, type PreviewResult } from "../_services/check-queries"
 
 const aborted = (e: unknown) => (e as Error)?.name === "AbortError";
 
+const SKIP_LABEL: Record<string, string> = {
+  not_in_scope: "not this check's project or workflow",
+  no_evidence: "nothing for the check to read",
+  model_error: "the model could not answer",
+  aborted: "the preview stopped",
+};
+
+/** Runs the preview could not judge, and why. */
+const skippedTotal = (skipped?: Record<string, number>) => Object.values(skipped ?? {}).reduce((n, x) => n + x, 0);
+
+function skipBreakdown(skipped?: Record<string, number>): string {
+  return Object.entries(skipped ?? {})
+    .map(([reason, n]) => `${n} ${SKIP_LABEL[reason] ?? reason}`)
+    .join(", ");
+}
+
 /** Write a check: describe it, let the LLM draft the YAML, preview it on recent runs, save. */
 export function CheckEditor({ open, initialYaml, userDir, onClose }: { open: boolean; initialYaml: string; userDir?: string; onClose: () => void }) {
   const a = useCheckActions();
@@ -113,6 +129,14 @@ export function CheckEditor({ open, initialYaml, userDir, onClose }: { open: boo
               </span>
               {preview.checked > 0 && preview.hits.length === 0 && (
                 <span className="text-xs text-muted-foreground">It fired on none of these runs. If one of them has the problem, make sure the check's evidence includes what it asks about.</span>
+              )}
+              {!!skippedTotal(preview.skipped) && (
+                <span className="text-xs text-muted-foreground">
+                  {skippedTotal(preview.skipped)} not judged: {skipBreakdown(preview.skipped)}.
+                </span>
+              )}
+              {preview.second_look === false && (
+                <span className="text-xs text-muted-foreground">This is an upper bound: a live run takes a second look at every flag before raising it.</span>
               )}
               <div className="flex max-h-40 flex-col overflow-y-auto">
                 {preview.hits.map((h) => (

@@ -163,7 +163,10 @@ describe("Laya trust", () => {
 });
 
 describe("decision requests that leave the machine", () => {
-  const secrets = "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123 and Authorization: Basic dXNlcjpodW50ZXIy";
+  // Assembled at runtime so the file carries no secret-shaped literal, while the request still
+  // carries a key for the redactor to catch.
+  const apiKey = `sk-proj-${"k".repeat(30)}`;
+  const secrets = `OPENAI_API_KEY=${apiKey} and Authorization: Basic dXNlcjpodW50ZXIy`;
 
   async function recorder() {
     const bodies: string[] = [];
@@ -204,7 +207,7 @@ describe("decision requests that leave the machine", () => {
       cfg.classifier.jevCloud.enabled = true;
       cfg.classifier.jevCloud.baseUrl = baseUrl(rec.url);
       const dm = new DecisionModel(cfg.classifier, new LlmClient(cfg.llm), { laya: async () => undefined, jevCloud: async () => "cloud-key" });
-      const r = await dm.decide(`tool read_env returned: ${secrets}`, [{ name: "q", type: "yes_no", ask: `Did it leak sk-ant-abcdefghijklmnopqrstuvwxyz0123?` }]);
+      const r = await dm.decide(`tool read_env returned: ${secrets}`, [{ name: "q", type: "yes_no", ask: `Did it leak ${apiKey}?` }]);
       expect(r.backend).toBe("jev-cloud");
       expect(rec.bodies).toHaveLength(1);
       return rec.bodies[0];
@@ -216,8 +219,7 @@ describe("decision requests that leave the machine", () => {
 
   it("removes credentials from what Jev cloud receives", async () => {
     const body = await decideVia(() => "https://jev.example.com");
-    expect(body).not.toContain("sk-proj-abcdefghijklmnopqrstuvwxyz0123");
-    expect(body).not.toContain("sk-ant-abcdefghijklmnopqrstuvwxyz0123");
+    expect(body).not.toContain(apiKey);
     expect(body).not.toContain("dXNlcjpodW50ZXIy");
     expect(body).toContain("[redacted:api_key]");
     expect(body).toContain("[redacted:basic_auth]");

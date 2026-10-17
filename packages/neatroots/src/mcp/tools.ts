@@ -406,7 +406,20 @@ export const TOOLS = [
       }
       if (!check) throw new Error("check not found or invalid");
       const r = await roots.engine.previewCheck(check, { limit: a.limit ?? 50, workflow: a.workflow });
-      return { id: check.id, checked: r.checked, total: r.total, hits: r.hits.length, hit_rate: r.checked ? r.hits.length / r.checked : null, truncated: r.truncated, examples: r.hits.slice(0, 10), warnings: checkWarnings(check) };
+      return {
+        id: check.id,
+        checked: r.checked,
+        total: r.total,
+        hits: r.hits.length,
+        hit_rate: r.checked ? r.hits.length / r.checked : null,
+        truncated: r.truncated,
+        examples: r.hits.slice(0, 10),
+        // Runs the preview could not judge, so a low rate isn't read as a clean bill of health.
+        skipped: r.skipped,
+        not_judged: r.reasons.slice(0, 10),
+        second_look: r.second_look,
+        warnings: checkWarnings(check),
+      };
     },
   }),
   def({

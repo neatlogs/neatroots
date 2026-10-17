@@ -15,6 +15,12 @@ export interface PreviewResult {
   hits: { trace_id: string; probability: number | null; root_name: string | null }[];
   hit_rate: number | null;
   truncated: boolean;
+  /** Runs the preview could not judge, by reason (not_in_scope, no_evidence, model_error, aborted). */
+  skipped?: Record<string, number>;
+  /** Which runs those were, and why. */
+  reasons?: { trace_id: string; reason: string; detail?: string }[];
+  /** False when the preview did not take the live path's second look, so the rate is an upper bound. */
+  second_look?: boolean;
   /** What the check can't see (e.g. a question about the answer that only looks at tool calls). */
   warnings?: string[];
 }

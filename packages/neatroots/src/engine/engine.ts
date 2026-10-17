@@ -101,6 +101,39 @@ export interface EngineStatus {
   pendingJobs: number;
 }
 
+/** One run a preview hit. */
+export interface PreviewHit {
+  trace_id: string;
+  probability: number | null;
+  evidence_span_ids: string[];
+  root_name: string | null;
+}
+
+/** A run a preview considered but could not judge, and why. */
+export interface PreviewSkip {
+  trace_id: string;
+  /** `not_in_scope`, `no_evidence`, `model_error` or `aborted`. */
+  reason: string;
+  detail?: string;
+}
+
+/**
+ * What a preview found. `checked` counts the runs the check actually looked at, so a run it could
+ * not judge is in `skipped` with a reason instead of reading as a clean run.
+ */
+export interface PreviewResult {
+  checked: number;
+  hits: PreviewHit[];
+  /** Runs the check applies to and could look at. */
+  total: number;
+  truncated: boolean;
+  /** Runs not judged, by reason. `not_in_scope` covers the status, applies_to and limit filters. */
+  skipped: Record<string, number>;
+  reasons: PreviewSkip[];
+  /** False: the preview does not take the live path's second look, so its rate is an upper bound. */
+  second_look: boolean;
+}
+
 function clip(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
@@ -1158,40 +1191,56 @@ ${library}`;
   }
 
   /** Runs a question over recent runs without raising findings, to see how often it would fire. */
-  async previewCheck(check: QuestionCheck | RuleCheck, opts: { limit?: number; workflow?: string; project?: string; timeBudgetMs?: number; signal?: AbortSignal } = {}): Promise<{
-    checked: number;
-    hits: { trace_id: string; probability: number | null; evidence_span_ids: string[]; root_name: string | null }[];
-    total: number;
-    truncated: boolean;
-  }> {
+  async previewCheck(check: QuestionCheck | RuleCheck, opts: { limit?: number; workflow?: string; project?: string; timeBudgetMs?: number; signal?: AbortSignal } = {}): Promise<PreviewResult> {
     const limit = opts.limit ?? 50;
     // Only runs the check would watch: the engine skips runs outside its applies_to, so a preview
     // over them would report hits the check can never raise. Look further back to still fill `limit`.
-    const runs = this.roots.store
-      .listRuns({ workflow: opts.workflow, project: opts.project, limit: check.applies_to ? 500 : limit })
+    const candidates = this.roots.store.listRuns({ workflow: opts.workflow, project: opts.project, limit: check.applies_to ? 500 : limit });
+    const runs = candidates
       .filter((r) => r.status !== "running")
       .filter((r) => this.appliesTo(check, { project: r.project ?? "unknown", workflow: r.workflow ?? r.project ?? "unknown" }))
       .slice(0, limit);
     const deadline = Date.now() + (opts.timeBudgetMs ?? 90_000);
-    const hits: { trace_id: string; probability: number | null; evidence_span_ids: string[]; root_name: string | null }[] = [];
+    const hits: PreviewHit[] = [];
+    // What the loop already knows and used to throw away: a run it could not judge looked exactly
+    // like a run it judged and found clean, so "fires on 0 of 12" read as twelve honest negatives.
+    const skipped: Record<string, number> = {};
+    const reasons: PreviewSkip[] = [];
+    const notInScope = candidates.length - runs.length;
+    if (notInScope > 0) skipped.not_in_scope = notInScope;
+    const skip = (traceId: string, reason: string, detail?: string) => {
+      skipped[reason] = (skipped[reason] ?? 0) + 1;
+      reasons.push({ trace_id: traceId, reason, ...(detail ? { detail: clip(detail, 160) } : {}) });
+    };
     let checked = 0;
     for (const r of runs) {
-      if (Date.now() > deadline) break;
+      if (opts.signal?.aborted || Date.now() > deadline) {
+        skip(r.trace_id, "aborted", opts.signal?.aborted ? "the request was cancelled" : "the preview ran out of time");
+        continue;
+      }
       const snap = loadTrace(this.roots.store, r.trace_id);
-      checked++;
       if (isRule(check)) {
-        // A previewed check is a draft someone (or a coding agent) wrote, so its pattern is timed.
+        // A rule is deterministic: it ran on this run either way. A previewed check is a draft
+        // someone (or a coding agent) wrote, so its pattern is timed.
         const hit = evaluateRule(check, snap, true, undefined, true);
+        checked++;
         if (hit) hits.push({ trace_id: r.trace_id, probability: null, evidence_span_ids: hit.evidenceSpanIds, root_name: r.root_name });
         continue;
       }
       const targets = check.scope === "span" ? selectSpans(snap.spans, check.evidence?.spans).slice(-5) : [undefined];
+      let judged = 0;
+      let lastError = "";
+      let aborted = false;
       for (const focus of targets) {
         const ev = buildEvidence(snap, check.evidence, { focus });
         if (!ev.spanIds.length && !check.evidence?.final_output) continue;
         try {
-          if (opts.signal?.aborted) break;
+          if (opts.signal?.aborted) {
+            aborted = true;
+            break;
+          }
           const res = await this.decisions.decide(ev.text, [toQuestion(check, check.params ?? {})], { priority: "interactive", signal: opts.signal });
+          judged++;
           const v = flagged(check, res);
           if (v.flagged) {
             hits.push({ trace_id: r.trace_id, probability: v.probability, evidence_span_ids: ev.spanIds, root_name: r.root_name });
@@ -1199,10 +1248,31 @@ ${library}`;
           }
         } catch (err) {
           if (err instanceof DecisionUnavailableError) throw err;
+          // A cancellation that escapes the backend is not a model error: the question was never asked.
+          if (opts.signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
+            aborted = true;
+            break;
+          }
+          // A 5xx, 429 or 401 from the judge is not a "no": the question was never answered.
+          lastError = (err instanceof Error ? err.message : String(err)) || "the model call failed";
         }
       }
+      if (judged) checked++;
+      else if (aborted) skip(r.trace_id, "aborted", "the request was cancelled");
+      else if (lastError) skip(r.trace_id, "model_error", lastError);
+      else skip(r.trace_id, "no_evidence", "the check's evidence matched nothing in this run");
     }
-    return { checked, hits, total: runs.length, truncated: checked < runs.length };
+    return {
+      checked,
+      hits,
+      total: runs.length,
+      truncated: checked < runs.length,
+      skipped,
+      reasons,
+      // The live path takes a second look at every flag before raising it; the preview does not, so
+      // the rate here is an upper bound on what a live run would raise.
+      second_look: false,
+    };
   }
 
   /** Re-runs the checks for a finished run, e.g. after checks changed. `resume` keeps stored answers. */
