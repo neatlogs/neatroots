@@ -181,6 +181,33 @@ describe("engine", () => {
     await tb.roots.engine!.waitIdle(t, 5000);
     expect(tb.roots.store.notesForTrace(t)).toEqual([]);
   });
+
+  it("does not write results after a run is deleted during a model call", async () => {
+    const { tb } = await setup();
+    const { t } = startRun(tb);
+    const engine = tb.roots.engine as any;
+    const run = engine.live.get(t);
+    const check = { id: "cancelled-check", kind: "yes_no", scope: "trace", title: "Cancelled check", ask: "Did it fail?", flag_at: 0.8 };
+    engine.decisions.decide = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return {
+        answers: { [check.id]: { name: check.id, type: "yes_no", probability: 0.9, distribution: { yes: 0.9, no: 0.1 }, choice: "yes" } },
+        backend: "test",
+        model: "test",
+        latencyMs: 50,
+      };
+    };
+
+    const work = engine.decideAndApply(run, check, {}, "It failed.", [], { spans: [], run: tb.roots.store.getRun(t) }, null);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    engine.cancelRun(t);
+    tb.roots.store.deleteRun(t);
+    await work;
+
+    expect(tb.roots.store.getRun(t)).toBeUndefined();
+    expect(tb.roots.store.decisionsForTrace(t)).toEqual([]);
+    expect(tb.roots.store.findingsForTrace(t)).toEqual([]);
+  });
 });
 
 describe("planning", () => {
