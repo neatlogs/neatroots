@@ -15,9 +15,14 @@ import { log } from "../util/log.js";
 
 const MAX_BODY = 64 * 1024 * 1024;
 
-function gunzipCapped(raw: Buffer): Buffer {
+/**
+ * Run a decompression that is already capped, and report the cap firing as a 413 rather
+ * than letting it escape as a generic error. Every encoding goes through here, so an
+ * oversized body is answered the same way however it was compressed.
+ */
+function decompressCapped(decompress: () => Buffer): Buffer {
   try {
-    return zlib.gunzipSync(raw, { maxOutputLength: MAX_BODY * 4 });
+    return decompress();
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ERR_BUFFER_TOO_LARGE") {
       throw Object.assign(new Error("payload too large after decompression"), { status: 413 });
@@ -30,11 +35,12 @@ async function readBody(c: Context): Promise<Buffer> {
   const raw = Buffer.from(await c.req.arrayBuffer());
   if (raw.length > MAX_BODY) throw Object.assign(new Error("payload too large"), { status: 413 });
   const enc = (c.req.header("content-encoding") ?? "").toLowerCase();
-  if (enc === "gzip" || enc === "x-gzip") return gunzipCapped(raw);
-  if (enc === "deflate") return zlib.inflateSync(raw, { maxOutputLength: MAX_BODY * 4 });
-  if (enc === "br") return zlib.brotliDecompressSync(raw, { maxOutputLength: MAX_BODY * 4 });
+  const cap = { maxOutputLength: MAX_BODY * 4 };
+  if (enc === "gzip" || enc === "x-gzip") return decompressCapped(() => zlib.gunzipSync(raw, cap));
+  if (enc === "deflate") return decompressCapped(() => zlib.inflateSync(raw, cap));
+  if (enc === "br") return decompressCapped(() => zlib.brotliDecompressSync(raw, cap));
   // Some exporters gzip without the header; sniff the magic bytes.
-  if (raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b) return gunzipCapped(raw);
+  if (raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b) return decompressCapped(() => zlib.gunzipSync(raw, cap));
   return raw;
 }
 
@@ -78,7 +84,8 @@ export function mountCollector(app: Hono, roots: Roots): void {
     try {
       parsed = JSON.parse((await readBody(c)).toString("utf8"));
     } catch (err) {
-      return c.json({ error: "Validation error", details: { body: `not JSON: ${(err as Error).message}` } }, 400);
+      const status = (err as { status?: number }).status ?? 400;
+      return c.json({ error: "Validation error", details: { body: `not JSON: ${(err as Error).message}` } }, status as 400);
     }
     try {
       const { batches, traceId, spans } = httpTraceToBatches(parsed);
@@ -97,7 +104,8 @@ export function mountCollector(app: Hono, roots: Roots): void {
       const records = isJson(c) ? decodeLogsJson(JSON.parse(body.toString("utf8"))) : decodeLogsProtobuf(body);
       roots.store.ingestLogs(records);
     } catch (err) {
-      return c.json({ code: 3, message: `invalid OTLP logs payload: ${(err as Error).message}` }, 400);
+      const status = (err as { status?: number }).status ?? 400;
+      return c.json({ code: 3, message: `invalid OTLP logs payload: ${(err as Error).message}` }, status as 400);
     }
     if (isJson(c)) return c.json({ partialSuccess: {} });
     return new Response(new Uint8Array(), { status: 200, headers: { "content-type": "application/x-protobuf" } });
