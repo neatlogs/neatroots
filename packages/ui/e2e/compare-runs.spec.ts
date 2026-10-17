@@ -67,6 +67,52 @@ test("keeps run-picker errors visible with paginated run searches", async ({ pag
   await expect(page.getByTestId("metric-tokens")).toBeVisible();
 });
 
+for (const label of ["Original", "Comparison"] as const) {
+  test(`${label} picker reaches older matching runs and retries page errors`, async ({ page }) => {
+    const search = `picker-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const ids: string[] = [];
+    for (let i = 0; i < 155; i += 25) {
+      const batch = await Promise.all(Array.from({ length: Math.min(25, 155 - i) }, (_, k) => api<{ trace_id: string }>("/v1/trace", {
+        method: "POST",
+        body: JSON.stringify({ name: search, project: search, input: `${search} ${i + k}`, output: "done", start: new Date(Date.UTC(2020, 0, 1) + (i + k) * 1000).toISOString(), duration_ms: 5 }),
+      })));
+      ids.push(...batch.map((run) => run.trace_id));
+    }
+    const first = await api<{ runs: { trace_id: string }[] }>(`/api/runs?limit=150&q=${search}`);
+    expect(first.runs).toHaveLength(150);
+    expect(first.runs.map((run) => run.trace_id)).not.toContain(ids[0]);
+    let release: (() => void) | undefined;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    let failPage = true;
+    await page.route("**/api/runs?*", async (route) => {
+      const q = new URL(route.request().url()).searchParams;
+      if (q.get("q") === search && q.get("offset") === "150" && failPage) {
+        await waiting;
+        await route.fulfill({ status: 503, json: { error: "fixture page unavailable" } });
+      } else await route.continue();
+    });
+    await open(page, `compare?a=${state().supportRun}&b=${state().researchRun}`);
+    await page.getByRole("textbox", { name: `Search ${label.toLowerCase()} runs`, exact: true }).fill(search);
+    const more = page.getByRole("button", { name: `Load more ${label.toLowerCase()} runs`, exact: true });
+    await expect(more).toBeVisible();
+    await more.click();
+    await expect(more).toBeDisabled();
+    await expect(more).toHaveAttribute("aria-busy", "true");
+    release!();
+    await expect(page.getByText("Couldn't load more runs. Try loading more again.", { exact: true })).toBeVisible();
+    await expect(more).toBeEnabled();
+    await expect(page.getByTestId("metric-tokens")).toBeVisible();
+    failPage = false;
+    await more.click();
+    await expect(more).toBeHidden();
+    await expect(page.getByText("Couldn't load more runs. Try loading more again.", { exact: true })).toBeHidden();
+    await page.getByRole("combobox", { name: `${label} run`, exact: true }).click();
+    await page.getByRole("option").filter({ hasText: ids[0].slice(0, 8) }).click();
+    await expect(page).toHaveURL(new RegExp(`${label === "Original" ? "a" : "b"}=${ids[0]}`));
+    await expect(page.getByTestId("metric-tokens")).toBeVisible();
+  });
+}
+
 for (const mode of ["light", "dark", "mobile"] as const) {
   test(`comparison layout in ${mode}`, async ({ page }, info) => {
     const errors = watchErrors(page);

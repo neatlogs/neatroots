@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { BarChartHorizontalIcon } from "@hugeicons/core-free-icons";
 import { useState } from "react";
 import { ListPageLayout } from "@/components/list-page/list-page-layout";
+import { PendingButton } from "@/components/pending-button";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Icon } from "@/components/ui/icon";
@@ -33,7 +34,7 @@ interface Comparison {
 
 function RunPicker({ label, value, onChange, selected }: { label: string; value: string; onChange: (id: string) => void; selected?: Run }) {
   const [search, setSearch] = useState("");
-  const { data, error, isLoading } = useRuns({ q: search, status: "", hasFinding: false, project: "" });
+  const { data, error, isLoading, hasMore, loadMore, loadingMore } = useRuns({ q: search, status: "", hasFinding: false, project: "" });
   const runs = [...(selected ? [selected] : []), ...(data?.runs ?? []).filter((r) => r.trace_id !== selected?.trace_id)];
   return <div className="flex min-w-0 flex-col gap-2">
     <label className="text-sm font-medium" htmlFor={`search-${label}`}>{label}</label>
@@ -42,7 +43,8 @@ function RunPicker({ label, value, onChange, selected }: { label: string; value:
       <SelectTrigger aria-label={`${label} run`} className="w-full min-w-0"><SelectValue placeholder={value ? `Run ${value.slice(0, 8)}` : "Select a run"} /></SelectTrigger>
       <SelectContent>{runs.map((r) => <SelectItem key={r.trace_id} value={r.trace_id}>{r.root_name ?? r.workflow ?? "Run"} · {r.trace_id.slice(0, 8)}</SelectItem>)}</SelectContent>
     </Select>
-    <p className="min-h-4 text-xs text-muted-foreground">{error ? "Couldn't load runs. Try searching again." : isLoading ? "Loading runs…" : `${runs.length} shown. Search to find older runs.`}</p>
+    <p role="status" className="min-h-4 text-xs text-muted-foreground">{error ? data?.runs.length ? "Couldn't load more runs. Try loading more again." : "Couldn't load runs. Try searching again." : isLoading || loadingMore ? "Loading runs…" : `${runs.length} shown. Search to find runs by name or content.`}</p>
+    {hasMore && <PendingButton variant="secondary" size="sm" className="self-start" aria-label={`Load more ${label.toLowerCase()} runs`} pending={loadingMore} onClick={loadMore}>Load more runs</PendingButton>}
   </div>;
 }
 
