@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { filesFor, run as capturedRun } from './run.mjs';
 import { installEnvironment } from './install.mjs';
@@ -176,6 +177,39 @@ for (const size of [16 * 1024 * 1024 - 1, 16 * 1024 * 1024, 16 * 1024 * 1024 + 1
     assert.ok(!published.join('').includes('{"runs"'));
   });
 }
+
+test('terminated child scratch stays inside the removed private home', t => {
+  const { dir, env } = fixture(t);
+  const ambient = path.join(dir, 'ambient-temp');
+  fs.mkdirSync(ambient);
+  fs.writeFileSync(path.join(ambient, 'sentinel'), 'keep');
+  const receipt = path.join(dir, 'scratch-path');
+  let home, options, child, scratchPresent;
+  const output = [];
+  assert.equal(capturedRun({ ...env, TMPDIR: ambient, TMP: ambient, TEMP: ambient }, (binary, args, opts) => {
+    home = opts.env.NEATROOTS_HOME;
+    options = opts;
+    child = spawnSync(binary, ['-e', `
+      const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+      const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'neatroots-check-'));
+      fs.writeFileSync(path.join(scratch, 'trace.db'), 'SECRET trace state');
+      fs.writeFileSync(process.argv[1], scratch);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+    `, receipt], { ...opts, timeout: 1_000 });
+    scratchPresent = fs.existsSync(path.join(fs.readFileSync(receipt, 'utf8'), 'trace.db'));
+    return child;
+  }, value => output.push(value)), 2);
+  assert.equal(options.timeout, 300_000, 'Production timeout remains five minutes');
+  assert.equal(child.error?.code, 'ETIMEDOUT', 'Controlled child must actually be killed');
+  assert.equal(scratchPresent, true, 'Child finally did not remove its scratch');
+  assert.equal(path.dirname(fs.readFileSync(receipt, 'utf8')), home, 'CLI os.tmpdir must be inside private home');
+  for (const key of ['TMPDIR', 'TMP', 'TEMP']) assert.equal(options.env[key], home);
+  assert.ok(!fs.existsSync(fs.readFileSync(receipt, 'utf8')), 'Wrapper removes killed child scratch');
+  assert.ok(!fs.existsSync(home));
+  assert.deepEqual(fs.readdirSync(ambient), ['sentinel']);
+  assert.equal(fs.readFileSync(path.join(ambient, 'sentinel'), 'utf8'), 'keep');
+  assert.ok(!(output.join('') + fs.readFileSync(env.GITHUB_STEP_SUMMARY, 'utf8')).includes('SECRET'));
+});
 
 for (const failure of ['timeout', 'malformed', 'throw']) test(`file capture cleans up and withholds diagnostics after ${failure}`, t => {
   const { env } = fixture(t);

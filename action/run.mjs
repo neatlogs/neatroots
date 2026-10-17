@@ -78,7 +78,10 @@ export function run(env = process.env, execute = spawnSync, write = console.log)
     // with this action's Node so a cache restored to another temp root relocates.
     const cli = path.join(env.RUNNER_TEMP, 'neatroots-action-install', 'src', 'packages', 'neatroots', 'dist', 'cli.js');
     const result = execute(process.execPath, [cli, ...args], {
-      env: { ...env, NEATROOTS_HOME: home }, stdio: ['ignore', report, 'ignore'],
+      // The CLI's offline database uses os.tmpdir(), independently of rootsHome.
+      // Keep every platform's temp selector inside the directory removed below,
+      // including when a timeout kills the child before its own finally runs.
+      env: { ...env, NEATROOTS_HOME: home, TMPDIR: home, TMP: home, TEMP: home }, stdio: ['ignore', report, 'ignore'],
       timeout: 300_000, shell: false,
     });
     if (result.error || ![0, 1, 2].includes(result.status)) throw new Error('Check process failed');

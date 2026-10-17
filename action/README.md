@@ -69,6 +69,8 @@ before exiting. At most 16 MiB is accepted and read into memory; larger reports
 are exit 2. This is a post-execution size check, not a disk-write cap: the temporary
 file can grow beyond 16 MiB until the CLI exits or reaches the five-minute timeout.
 Stderr is discarded, and the capture and isolated home are removed after the call.
+The child's `TMPDIR`, `TMP` and `TEMP` also point into that home, so offline trace
+databases are removed even when the timeout prevents the CLI's own cleanup.
 
 Run the action tests with `node --test action/*.test.mjs`. The repository's
 action workflow tests known clean and failing traces through the actual composite
