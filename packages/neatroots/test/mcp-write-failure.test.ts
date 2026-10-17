@@ -90,8 +90,8 @@ it.each([false, true])("exclusive-create race preserves the other writer and pri
     registry = new CheckRegistry(store, checks, () => projectDirs);
     expect(fs.readFileSync(path.join(checks, `${check.id}.yaml`), "utf8")).toBe(`id: ${check.id}\nkind: rule\nrule: { type: count, at_least: 2 }\n`);
     expect(registry.pendingMcpCheck(check.id)?.revision).toBe(proposal.revision);
-    expect(registry.get(check.id)?.source).toBe("user");
-    expect(registry.enabled().some((c) => c.check.id === check.id)).toBe(true);
+    expect(registry.get(check.id)?.source).toBe(prior ? "mcp" : "user");
+    expect(registry.enabled().some((c) => c.check.id === check.id)).toBe(!prior);
     expect(store.getMeta(`mcp_origin:${check.id}`)).toBe(previousOrigin);
     expect(store.getMeta(`approved_mcp:${check.id}`)).toBe(prior ? "old-grant" : undefined);
   } finally { vi.restoreAllMocks(); store.close(); fs.rmSync(dir, { recursive: true, force: true }); }

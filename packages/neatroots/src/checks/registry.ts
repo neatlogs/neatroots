@@ -215,9 +215,8 @@ export class CheckRegistry {
         for (const e of errs) errors.push({ path: p, ...e });
         for (const c of checks) {
           const origin = this.store.getMeta(`mcp_origin:${c.id}`);
-          let originPath: string | undefined;
-          try { originPath = (JSON.parse(origin ?? "null") as [string, string] | null)?.[1]; } catch { /* an invalid intent cannot grant approval */ }
-          const authoredByMcp = source !== "library" && originPath === path.resolve(p);
+          // Provenance follows the ID across moves and shadows; only a human save clears it.
+          const authoredByMcp = source !== "library" && origin !== undefined;
           next.set(c.id, { check: c, source: authoredByMcp ? "mcp" : source, path: p });
         }
       }
@@ -233,7 +232,7 @@ export class CheckRegistry {
       if (r.source === "mcp" && r.path) {
         // Approved MCP checks stay file-backed, while this row preserves their origin. The file
         // remains the source of truth; a missing or unregistered file must not revive a stale copy.
-        if (loaded?.path && path.resolve(loaded.path) === path.resolve(r.path) && loaded.source !== "library") next.set(r.id, { ...loaded, source: "mcp" });
+        if (loaded?.path && loaded.source !== "library") next.set(r.id, { ...loaded, source: "mcp" });
         continue;
       }
       if (loaded) continue;

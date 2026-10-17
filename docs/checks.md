@@ -97,6 +97,14 @@ is the expected level, not necessarily a whole number.
 
 MCP-created checks are inactive until a person approves them in the local Checks page. A pending edit does not change the active check; the existing version keeps running until approval, and rejection discards only the proposal. Approved checks retain their MCP origin in the Checks list. UI saves made by a person remain immediate; the existing CLI `checks` commands continue to list or validate files. Approve or reject the exact revision shown: if the proposal or current check changes, refresh and review again. Approval applies to that definition and target file; it is not a blanket grant for later agent edits. Previously saved halt proposals cannot be approved; save halt rules yourself in the app or CLI.
 
+MCP origin follows the check ID when a file is renamed, moved between registered check directories,
+or shadowed by another file with the same ID. The approval still requires the exact definition and
+path, so a moved or changed version stays inactive until reviewed again. A same-ID collision is
+treated conservatively as MCP-origin content; save it explicitly in the app to take ownership as a
+human-authored check. A successful human save clears the origin and approval metadata; a failed save
+does not. Legacy file-backed MCP records follow the same rule, but never restore a missing file or
+load one from an unregistered directory. Shipped library checks retain their library identity.
+
 ## Findings
 
 A finding is raised when a rule fires or a probability crosses the line. It becomes **active** when a
