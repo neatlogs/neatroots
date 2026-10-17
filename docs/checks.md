@@ -7,6 +7,39 @@ A check is anything neatroots watches for. Checks are YAML, loaded from (later w
 3. each project's `.neatroots/checks/` registered with `neatroots init`,
 4. questions the planner or a coding agent wrote (kept in the database until you save them).
 
+## Reproducible offline runs
+
+For CI, `neatroots check` can use only the check directories named in the repository and pin their
+contents and selected rule ids in a lockfile:
+
+```sh
+neatroots check traces/*.json \
+  --checks .neatroots/checks \
+  --reproducible \
+  --lockfile .neatroots/checks.lock.json \
+  --json
+```
+
+Each input file is evaluated separately. If multiple files contain the same trace id, their spans
+are not combined into one verdict.
+
+In this mode, `--checks` is the complete check set. The shipped library, `~/.neatroots/checks`, and
+checks saved in the local database are not loaded. Directories must exist inside the current working
+directory. They are read in the order given, so a later directory replaces an earlier check with the
+same id; YAML files within each directory are read in name order. `--only` can further narrow the
+enabled rules.
+
+The first valid run creates the lockfile. It records the relative check directories, each valid
+check's id, kind, source file and SHA-256 hash of its parsed definition, and the selected rule ids in
+stable order. Later runs verify that the repository checks and rule selection match the lockfile;
+changed, added or removed checks return exit code 2. Question checks are recorded too, although the
+offline checker evaluates rules only. Invalid check files also return 2 and do not create a lockfile.
+If you intentionally change the set of checks, remove the lockfile, run the command again, review
+the new hashes and rule ids, and commit the replacement with the check changes.
+
+Without `--reproducible`, `--checks` keeps its normal meaning: add these project directories after
+the shipped library and personal checks.
+
 ## Rules
 
 Code, no model, every span.

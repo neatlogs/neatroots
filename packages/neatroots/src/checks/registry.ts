@@ -80,6 +80,15 @@ export function checkDirState(dir: string): { ok: true } | { ok: false; missing:
   }
 }
 
+export interface CheckRegistrySources {
+  /** Load the shipped library before user and project checks. Defaults to true. */
+  library?: boolean;
+  /** Load ~/.neatroots/checks before project checks. Defaults to true. */
+  user?: boolean;
+  /** Load checks saved in the local database when no file shadows them. Defaults to true. */
+  database?: boolean;
+}
+
 /** Parses YAML holding one check, a list of checks, or `{checks: [...]}`. */
 export function parseChecks(text: string): { checks: Check[]; errors: { id?: string; message: string }[] } {
   const checks: Check[] = [];
@@ -158,15 +167,21 @@ export function checkToYaml(check: Check): string {
  */
 export class CheckRegistry {
   private checks = new Map<string, LoadedCheck>();
+  private resolvedLibraryDir?: string;
   errors: CheckLoadError[] = [];
-  readonly libraryDir = findLibraryDir();
 
   constructor(
     private readonly store: Store,
     private readonly userDir: string,
     private readonly projectDirs: () => string[],
+    private readonly sources: CheckRegistrySources = {},
   ) {
     this.reload();
+  }
+
+  get libraryDir(): string {
+    this.resolvedLibraryDir ??= findLibraryDir();
+    return this.resolvedLibraryDir;
   }
 
   reload(): void {
@@ -200,16 +215,18 @@ export class CheckRegistry {
         for (const c of checks) next.set(c.id, { check: c, source, path: p });
       }
     };
-    loadDir(this.libraryDir, "library");
-    loadDir(this.userDir, "user");
+    if (this.sources.library !== false) loadDir(this.libraryDir, "library");
+    if (this.sources.user !== false) loadDir(this.userDir, "user");
     for (const d of this.projectDirs()) loadDir(d, "project");
-    const rows = this.store.db
-      .prepare("SELECT id, source, body FROM checks WHERE source IN ('planner', 'mcp')")
-      .all() as { id: string; source: CheckSource; body: string }[];
-    for (const r of rows) {
-      if (next.has(r.id)) continue;
-      const { checks } = parseChecks(r.body);
-      if (checks[0]) next.set(r.id, { check: checks[0], source: r.source, path: null });
+    if (this.sources.database !== false) {
+      const rows = this.store.db
+        .prepare("SELECT id, source, body FROM checks WHERE source IN ('planner', 'mcp')")
+        .all() as { id: string; source: CheckSource; body: string }[];
+      for (const r of rows) {
+        if (next.has(r.id)) continue;
+        const { checks } = parseChecks(r.body);
+        if (checks[0]) next.set(r.id, { check: checks[0], source: r.source, path: null });
+      }
     }
     for (const [id, lc] of next) {
       this.store.upsertCheckRow({ id, kind: lc.check.kind === "rule" ? "rule" : "question", source: lc.source, path: lc.path, body: checkToYaml(lc.check), enabled: lc.check.enabled });
