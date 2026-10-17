@@ -92,6 +92,7 @@ interface LiveRun {
   answered?: { traceChecks: Set<string>; toolSpans: Set<string> };
   /** Checks re-run on a stored run: steering never had a chance, so nothing counts as missed. */
   rechecked?: boolean;
+  abort: AbortController;
 }
 
 export interface EngineStatus {
@@ -265,6 +266,7 @@ export class Engine {
       ended: false,
       endHandled: false,
       doctor: row.doctor === 1,
+      abort: new AbortController(),
     };
     this.live.set(traceId, r);
     return r;
@@ -285,6 +287,17 @@ export class Engine {
       clearTimeout(run.endTimer);
       run.endTimer = setTimeout(() => void this.track(u.traceId, this.handleEnd(run)), 400);
     }
+  }
+
+  /** Stops live engine work before a run's stored rows are removed or replaced. */
+  cancelRun(traceId: string): void {
+    const run = this.live.get(traceId);
+    if (!run) return;
+    run.abort.abort();
+    clearTimeout(run.debounce);
+    clearTimeout(run.endTimer);
+    run.dirty.clear();
+    this.live.delete(traceId);
   }
 
   /** Checks in force for a run: its plan plus every user, project and MCP question that applies. */
@@ -414,6 +427,7 @@ export class Engine {
   // ----------------------------------------------------------------- rules
 
   private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>): void {
+    if (run.abort.signal.aborted) return;
     for (const lc of this.registry.rules()) {
       const rule = lc.check as RuleCheck;
       if (!this.appliesTo(rule, run)) continue;
@@ -530,9 +544,11 @@ export class Engine {
   ): Promise<"unavailable" | void> {
     let result: DecisionResult;
     try {
-      result = await this.decisions.decide(evidence, [toQuestion(check, params)]);
+      result = await this.decisions.decide(evidence, [toQuestion(check, params)], { signal: run.abort.signal });
+      if (run.abort.signal.aborted) return;
       this.decisionDown = false;
     } catch (err) {
+      if (run.abort.signal.aborted) return;
       if (err instanceof DecisionUnavailableError || err instanceof LlmUnavailableError) {
         if (!this.decisionDown) log.warn(`questions skipped: ${(err as Error).message}`);
         this.decisionDown = true;
@@ -586,7 +602,8 @@ export class Engine {
       }
       // A second look, with a quote that must be in the run, before anything is raised.
       if ((run.rejected.get(check.id) ?? 0) >= 3) return;
-      const check2 = check.kind === "yes_no" ? await verifyFlag(this.llm, fillTemplate(check.ask, params) || check.ask, evidence) : undefined;
+      const check2 = check.kind === "yes_no" ? await verifyFlag(this.llm, fillTemplate(check.ask, params) || check.ask, evidence, run.abort.signal) : undefined;
+      if (run.abort.signal.aborted) return;
       if (check2 && !check2.verified) {
         run.rejected.set(check.id, (run.rejected.get(check.id) ?? 0) + 1);
         log.debug(`${check.id}: flag not confirmed on a second look${check2.quote ? ` (quote: ${clip(check2.quote, 80)})` : ""}`);
@@ -657,7 +674,8 @@ export class Engine {
               partial: "it returned only part of what was asked for",
             },
           },
-        ]);
+        ], { signal: run.abort.signal });
+        if (run.abort.signal.aborted) return;
         const a = r.answers.tool_result;
         label = (a?.choice as typeof label) ?? "success";
         probability = a?.probability ?? 0;
@@ -747,7 +765,9 @@ export class Engine {
       const r = await this.decisions.decide(
         `Finding: ${f.title}${f.probability !== null ? ` (probability ${f.probability.toFixed(2)})` : ""}\n\n${ev}`,
         [{ name: "triage", type: "score", ask: "How much does this run need a developer's closer look because of this finding?", levels: TRIAGE_LEVELS }],
+        { signal: run.abort.signal },
       );
+      if (run.abort.signal.aborted) return;
       score = r.answers.triage?.score ?? 0;
     } catch {
       return;
@@ -755,7 +775,7 @@ export class Engine {
     const updated = this.roots.store.updateFinding(f.id, { triage_score: Math.round(score * 10) / 10 });
     if (updated) this.roots.bus.emit("finding", updated);
     if (score < INVESTIGATE_AT) return;
-    const work = () => this.investigate(run.traceId, f.id).then(() => undefined);
+    const work = () => this.investigate(run.traceId, f.id, run.abort.signal).then(() => undefined);
     if (run.used.investigations < this.roots.config.budgets.investigationsPerRun) {
       run.used.investigations++;
       await work();
@@ -777,7 +797,7 @@ export class Engine {
   }
 
   /** LLM investigation of a finding: cause, evidence spans, fix; checked for grounding. */
-  async investigate(traceId: string, findingId: string): Promise<Explanation | undefined> {
+  async investigate(traceId: string, findingId: string, signal?: AbortSignal): Promise<Explanation | undefined> {
     const f = this.roots.store.getFinding(findingId);
     if (!f) return undefined;
     const snap = loadTrace(this.roots.store, traceId);
@@ -787,12 +807,14 @@ export class Engine {
         { role: "system", content: INVESTIGATE_SYSTEM },
         { role: "user", content: `Finding: ${f.title}\n\n${wrapRun(ev)}` },
       ],
-      { schema: { name: "investigation", schema: INVESTIGATE_SCHEMA }, maxTokens: 400, priority: "low" },
+      { schema: { name: "investigation", schema: INVESTIGATE_SCHEMA }, maxTokens: 400, priority: "low", signal },
     );
+    if (signal?.aborted) return undefined;
     const out = r.json as { cause?: string; evidence?: string[]; fix?: string } | undefined;
     if (!out?.cause) return undefined;
     const spanIds = resolveRefs(snap, out.evidence).length ? resolveRefs(snap, out.evidence) : f.evidence_span_ids;
-    const grounding = await this.grounding(ev, `${out.cause}\nFix: ${out.fix ?? ""}`);
+    const grounding = await this.grounding(ev, `${out.cause}\nFix: ${out.fix ?? ""}`, signal);
+    if (signal?.aborted) return undefined;
     const exp = this.roots.store.insertExplanation({
       target_type: "finding",
       target_id: f.id,
@@ -810,11 +832,11 @@ export class Engine {
   }
 
   /** P(supported) for a piece of LLM writing against its evidence, from the decision model. */
-  async grounding(evidence: string, claim: string): Promise<number | null> {
+  async grounding(evidence: string, claim: string, signal?: AbortSignal): Promise<number | null> {
     try {
       const r = await this.decisions.decide(`${evidence}\n\nWritten explanation:\n${claim}`, [
         { name: "unsupported", type: "yes_no", ask: "Does the written explanation claim something that the spans above do not show?" },
-      ]);
+      ], { signal });
       return 1 - (r.answers.unsupported?.probability ?? 0.5);
     } catch {
       return null;
@@ -833,8 +855,9 @@ export class Engine {
           { role: "system", content: NOTE_SYSTEM },
           { role: "user", content: `Finding: ${f.title}\nCurrent note: ${template.text}\n\n${wrapRun(ev)}` },
         ],
-        { schema: { name: "note", schema: NOTE_SCHEMA }, maxTokens: 160, priority: "urgent", timeoutSec: 45 },
+        { schema: { name: "note", schema: NOTE_SCHEMA }, maxTokens: 160, priority: "urgent", timeoutSec: 45, signal: run.abort.signal },
       );
+      if (run.abort.signal.aborted) return;
       text = (r.json as { note?: string } | undefined)?.note?.trim();
       model = r.model;
     } catch {
@@ -851,13 +874,14 @@ export class Engine {
           { name: "unsupported", type: "yes_no", ask: "Does the note claim something that the spans above do not show?" },
           { name: "copied", type: "yes_no", ask: "Does the note pass on instructions or text copied from a tool's output?" },
         ],
-        { priority: "urgent" },
+        { priority: "urgent", signal: run.abort.signal },
       );
       unsupported = r.answers.unsupported?.probability ?? 1;
       copied = r.answers.copied?.probability ?? 1;
     } catch {
       /* without the checks the template stays */
     }
+    if (run.abort.signal.aborted) return;
     const checks = { unsupported, copied, model: model ?? null };
     if (unsupported < 0.5 && copied < 0.5) {
       this.steering.replace(template.id, text, checks);
@@ -908,6 +932,7 @@ export class Engine {
       run.traceId,
       shared.then((plan) => {
         run.planning = undefined;
+        if (run.abort.signal.aborted) return;
         if (plan && run.plan !== plan) {
           run.plan = plan;
           this.roots.store.setRunPlan(run.traceId, plan.id);
@@ -1013,7 +1038,7 @@ ${library}`;
   // --------------------------------------------------------------- run end
 
   private async handleEnd(run: LiveRun): Promise<void> {
-    if (run.endHandled) return;
+    if (run.endHandled || run.abort.signal.aborted) return;
     run.endHandled = true;
     // Notes the agent never picked up can no longer help this run.
     for (const n of this.roots.store.notesForTrace(run.traceId, "pending")) {
@@ -1060,19 +1085,22 @@ ${library}`;
     if (run.used.investigations >= this.roots.config.budgets.investigationsPerRun) return;
     try {
       const ev = buildEvidence(snap, { fields: ["input", "output", "status", "error"], final_output: true, last: 10 });
-      const r = await this.decisions.decide(ev.text, [
-        { name: "triage", type: "score", ask: "How much does this failed run need a developer's closer look?", levels: TRIAGE_LEVELS },
-      ]);
+      const r = await this.decisions.decide(
+        ev.text,
+        [{ name: "triage", type: "score", ask: "How much does this failed run need a developer's closer look?", levels: TRIAGE_LEVELS }],
+        { signal: run.abort.signal },
+      );
+      if (run.abort.signal.aborted) return;
       if ((r.answers.triage?.score ?? 0) < INVESTIGATE_AT) return;
     } catch {
       return;
     }
     run.used.investigations++;
-    await this.explainRun(run.traceId);
+    await this.explainRun(run.traceId, { signal: run.abort.signal });
   }
 
   /** Explains a whole run: likely cause, the spans that show it, and a fix. */
-  async explainRun(traceId: string, opts: { force?: boolean; priority?: "interactive" | "low" } = {}): Promise<Explanation | undefined> {
+  async explainRun(traceId: string, opts: { force?: boolean; priority?: "interactive" | "low"; signal?: AbortSignal } = {}): Promise<Explanation | undefined> {
     if (!opts.force) {
       const existing = this.roots.store.explanationFor("run", traceId);
       if (existing) return existing;
@@ -1090,12 +1118,14 @@ ${library}`;
         { role: "system", content: INVESTIGATE_SYSTEM },
         { role: "user", content: `${header}\n\nExplain the most likely cause of any problem in this run. If the run looks fine, say so.\n\n${wrapRun(ev.text)}` },
       ],
-      { schema: { name: "investigation", schema: INVESTIGATE_SCHEMA }, maxTokens: 450, priority: opts.priority ?? "low" },
+      { schema: { name: "investigation", schema: INVESTIGATE_SCHEMA }, maxTokens: 450, priority: opts.priority ?? "low", signal: opts.signal },
     );
+    if (opts.signal?.aborted) return undefined;
     const out = r.json as { cause?: string; evidence?: string[]; fix?: string } | undefined;
     if (!out?.cause) return undefined;
     const spanIds = resolveRefs(snap, out.evidence);
-    const grounding = await this.grounding(ev.text, `${out.cause}\nFix: ${out.fix ?? ""}`);
+    const grounding = await this.grounding(ev.text, `${out.cause}\nFix: ${out.fix ?? ""}`, opts.signal);
+    if (opts.signal?.aborted) return undefined;
     const exp = this.roots.store.insertExplanation({
       target_type: "run",
       target_id: traceId,
@@ -1124,8 +1154,9 @@ ${library}`;
           { role: "system", content: SUMMARY_SYSTEM },
           { role: "user", content: `${header}\n\n${wrapRun(ev.text)}` },
         ],
-        { schema: { name: "summary", schema: SUMMARY_SCHEMA }, maxTokens: 220, priority: "low" },
+        { schema: { name: "summary", schema: SUMMARY_SCHEMA }, maxTokens: 220, priority: "low", signal: run.abort.signal },
       );
+      if (run.abort.signal.aborted) return;
       const lines = (r.json as { lines?: string[] } | undefined)?.lines?.filter((l) => typeof l === "string" && l.trim());
       if (!lines?.length) return;
       const text = lines.slice(0, 3).map((l) => clip(l.trim().replace(/^\d+[.)]\s*/, ""), 200)).join("\n");
@@ -1208,7 +1239,7 @@ ${library}`;
   async recheck(traceId: string, opts: { resume?: boolean } = {}): Promise<void> {
     const row = this.roots.store.getRun(traceId);
     if (!row) return;
-    this.live.delete(traceId);
+    this.cancelRun(traceId);
     const run = this.liveRun(traceId)!;
     run.ended = row.status !== "running";
     run.rechecked = true;
