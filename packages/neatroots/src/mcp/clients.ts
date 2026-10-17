@@ -8,9 +8,11 @@ import { fileURLToPath } from "node:url";
 // File-based clients are edited in place: other entries are kept, a backup is made before the
 // first change, and a file we can't parse (comments, say) is left alone with instructions instead.
 
-export const SERVER_NAME = "neatroots";
-/** Names used before the rename; connecting or disconnecting clears them. */
-const LEGACY_NAMES = ["neatbolt"];
+// The TOML scanner lives in ./toml-entry.js (it has its own rules for comments,
+// multi-line strings and byte-exact removal).
+import { LEGACY_NAMES, SERVER_NAME, stripTomlEntry, tomlHas } from "./toml-entry.js";
+
+export { SERVER_NAME };
 
 export interface ServerCommand {
   command: string;
@@ -227,26 +229,6 @@ function jsonSet(file: string, shape: Shape, cmd: ServerCommand | null): string 
 }
 
 // ------------------------------------------------------------------ TOML
-
-const TOML_HEADER = new RegExp(`^\\[mcp_servers\\.${SERVER_NAME}(\\..+)?\\]\\s*$`);
-const TOML_ANY_OURS = new RegExp(`^\\[mcp_servers\\.(${[SERVER_NAME, ...LEGACY_NAMES].join("|")})(\\..+)?\\]\\s*$`);
-
-/** Removes our [mcp_servers.neatroots] table (and its sub-tables), leaving everything else as written. */
-function stripTomlEntry(text: string): string {
-  const out: string[] = [];
-  let skipping = false;
-  for (const line of text.split("\n")) {
-    const t = line.trim();
-    if (t.startsWith("[")) skipping = TOML_ANY_OURS.test(t);
-    if (!skipping) out.push(line);
-  }
-  return out.join("\n").replace(/\n{3,}/g, "\n\n");
-}
-
-function tomlHas(file: string): boolean {
-  return fs.existsSync(file) && fs.readFileSync(file, "utf8").split("\n").some((l) => TOML_HEADER.test(l.trim()));
-}
-
 function tomlSet(file: string, cmd: ServerCommand | null): void {
   const before = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
   let text = stripTomlEntry(before).trimEnd();
