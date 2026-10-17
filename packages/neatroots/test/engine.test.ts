@@ -181,6 +181,22 @@ describe("engine", () => {
     await tb.roots.engine!.waitIdle(t, 5000);
     expect(tb.roots.store.notesForTrace(t)).toEqual([]);
   });
+
+  it("keeps an incremental snapshot instead of reloading the full trace for every batch", async () => {
+    const tb = await makeRoots();
+    cleanup.push(tb.close);
+    const original = tb.roots.store.getSpans.bind(tb.roots.store);
+    let fullLoads = 0;
+    tb.roots.store.getSpans = ((...args: Parameters<typeof original>) => {
+      fullLoads++;
+      return original(...args);
+    }) as typeof tb.roots.store.getSpans;
+    const { t, root } = startRun(tb);
+
+    for (let i = 0; i < 12; i++) tb.roots.ingest([batch([toolSpan(t, root, `tool_${i}`, `{ "i": ${i} }`, "ok")])]);
+
+    expect(fullLoads).toBe(1);
+  });
 });
 
 describe("planning", () => {
