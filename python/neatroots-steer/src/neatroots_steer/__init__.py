@@ -20,6 +20,7 @@ Steering is opt-in per project in neatroots (neatroots steering advisory --proje
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import functools
 import inspect
@@ -315,7 +316,8 @@ def _wrap_method(
 
         @functools.wraps(original)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            return await original(*args, **prepare(kwargs))
+            prepared = await asyncio.to_thread(prepare, kwargs)
+            return await original(*args, **prepared)
 
         async_wrapper.__neatroots_wrapped__ = True  # type: ignore[attr-defined]
         setattr(owner, name, async_wrapper)
