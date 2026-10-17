@@ -345,4 +345,45 @@ describe("imports", () => {
       cloud.close();
     }
   });
+
+  it("deduplicates explicit trace IDs and preserves first-seen order before applying limit (#410)", async () => {
+    const idA = hex(16);
+    const idB = hex(16);
+    const exportRequested: string[] = [];
+    const cloud = http.createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      if (req.headers.authorization !== "Bearer nlsa_test_token") {
+        res.statusCode = 401;
+        res.end("{}");
+        return;
+      }
+      const m = req.url?.match(/\/traces\/([^/]+)\/export/);
+      if (m) {
+        exportRequested.push(m[1]);
+        res.end(JSON.stringify({ success: true, data: { schemaVersion: 1, trace: { traceId: m[1], workflowName: "dedup-agent", startedAt: "2026-10-09T10:00:00Z" }, spans: [{ traceId: m[1], spanId: hex(8), parentSpanId: null, spanName: "root", spanType: "workflow", startedAt: "2026-10-09T10:00:00Z", endedAt: "2026-10-09T10:00:01Z", durationMs: 1000, status: "OK" }] } }));
+      } else {
+        res.statusCode = 404;
+        res.end("{}");
+      }
+    });
+    const port = await freePort();
+    await new Promise<void>((r) => cloud.listen(port, "127.0.0.1", r));
+    t = await makeRoots({
+      noEngine: true,
+      serve: true,
+      config: (c) => {
+        c.cloud.apiBase = `http://127.0.0.1:${port}/api/v1/public`;
+        c.cloud.projectId = "proj_1";
+      },
+    });
+    try {
+      process.env.NEATLOGS_SERVICE_TOKEN = "nlsa_test_token";
+      const job = await t.roots.imports.start("neatlogs-cloud", { traceIds: `${idA}, ${idA}, ${idB}, ${idA}` }, { limit: 10 }).done;
+      expect(job).toMatchObject({ state: "succeeded", traces: 2, spans: 2 });
+      expect(exportRequested).toEqual([idA, idB]);
+    } finally {
+      delete process.env.NEATLOGS_SERVICE_TOKEN;
+      cloud.close();
+    }
+  });
 });
