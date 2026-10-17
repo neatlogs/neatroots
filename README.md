@@ -289,10 +289,19 @@ pnpm test                     # server and TypeScript steering tests (vitest)
 pnpm --filter @neatlogs/neatroots-ui e2e     # UI end-to-end tests (Playwright; real server, mock LLM)
 (cd python/neatroots-steer && python -m pytest)
 pnpm typecheck                # all pnpm workspaces
+pnpm audit --prod --audit-level high  # CI dependency audit (high and critical fail)
 sh examples/run-all.sh        # agent and HTTP API examples against a running neatroots; browser, import-files, refund-agent, samples by hand
 pnpm --filter @neatlogs/neatroots dev        # server with reload on 4100
 pnpm --filter @neatlogs/neatroots-ui dev     # UI on 5173 (set NEATROOTS_DEV_ORIGIN=http://localhost:5173 on the server)
 ```
+
+CI audits production dependencies across the pnpm workspace on pushes to main and pull requests.
+Development dependencies are excluded; auto-installed peer dependencies may still appear in the
+production audit. To include development dependencies when investigating, run `pnpm audit`.
+Fix reported vulnerabilities rather than bypassing the audit. Dependabot checks the root pnpm
+workspace and GitHub Actions weekly, grouping minor and patch version updates per ecosystem;
+major version updates get separate pull requests. Standalone example npm lockfiles and Python
+dependencies are outside this update configuration.
 
 neatroots is built from public inputs: the public Neatlogs SDKs and their telemetry schema,
 OpenTelemetry, MCP, publicly documented APIs, and openly licensed models. Issues and pull requests
