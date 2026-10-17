@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
-import { open, state } from "./util";
+import { api, open, state } from "./util";
 
 async function openDiagnosticDialog(page: Page) {
   await page.getByRole("button", { name: "More actions" }).click();
@@ -87,6 +87,8 @@ test.describe("local diagnostic export", () => {
     const downloadWait = page.waitForEvent("download");
     await dialog.getByRole("button", { name: "Download diagnostic bundle" }).click();
     const download = await downloadWait;
+    expect(download.suggestedFilename()).toMatch(/^neatroots-diagnostic-[a-f0-9]{12}\.json$/);
+    expect(download.suggestedFilename()).not.toContain(state().supportRun.slice(0, 12));
     expect(await fs.promises.readFile(await download.path(), "utf8")).toBe(JSON.stringify(bundle));
   });
 
@@ -125,6 +127,28 @@ test.describe("local diagnostic export", () => {
     expect(await fs.promises.readFile(await download.path(), "utf8")).toBe(shown);
     expect(download.suggestedFilename()).toMatch(/^neatroots-diagnostic-[a-f0-9]{12}\.json$/);
     expect(externalRequests).toEqual([]);
+  });
+
+  test("keeps redacted trace identities out of actual download filenames", async ({ page }) => {
+    const traceId = state().supportRun;
+    await api("/api/settings", { method: "POST", body: JSON.stringify({ redact_patterns: ["^[a-f0-9]+$"] }) });
+    try {
+      const { dialog, preview } = await showExport(page);
+      const shown = (await preview.textContent())!.trim();
+      const bundle = JSON.parse(shown) as { run: { trace_id: string } };
+      expect(bundle.run.trace_id).toMatch(/^[a-f0-9]{32}$/);
+      expect(bundle.run.trace_id).not.toBe(traceId);
+      expect(shown).not.toContain(traceId);
+      const downloadWait = page.waitForEvent("download");
+      await dialog.getByRole("button", { name: "Download diagnostic bundle" }).click();
+      const download = await downloadWait;
+      expect(download.suggestedFilename()).toMatch(/^neatroots-diagnostic-[a-f0-9]{12}\.json$/);
+      expect(download.suggestedFilename()).not.toContain(traceId.slice(0, 12));
+      expect(await fs.promises.readFile(await download.path(), "utf8")).toBe(shown);
+    } finally {
+      // This isolated e2e server starts with the default empty custom-pattern list.
+      await api("/api/settings", { method: "POST", body: JSON.stringify({ redact_patterns: [] }) });
+    }
   });
 
   test("renders the redaction preview in light, dark and 390px layouts", async ({ page }, testInfo) => {

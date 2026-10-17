@@ -53,7 +53,9 @@ export function DiagnosticExportDialog({ traceId, open, onOpenChange }: { traceI
     const url = URL.createObjectURL(new Blob([content], { type: "application/json;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = url;
-    link.download = `neatroots-diagnostic-${traceId.replace(/[^a-z0-9]/gi, "").slice(0, 12)}.json`;
+    // Filename metadata must not reveal identifiers omitted or aliased in the bundle.
+    const token = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+    link.download = `neatroots-diagnostic-${token}.json`;
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };

@@ -204,7 +204,7 @@ neatlogs.init(workflow_name="refund-agent", flush_interval=0.5, instrumentations
   saved patterns refuse the entire export with a settings error. Built-in rules remain unchanged;
   these are work limits, not a total request-duration guarantee. Refusal produces no partial bundle.
   The preview renders at most 32 Ki characters; downloading an accepted export retains its complete
-  sanitized JSON.
+  sanitized JSON. Download filenames use unrelated random tokens.
   It does not gather extra environment or machine state. Nothing is uploaded
   automatically, and pattern matches cannot guarantee every sensitive value is removed. Currently
   enabled rules that apply to the run
