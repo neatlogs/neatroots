@@ -272,6 +272,32 @@ describe("other conventions", () => {
     const wf = span({ traceId: tid, name: "plan.workflow", kind: "", attrs: [s("traceloop.span.kind", "workflow"), s("traceloop.entity.input", '{"q":1}')] });
     expect(buildView({ ...wf, attributes: wf.attributes.filter((a) => a.key !== "neatlogs.span.kind") }, [])).toMatchObject({ kind: "WORKFLOW", input: { q: 1 } });
   });
+
+  it("reads PydanticAI agent previews, offered tools and aggregate tokens", () => {
+    const tid = hex(16);
+    const messages = [
+      { parts: [{ content: "Refund order 1001", timestamp: "2026-10-17T00:00:00Z", part_kind: "user-prompt" }], kind: "request" },
+      { parts: [{ content: "Done", part_kind: "text" }], kind: "response" },
+    ];
+    const agent = span({ traceId: tid, name: "invoke_agent support", kind: "", attrs: [
+      s("gen_ai.operation.name", "invoke_agent"),
+      s("pydantic_ai.all_messages", JSON.stringify(messages)),
+      s("final_result", "Refund issued"),
+      s("gen_ai.aggregated_usage.input_tokens", 21),
+      s("gen_ai.aggregated_usage.output_tokens", 8),
+    ] });
+    const agentView = buildView({ ...agent, attributes: agent.attributes.filter((a) => a.key !== "neatlogs.span.kind") }, []);
+    expect(agentView).toMatchObject({ kind: "AGENT", input: "Refund order 1001", output: "Refund issued", promptTokens: 21, completionTokens: 8, totalTokens: 29 });
+
+    const llm = span({ traceId: tid, name: "chat gpt-4o-mini", kind: "", attrs: [
+      s("gen_ai.operation.name", "chat"),
+      s("gen_ai.tool.definitions", JSON.stringify([
+        { type: "function", name: "lookup_order", description: "Look up an order", parameters: { type: "object" } },
+        { type: "function", name: "issue_refund", description: "Refund an order", parameters: { type: "object" } },
+      ])),
+    ] });
+    expect(buildView({ ...llm, attributes: llm.attributes.filter((a) => a.key !== "neatlogs.span.kind") }, []).tools).toEqual(["lookup_order", "issue_refund"]);
+  });
 });
 
 describe("imports", () => {
