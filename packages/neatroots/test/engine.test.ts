@@ -49,6 +49,22 @@ describe("engine", () => {
     expect(tb.roots.store.notesForTrace(t)).toEqual([]);
   });
 
+  it("does not re-raise a dismissed finding during the same run", async () => {
+    const { tb } = await setup();
+    const { t, root } = startRun(tb);
+    const repeated = () => toolSpan(t, root, "lookup_order", '{"order_id":"4512"}', undefined, "404");
+    for (let i = 0; i < 3; i++) tb.roots.ingest([batch([repeated()])]);
+    const finding = await until(() => tb.roots.store.findingsForTrace(t).find((item) => item.check_id === "repeated-tool-call"));
+    await tb.roots.engine!.waitIdle(t, 5000);
+    tb.roots.store.updateFinding(finding.id, { status: "dismissed" });
+
+    tb.roots.ingest([batch([repeated()])]);
+    await tb.roots.engine!.waitIdle(t, 5000);
+    expect(tb.roots.store.findingsForTrace(t).filter((item) => item.check_id === "repeated-tool-call")).toEqual([
+      expect.objectContaining({ id: finding.id, status: "dismissed" }),
+    ]);
+  });
+
   it("delivers nothing once steering is turned off, a halt included", async () => {
     const { tb } = await setup();
     tb.roots.steering.setMode("test-agent", "advisory");
