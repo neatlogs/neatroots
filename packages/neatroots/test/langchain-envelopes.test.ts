@@ -366,15 +366,61 @@ describe("reading LangChain's serialized messages", () => {
     expect(chainValue({ outputs: LC.ai("hello"), kwargs: {} })).toEqual({ role: "assistant", content: "hello" });
   });
 
-  it("reads a graph state with other keys, JSON-string members and content blocks", () => {
+  it("only reads the envelope on a value from traceloop.entity.* or carrying its kwargs key", () => {
+    // Another framework's tool may well return {"output": ...} or {"inputs": ...}: that is the result.
+    expect(toolOutput({ output: "stdout text" })).toEqual({ output: "stdout text" });
+    expect(toolInput({ inputs: [1, 2, 3] })).toEqual({ inputs: [1, 2, 3] });
+    expect(chainValue({ inputs: [1, 2, 3] })).toEqual({ inputs: [1, 2, 3] });
+    expect(chainValue({ outputs: { answer: 42 } })).toEqual({ outputs: { answer: 42 } });
+    // From the traceloop attribute, or with the handler's kwargs, it is the envelope.
+    expect(toolOutput({ output: "stdout text" }, { envelope: true })).toBe("stdout text");
+    expect(toolInput({ inputs: [1, 2, 3] }, { envelope: true })).toEqual([1, 2, 3]);
+    expect(toolOutput({ output: "stdout text", kwargs: { name: "sh" } })).toBe("stdout text");
+    const t = hex(16);
+    const plain = span({ traceId: t, name: "sh", kind: "tool", attrs: [s("neatlogs.tool.name", "sh"), s("neatlogs.tool.output", '{"output": "stdout text"}')] });
+    expect(buildView(plain, []).output).toEqual({ output: "stdout text" });
+    const traced = raw({ traceId: t, name: "sh.tool", attrs: [s("traceloop.span.kind", "tool"), s("traceloop.entity.name", "sh"), s("traceloop.entity.output", '{"output": "stdout text"}')] });
+    expect(buildView(traced, []).output).toBe("stdout text");
+  });
+
+  it("reads a graph state with other keys, JSON-string members and content blocks, keeping the other keys", () => {
     const stateValue = { messages: [OI.human("hi"), JSON.stringify(OI.tool("x", "t", "c1")), { type: "ai", data: { content: [{ type: "text", text: "It is sunny." }, { type: "tool_use", id: "t1", name: "get_weather", input: {} }], type: "ai" } }], remaining_steps: 3 };
-    const msgs = chainValue(stateValue) as Record<string, Plain>[];
-    expect(msgs.map((m) => m.role)).toEqual(["user", "tool", "assistant"]);
-    expect(finalReply(msgs)).toBe("It is sunny.");
+    const read = chainValue(stateValue) as { messages: Record<string, Plain>[]; remaining_steps: number };
+    expect(read.remaining_steps).toBe(3);
+    expect(read.messages.map((m) => m.role)).toEqual(["user", "tool", "assistant"]);
+    expect(finalReply(read)).toBe("It is sunny.");
+    expect(finalReply(read.messages)).toBe("It is sunny.");
     expect(finalReply([{ role: "user", content: "hi" }, { role: "tool", content: "x" }])).toBe("");
     expect(finalReply({ role: "assistant", content: "ok" })).toBe("ok");
     expect(finalReply("plain")).toBeUndefined();
     expect(finalReply({ answer: "x" })).toBeUndefined();
+  });
+
+  it("takes a messages list as LangChain's only when a LangChain message or a [role, text] pair is in it", () => {
+    // An OpenAI request body, or any {role, content} list, is not LangChain's and keeps its other keys.
+    const body = { model: "gpt-4.1", messages: [{ role: "system", content: "be brief" }, { role: "user", content: "hi" }] };
+    expect(chainValue(body)).toEqual(body);
+    expect(chainValue(body.messages)).toEqual(body.messages);
+    // Bare strings count only next to a real LangChain message.
+    expect(chainValue({ messages: ["a", "b"] })).toEqual({ messages: ["a", "b"] });
+    expect(chainValue({ messages: [OI.human("hi"), "and this"] })).toEqual([{ role: "user", content: "hi" }, { role: "user", content: "and this" }]);
+    // [role, text] pairs are LangChain's input form.
+    expect(chainValue({ messages: [["user", "hi"]], thread_id: "t1" })).toEqual({ thread_id: "t1", messages: [{ role: "user", content: "hi" }] });
+    expect(chainValue({ messages: [["system", "be brief"], { role: "user", content: "hi" }] })).toEqual([{ role: "system", content: "be brief" }, { role: "user", content: "hi" }]);
+    expect(chainValue({ messages: [["note", "not a role"]] })).toEqual({ messages: [["note", "not a role"]] });
+  });
+
+  it("gives up on nesting deeper than it will read instead of overflowing the stack", () => {
+    const deep = "[".repeat(3000);
+    expect(pythonLiteral(deep)).toBeUndefined();
+    expect(toolInput(deep)).toBe(deep);
+    expect(reprFields(`content=${deep}`)).toBeUndefined();
+    expect(pythonLiteral("[".repeat(200) + "]".repeat(200))).toBeDefined();
+    const st = store();
+    const t = hex(16);
+    const root = hex(8);
+    expect(() => st.ingest([batch([span({ traceId: t, parent: root, name: "t", kind: "tool", attrs: [s("neatlogs.tool.name", "t"), s("neatlogs.tool.input", deep), s("neatlogs.tool.output", `content=${deep}`)] })])])).not.toThrow();
+    expect(loadTrace(st, t).spans[0].input).toBe(deep);
   });
 
   it("parses Python literals as pydantic and LangChain print them", () => {

@@ -104,10 +104,8 @@ export function langChainMessage(v: Plain | undefined): Message | undefined {
   return undefined;
 }
 
-/** A message in any accepted form: a LangChain envelope, a {role, content} object, or (when `loose`) a [role, text] pair or a bare string. */
+/** A message in a form other than LangChain's: a {role, content} object, or (when `loose`) a [role, text] pair or a bare string. */
 function asMessage(v: Plain, loose: boolean): Message | undefined {
-  const lc = langChainMessage(v);
-  if (lc) return lc;
   if (isObj(v) && typeof v.role === "string" && "content" in v) return v as Message;
   if (!loose) return undefined;
   if (Array.isArray(v) && v.length === 2 && typeof v[0] === "string" && typeof v[1] === "string" && v[0].toLowerCase() in ROLE_OF_TYPE) return { role: ROLE_OF_TYPE[v[0].toLowerCase()], content: v[1] };
@@ -116,32 +114,58 @@ function asMessage(v: Plain, loose: boolean): Message | undefined {
 }
 
 /**
- * A list of messages, every element in an accepted form, as chat-shaped messages. Under a
- * `messages` key LangChain also accepts [role, text] pairs and bare strings; a bare list has to
- * hold real message objects, so a tool that returns a list of strings is left alone.
+ * A list of LangChain messages as chat-shaped messages, or undefined when the list is something
+ * else. It has to be LangChain's: at least one element in one of LangChain's serialized forms,
+ * or, under a `messages` key, one of the [role, text] pairs LangChain accepts as input. Bare
+ * strings count as user messages only next to a real LangChain message, so an OpenAI request
+ * body, a list of {role, content} from another framework or a tool's list of strings is left
+ * as it was.
  */
 export function langChainMessages(v: Plain | undefined, opts: { loose?: boolean } = {}): Message[] | undefined {
   if (!Array.isArray(v) || !v.length) return undefined;
   const out: Message[] = [];
+  let lc = 0;
+  let pairs = 0;
+  let bare = 0;
   for (const e of v) {
-    const m = asMessage(e, !!opts.loose);
+    const lcm = langChainMessage(e);
+    const m = lcm ?? asMessage(e, !!opts.loose);
     if (!m) return undefined;
+    if (lcm) lc++;
+    else if (Array.isArray(e)) pairs++;
+    else if (typeof e === "string") bare++;
     out.push(m);
   }
+  if (!lc && (bare || !pairs)) return undefined;
   return out;
 }
 
-/** A LangGraph state, {"messages": [...]} with whatever else the graph keeps, as its messages. */
-function messageState(v: Plain | undefined): Message[] | undefined {
+/**
+ * A LangGraph state, {"messages": [...]} with whatever else the graph keeps: its messages read as
+ * messages, the other keys kept. Just the messages when there is nothing else.
+ */
+function messageState(v: Plain | undefined): Plain | undefined {
   if (!isObj(v) || !Array.isArray(v.messages)) return undefined;
-  return langChainMessages(v.messages, { loose: true });
+  const messages = langChainMessages(v.messages, { loose: true });
+  if (!messages) return undefined;
+  return Object.keys(v).length === 1 ? messages : { ...v, messages };
 }
 
-/** OpenLLMetry's callback envelopes: the value under `key` when the object has no keys beyond `allowed`. */
-function traceloopInner(v: Plain | undefined, key: string, allowed: string[]): Plain | undefined {
+/**
+ * OpenLLMetry's callback envelopes: the value under `key` when the object has no keys beyond
+ * `allowed`. Only read on a value that came from `traceloop.entity.*` (`envelope`), or that
+ * carries the handler's `kwargs` key: a tool of another framework may well return {"output": ...}.
+ */
+function traceloopInner(v: Plain | undefined, key: string, allowed: string[], envelope: boolean): Plain | undefined {
   if (!isObj(v) || !(key in v) || v[key] === null) return undefined;
+  if (!envelope && !("kwargs" in v)) return undefined;
   for (const k of Object.keys(v)) if (!allowed.includes(k)) return undefined;
   return v[key];
+}
+
+/** Where a span value came from: `envelope` when it was OpenLLMetry's `traceloop.entity.input`/`output`. */
+export interface ValueSource {
+  envelope?: boolean;
 }
 
 /** A message's content as text: a string as is, content blocks by their text parts. */
@@ -159,11 +183,13 @@ function stripped(m: Message): Plain {
   return typeof m.content === "string" || !Array.isArray(m.content) ? m.content : contentText(m.content);
 }
 
+const TOOL_INPUT_KEYS = ["input_str", "tags", "metadata", "inputs", "kwargs"];
+
 /** A tool span's input as the tool's arguments: OpenLLMetry's envelope, with LangGraph's per-step metadata, removed. */
-export function toolInput(v: Plain | undefined): Plain | undefined {
-  const inputs = traceloopInner(v, "inputs", ["input_str", "tags", "metadata", "inputs", "kwargs"]);
+export function toolInput(v: Plain | undefined, src: ValueSource = {}): Plain | undefined {
+  const inputs = traceloopInner(v, "inputs", TOOL_INPUT_KEYS, !!src.envelope);
   if (inputs !== undefined) return inputs;
-  const inputStr = traceloopInner(v, "input_str", ["input_str", "tags", "metadata", "inputs", "kwargs"]);
+  const inputStr = traceloopInner(v, "input_str", TOOL_INPUT_KEYS, !!src.envelope);
   if (typeof inputStr === "string") return jsonOf(inputStr) ?? pythonLiteral(inputStr) ?? inputStr;
   // LangChain's input_str for a dict of arguments is its Python repr: {'city': 'Lagos'}.
   if (typeof v === "string" && /^\s*[[{]/.test(v)) return jsonOf(v) ?? pythonLiteral(v) ?? v;
@@ -171,19 +197,19 @@ export function toolInput(v: Plain | undefined): Plain | undefined {
 }
 
 /** A tool span's output as the tool's result: a serialized ToolMessage gives its content. */
-export function toolOutput(v: Plain | undefined): Plain | undefined {
-  const inner = traceloopInner(v, "output", ["output", "kwargs"]);
+export function toolOutput(v: Plain | undefined, src: ValueSource = {}): Plain | undefined {
+  const inner = traceloopInner(v, "output", ["output", "kwargs"], !!src.envelope);
   const x = inner !== undefined ? inner : v;
   const m = langChainMessage(x);
   return m ? stripped(m) : x;
 }
 
-/** A chain, agent or workflow span's value: OpenLLMetry's envelope removed, messages read as messages. */
-export function chainValue(v: Plain | undefined): Plain | undefined {
-  const inner = traceloopInner(v, "inputs", ["inputs", "tags", "metadata", "kwargs"]) ?? traceloopInner(v, "outputs", ["outputs", "kwargs"]);
+/** A chain, agent or workflow span's value: OpenLLMetry's envelope removed, LangChain messages read as messages. */
+export function chainValue(v: Plain | undefined, src: ValueSource = {}): Plain | undefined {
+  const inner = traceloopInner(v, "inputs", ["inputs", "tags", "metadata", "kwargs"], !!src.envelope) ?? traceloopInner(v, "outputs", ["outputs", "kwargs"], !!src.envelope);
   const x = inner !== undefined ? inner : v;
-  const list = messageState(x) ?? langChainMessages(x);
-  if (list) return list;
+  const messages = messageState(x) ?? langChainMessages(x);
+  if (messages) return messages;
   const one = langChainMessage(x);
   return one ?? x;
 }
@@ -192,10 +218,18 @@ function isMessageList(v: Plain | undefined): v is Message[] {
   return Array.isArray(v) && v.length > 0 && v.every((m) => isObj(m) && typeof m.role === "string");
 }
 
+/** The messages in a value: a message list, or the `messages` of a state that kept its other keys. */
+function messagesIn(v: Plain | undefined): Message[] | undefined {
+  if (isMessageList(v)) return v;
+  if (isObj(v) && isMessageList(v.messages)) return v.messages;
+  return undefined;
+}
+
 /** The text of the last message with `role` in a message list; undefined when there is none. */
 export function lastMessageText(v: Plain | undefined, role: string): string | undefined {
-  if (!isMessageList(v)) return undefined;
-  for (let i = v.length - 1; i >= 0; i--) if (v[i].role === role) return contentText(v[i].content);
+  const msgs = messagesIn(v);
+  if (!msgs) return undefined;
+  for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === role) return contentText(msgs[i].content);
   return undefined;
 }
 
@@ -205,8 +239,9 @@ export function lastMessageText(v: Plain | undefined, role: string): string | un
  * undefined when the value isn't messages at all.
  */
 export function finalReply(v: Plain | undefined): string | undefined {
-  if (isMessageList(v)) {
-    const last = v[v.length - 1];
+  const msgs = messagesIn(v);
+  if (msgs) {
+    const last = msgs[msgs.length - 1];
     return last.role === "assistant" ? contentText(last.content) : "";
   }
   if (isObj(v) && typeof v.role === "string" && "content" in v) return v.role === "assistant" ? contentText(v.content) : "";
@@ -220,18 +255,24 @@ export function finalReply(v: Plain | undefined): string | undefined {
 
 const FAIL = Symbol("not a python literal");
 const ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", "0": "\0", a: "\x07", b: "\b", f: "\f", v: "\v", "\\": "\\", "'": "'", '"': '"' };
+/** Lists and dicts nest at most this deep; past it the text is not read as a literal (the reader recurses once per level). */
+const MAX_DEPTH = 256;
 
 class PyReader {
   i = 0;
+  private depth = 0;
   constructor(private readonly s: string) {}
 
   value(): Plain {
     const s = this.s;
     const c = s[this.i];
     if (c === "'" || c === '"') return this.string(c);
-    if (c === "[") return this.sequence("]");
-    if (c === "(") return this.sequence(")");
-    if (c === "{") return this.dict();
+    if (c === "[" || c === "(" || c === "{") {
+      if (++this.depth > MAX_DEPTH) throw FAIL;
+      const v = c === "{" ? this.dict() : this.sequence(c === "[" ? "]" : ")");
+      this.depth--;
+      return v;
+    }
     for (const [word, val] of [["None", null], ["True", true], ["False", false]] as const) {
       if (s.startsWith(word, this.i)) {
         this.i += word.length;

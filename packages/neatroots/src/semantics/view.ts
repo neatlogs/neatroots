@@ -1,5 +1,5 @@
 import { kvToPlain, type KeyValue, type OtlpSpan, type Plain } from "../otlp/types.js";
-import { chainValue, toolInput, toolOutput } from "./langchain.js";
+import { chainValue, toolInput, toolOutput, type ValueSource } from "./langchain.js";
 
 /**
  * Span kinds from the public Neatlogs telemetry schema. The SDKs send them
@@ -90,12 +90,19 @@ export function maybeJson(v: Plain | undefined): Plain | undefined {
   return v;
 }
 
+function firstKey(attrs: Attrs, keys: string[]): string | undefined {
+  return keys.find((k) => attrs[k] !== undefined && attrs[k] !== null && attrs[k] !== "");
+}
+
 function first(attrs: Attrs, keys: string[]): Plain | undefined {
-  for (const k of keys) {
-    const v = attrs[k];
-    if (v !== undefined && v !== null && v !== "") return v;
-  }
-  return undefined;
+  const k = firstKey(attrs, keys);
+  return k === undefined ? undefined : attrs[k];
+}
+
+/** The first of `keys` that is set, parsed and passed through a reader that wants to know whether it is OpenLLMetry's entity envelope. */
+function read(attrs: Attrs, keys: string[], reader: (v: Plain | undefined, src: ValueSource) => Plain | undefined): Plain | undefined {
+  const key = firstKey(attrs, keys);
+  return reader(maybeJson(first(attrs, keys)), { envelope: key === "traceloop.entity.input" || key === "traceloop.entity.output" });
 }
 
 /**
@@ -311,16 +318,16 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
     case "MCP_TOOL":
       // LangChain tool spans carry the instrumentation's envelope and a serialized ToolMessage;
       // the view keeps the arguments and the result (see langchain.ts).
-      view.input = toolInput(maybeJson(first(attrs, ["neatlogs.tool.input", "neatlogs.tool.arguments", ...genericIn, "gen_ai.tool.call.arguments", "ai.toolCall.args", "ai.toolCall.input"])));
-      view.output = toolOutput(maybeJson(first(attrs, ["neatlogs.tool.output", ...genericOut, "gen_ai.tool.call.result", "ai.toolCall.result", "ai.toolCall.output"])));
+      view.input = read(attrs, ["neatlogs.tool.input", "neatlogs.tool.arguments", ...genericIn, "gen_ai.tool.call.arguments", "ai.toolCall.args", "ai.toolCall.input"], toolInput);
+      view.output = read(attrs, ["neatlogs.tool.output", ...genericOut, "gen_ai.tool.call.result", "ai.toolCall.result", "ai.toolCall.output"], toolOutput);
       break;
     case "WORKFLOW":
-      view.input = chainValue(maybeJson(first(attrs, ["neatlogs.workflow.input", ...genericIn])));
-      view.output = chainValue(maybeJson(first(attrs, ["neatlogs.workflow.output", ...genericOut])));
+      view.input = read(attrs, ["neatlogs.workflow.input", ...genericIn], chainValue);
+      view.output = read(attrs, ["neatlogs.workflow.output", ...genericOut], chainValue);
       break;
     case "AGENT":
-      view.input = chainValue(maybeJson(first(attrs, ["neatlogs.agent.input", ...genericIn, "ai.prompt"])));
-      view.output = chainValue(maybeJson(first(attrs, ["neatlogs.agent.output", ...genericOut, "ai.response.text"])));
+      view.input = read(attrs, ["neatlogs.agent.input", ...genericIn, "ai.prompt"], chainValue);
+      view.output = read(attrs, ["neatlogs.agent.output", ...genericOut, "ai.response.text"], chainValue);
       break;
     case "RETRIEVER":
       view.input = maybeJson(first(attrs, ["neatlogs.retriever.query", ...genericIn]));
@@ -333,8 +340,8 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
     default: {
       // A LangGraph graph is a CHAIN span whose output is the graph state, {"messages": [...]}.
       const k = kind.toLowerCase();
-      view.input = chainValue(maybeJson(first(attrs, [`neatlogs.${k}.input`, ...genericIn])));
-      view.output = chainValue(maybeJson(first(attrs, [`neatlogs.${k}.output`, ...genericOut])));
+      view.input = read(attrs, [`neatlogs.${k}.input`, ...genericIn], chainValue);
+      view.output = read(attrs, [`neatlogs.${k}.output`, ...genericOut], chainValue);
     }
   }
 
