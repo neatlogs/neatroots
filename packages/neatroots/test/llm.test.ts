@@ -289,4 +289,43 @@ describe("tool-call replays", () => {
       { role: "user", content: [{ type: "tool_result", tool_use_id: "call_9", content: '{"status":"delivered"}' }] },
     ]);
   });
+
+  it("merges parallel tool results into one Anthropic user turn", async () => {
+    const srv = await mock(() => ({ json: claudeReply("both checked") }));
+    closers.push(srv.close);
+    const llm = new LlmClient(cfgWith((c) => Object.assign(c.external, { enabled: true, provider: "anthropic", baseUrl: srv.url, model: "claude-opus-5-5" })), {
+      secret: async () => "sk-ant-test-key-0000000000000000",
+    });
+    const r = await llm.chat([
+      { role: "user", content: "Check both orders" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "call_a", name: "lookup_order", arguments: '{"order_id":"1"}' },
+          { id: "call_b", name: "lookup_order", arguments: '{"order_id":"2"}' },
+        ],
+      },
+      { role: "tool", name: "lookup_order", tool_call_id: "call_a", content: '{"status":"delivered"}' },
+      { role: "tool", name: "lookup_order", tool_call_id: "call_b", content: '{"status":"pending"}' },
+    ]);
+    expect(r.text).toBe("both checked");
+    expect(srv.seen[0].body.messages).toEqual([
+      { role: "user", content: "Check both orders" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "call_a", name: "lookup_order", input: { order_id: "1" } },
+          { type: "tool_use", id: "call_b", name: "lookup_order", input: { order_id: "2" } },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "call_a", content: '{"status":"delivered"}' },
+          { type: "tool_result", tool_use_id: "call_b", content: '{"status":"pending"}' },
+        ],
+      },
+    ]);
+  });
 });

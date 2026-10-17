@@ -370,21 +370,31 @@ class AnthropicTransport implements Transport {
     const client = await this.sdk();
     if (!model || !client) throw new LlmUnavailableError(model ? "no Anthropic API key stored" : "no Claude model set");
     const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
-    const turns: Anthropic.Beta.BetaMessageParam[] = messages
-      .filter((m) => m.role !== "system")
-      .map((m): Anthropic.Beta.BetaMessageParam => {
-        if (m.role === "tool") return { role: "user", content: [{ type: "tool_result", tool_use_id: m.tool_call_id ?? "", content: m.content }] };
-        if (m.tool_calls?.length) {
-          const blocks: Anthropic.Beta.BetaContentBlockParam[] = [];
-          if (m.content) blocks.push({ type: "text", text: m.content });
-          for (const c of m.tool_calls) {
-            const parsed = parseJsonLoose(c.arguments);
-            blocks.push({ type: "tool_use", id: c.id ?? "", name: c.name, input: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {} });
-          }
-          return { role: "assistant", content: blocks };
+    const turns: Anthropic.Beta.BetaMessageParam[] = [];
+    for (const m of messages) {
+      if (m.role === "system") continue;
+      if (m.role === "tool") {
+        // Parallel tool calls: the API wants their results in one user turn, right after the
+        // assistant turn that called them, so consecutive results merge into it.
+        const block: Anthropic.Beta.BetaContentBlockParam = { type: "tool_result", tool_use_id: m.tool_call_id ?? "", content: m.content };
+        const last = turns.at(-1);
+        const lastBlocks = last && last.role === "user" && Array.isArray(last.content) ? last.content : undefined;
+        if (lastBlocks?.length && lastBlocks.every((b) => b.type === "tool_result")) lastBlocks.push(block);
+        else turns.push({ role: "user", content: [block] });
+        continue;
+      }
+      if (m.tool_calls?.length) {
+        const blocks: Anthropic.Beta.BetaContentBlockParam[] = [];
+        if (m.content) blocks.push({ type: "text", text: m.content });
+        for (const c of m.tool_calls) {
+          const parsed = parseJsonLoose(c.arguments);
+          blocks.push({ type: "tool_use", id: c.id ?? "", name: c.name, input: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {} });
         }
-        return { role: m.role as "user" | "assistant", content: m.content };
-      });
+        turns.push({ role: "assistant", content: blocks });
+        continue;
+      }
+      turns.push({ role: m.role as "user" | "assistant", content: m.content });
+    }
     // Short answers (decisions, notes for a running agent) need little thought; the rest gets the default.
     const effort = (opts.maxTokens ?? 512) <= 64 || opts.priority === "urgent" ? "low" : "medium";
     const tools = opts.tools?.length
