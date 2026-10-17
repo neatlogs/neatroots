@@ -1299,12 +1299,13 @@ export class Store {
 
   /** Worker-thread retention: leave blob reclamation to the main thread where ingest runs. */
   sweepDetached(maxAgeDays: number, maxBytes: number, startedMs: number): SweepResult {
-    const result = this.sweepResult(maxAgeDays, maxBytes, { updatedBefore: startedMs, batchSize: 20 });
+    const result = this.sweepResult(maxAgeDays, maxBytes, { updatedBefore: startedMs, batchSize: 4, pauseMs: 10 });
     return { ...result, blobCandidates: json(this.getMeta(RETENTION_BLOBS_META), []) };
   }
 
-  private sweepResult(maxAgeDays: number, maxBytes: number, options: { updatedBefore?: number; batchSize?: number }): SweepResult {
+  private sweepResult(maxAgeDays: number, maxBytes: number, options: { updatedBefore?: number; batchSize?: number; pauseMs?: number }): SweepResult {
     let removed = 0;
+    const sleeper = options.pauseMs ? new Int32Array(new SharedArrayBuffer(4)) : undefined;
     const blobCandidates: string[] = options.updatedBefore === undefined ? [] : json(this.getMeta(RETENTION_BLOBS_META), []);
     const remove = (ids: string[]) => {
       const size = options.batchSize ?? Math.max(1, ids.length);
@@ -1313,6 +1314,7 @@ export class Store {
         removed += result.removed;
         if (options.updatedBefore === undefined) this.reclaimUnreferencedBlobs(result.blobCandidates);
         else blobCandidates.push(...result.blobCandidates);
+        if (sleeper) Atomics.wait(sleeper, 0, 0, options.pauseMs);
       }
     };
     // Skip the age sweep for a non-positive age: a cutoff of "now" (days = 0)
@@ -1332,7 +1334,7 @@ export class Store {
     if (size > maxBytes) {
       // Deleting from the full-text index leaves "deleted" markers until it is compacted, so the
       // size can read high. Compact (once per sweep, and only when over the cap) before trusting it.
-      this.compactSearchIndex();
+      this.compactSearchIndex(options.pauseMs);
       size = this.storedBytes() - pendingBlobBytes();
     }
     if (size > maxBytes) {
@@ -1341,7 +1343,7 @@ export class Store {
       const oldest = this.oldestRunsCovering(size - maxBytes * RETENTION_LOW_WATER, size);
       remove(oldest);
     }
-    if (removed) this.db.pragma("wal_checkpoint(TRUNCATE)");
+    if (removed) this.db.pragma(options.updatedBefore === undefined ? "wal_checkpoint(TRUNCATE)" : "wal_checkpoint(PASSIVE)");
     return { removed, blobCandidates };
   }
 
@@ -1389,8 +1391,18 @@ export class Store {
   }
 
   /** Merges the full-text index so space held by deleted spans is actually released. */
-  private compactSearchIndex(): void {
-    this.db.prepare("INSERT INTO span_fts(span_fts) VALUES('optimize')").run();
+  private compactSearchIndex(pauseMs?: number): void {
+    if (!pauseMs) {
+      this.db.prepare("INSERT INTO span_fts(span_fts) VALUES('optimize')").run();
+      return;
+    }
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+    const segments = () => (this.db.prepare("SELECT COUNT(DISTINCT segid) AS n FROM span_fts_idx").get() as { n: number }).n;
+    // A negative merge budget makes every call advance the merge, while bounding each write lock.
+    while (segments() > 1) {
+      this.db.prepare("INSERT INTO span_fts(span_fts, rank) VALUES(?, ?)").run("merge", -16);
+      Atomics.wait(sleeper, 0, 0, pauseMs);
+    }
   }
 
   /** Bytes of data actually stored: database pages in use (not free pages) plus payload blobs. */
