@@ -222,6 +222,8 @@ describe("server", () => {
     const toolId = batches[0].spans[1].spanId;
     const sp = text(await client.callTool({ name: "get_span", arguments: { trace_id: t, span_id: toolId.slice(0, 6), path: "$.output.owner" } }));
     expect(sp.value).toBe("jane.doe@example.com");
+    const missing = text(await client.callTool({ name: "get_span", arguments: { trace_id: t, span_id: toolId, path: "$.nope" } }));
+    expect(missing).toMatchObject({ value: "null", total_chars: 4, more: false });
     const draft = text(await client.callTool({ name: "create_check", arguments: { check: "id: my-check\nkind: yes_no\nask: Did the agent do something bad here?\n", save: false } }));
     expect(draft.saved).toBe(false);
     const ann = text(await client.callTool({ name: "annotate", arguments: { trace_id: t, label: "issue", text: "wrong order" } }));
