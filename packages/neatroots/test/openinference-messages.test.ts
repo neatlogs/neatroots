@@ -23,7 +23,7 @@ describe("OpenInference message contents and tool calls (#219)", () => {
         attributes: [
           str("openinference.span.kind", "LLM"),
           str(
-            "neatlogs.llm.output_messages",
+            "neatlogs.llm.output",
             JSON.stringify([
               {
                 role: "assistant",
