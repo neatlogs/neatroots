@@ -128,7 +128,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       let writes = 0, reads = 0;
       let historicalWrites = 0, historicalReads = 0;
       for (const group of groups.values()) {
-        let measured = 0, write = 0, read = 0;
+        let measured = 0, write = 0, read = 0, creations = 0;
         const missed: SpanInfo[] = [];
         let lastFiring: { count: number; write: number; read: number } | undefined;
         for (let i = 0; i < group.length; i++) {
@@ -138,8 +138,10 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
           if (i > 0) {
             write += s.cacheWriteTokens;
             read += s.cacheReadTokens;
-            if (s.cacheWriteTokens > 0 && s.cacheReadTokens === 0) missed.push(s);
+            // A first creation after uncached calls has not yet had a chance to be reused.
+            if (s.cacheWriteTokens > 0 && s.cacheReadTokens === 0 && creations > 0) missed.push(s);
           }
+          if (s.cacheWriteTokens > 0) creations++;
           // Remember a real chronological firing prefix, without copying it on every call.
           if (measured >= r.min_calls && write > read && missed.length) {
             lastFiring = { count: missed.length, write, read };

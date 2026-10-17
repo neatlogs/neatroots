@@ -465,7 +465,8 @@ export class Engine {
         // including when corrected telemetry no longer establishes a comparable cache group.
         // A streak that ended still happened, so its halt stands. A requires_before whose earlier
         // call arrived late never happened at all, so its halt is withdrawn too.
-        this.resolve(open, { keepHalts: rule.rule.type !== "requires_before" });
+        const erasedCache = rule.rule.type === "cache_reuse" && hit === null;
+        this.resolve(open, { keepHalts: rule.rule.type !== "requires_before" && !erasedCache });
       }
     }
   }

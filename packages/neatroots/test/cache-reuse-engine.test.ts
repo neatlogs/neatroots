@@ -9,16 +9,17 @@ const traceId = "b".repeat(32);
 const cleanup: TestRoots[] = [];
 afterEach(async () => { for (const tb of cleanup.splice(0)) await tb.close(); });
 
-async function setup() {
+async function setup(halt = false) {
   const tb = await makeRoots();
   cleanup.push(tb);
-  tb.roots.steering.setMode("test-agent", "advisory");
+  tb.roots.steering.setMode("test-agent", halt ? "gate" : "advisory");
   tb.roots.engine!.registry.save(parseChecks(`
 - id: cache-not-reused
   kind: rule
   title: Cache not reused
   rule: { type: cache_reuse }
   guidance: Check cache reuse.
+  ${halt ? "action: halt" : ""}
 `).checks[0], "user");
   const root = span({ traceId, name: "agent", kind: "agent" });
   const calls = [[0, 100], [0, 100], [0, 100], [300, 0]].map(([read, write]) =>
@@ -32,6 +33,38 @@ async function setup() {
 function findings(tb: TestRoots) {
   return tb.roots.store.findingsForTrace(traceId).filter((f) => f.check_id === "cache-not-reused");
 }
+
+for (const correction of ["replacement", "identity", "late read"] as const) {
+  it(`withdraws an erased cache halt before the next gate claim after ${correction}`, async () => {
+    const { tb, calls } = await setup(true);
+    tb.roots.ingest([batch(calls.slice(0, 3))]);
+    expect(await tb.roots.engine!.waitIdle(traceId, 5000)).toBe(true);
+    const [raised] = findings(tb);
+    expect(raised?.status).toBe("raised");
+    expect(tb.roots.store.notesForTrace(traceId, "pending").filter((n) => n.finding_id === raised.id)).toMatchObject([{ kind: "halt" }]);
+    const changed = correction === "late read"
+      ? { ...calls[3], startTimeUnixNano: (BigInt(calls[0].endTimeUnixNano) + 1n).toString() }
+      : { ...calls[2], attributes: correction === "identity"
+        ? calls[2].attributes.filter((a) => a.key !== "neatlogs.llm.model_name") : [...calls[3].attributes] };
+    tb.roots.ingest([batch([changed])]);
+    expect(await tb.roots.engine!.waitIdle(traceId, 5000)).toBe(true);
+    expect(tb.roots.store.getFinding(raised.id)?.status).toBe("resolved");
+    expect(await tb.roots.steering.gate(traceId, 1000)).toBeUndefined();
+    expect(tb.roots.store.notesForTrace(traceId, "pending").filter((n) => n.finding_id === raised.id)).toEqual([]);
+  });
+}
+
+it("retains a user halt when a real historical cache failure recovers", async () => {
+  const { tb, calls } = await setup(true);
+  tb.roots.ingest([batch(calls.slice(0, 3))]);
+  expect(await tb.roots.engine!.waitIdle(traceId, 5000)).toBe(true);
+  const [raised] = findings(tb);
+  expect(raised?.status).toBe("raised");
+  tb.roots.ingest([batch([calls[3]])]);
+  expect(await tb.roots.engine!.waitIdle(traceId, 5000)).toBe(true);
+  expect(tb.roots.store.getFinding(raised.id)?.status).toBe("resolved");
+  expect(await tb.roots.steering.gate(traceId, 1000)).toMatchObject({ kind: "halt", finding_id: raised.id });
+});
 
 for (const correction of ["late read", "replacement", "unknown counters", "missing identity"] as const) {
   it(`reconciles an open cache finding after ${correction} erases its prefixes`, async () => {

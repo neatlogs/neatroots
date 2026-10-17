@@ -84,6 +84,21 @@ it("keeps providers separate even when model names match", () => {
   expect(evaluate(calls).hit).toBeNull();
 });
 
+it("waits for a repeated positive cache write, even when caching starts after warmup", () => {
+  for (const calls of [
+    [call(0, 0), call(0, 0), call(0, 100)],
+    [call(0, 0), call(0, 100), call(0, 0)],
+    [call(undefined, 100), call(0, 0), call(0, 0), call(0, 100)],
+  ]) expect(evaluate(calls).hit).toBeNull();
+});
+
+it("reports only repeated creations after a late first creation, independent of arrival", () => {
+  const calls = [call(0, 0), call(0, 100), call(0, 100)];
+  for (const order of [calls, [...calls].reverse()]) {
+    expect(evaluate(order).hit).toMatchObject({ firing: true, evidenceSpanIds: [calls[2].spanId] });
+  }
+});
+
 it("does not pool calls with missing or blank provider/model identities", () => {
   for (const key of ["neatlogs.llm.provider", "neatlogs.llm.model_name"]) {
     for (const value of [undefined, "", "   "]) {

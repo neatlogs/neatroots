@@ -134,7 +134,9 @@ The library's `cache-not-reused` rule uses `type: cache_reuse` with `min_calls: 
 (default, minimum 3). Within each provider/model group, at least `min_calls` LLM calls
 must report both valid cache counts. The first chronological call is warmup and excluded
 from the comparison. Later measured writes must exceed reads, and evidence includes only
-later calls with positive writes and explicitly zero reads. Missing counts are unknown,
+later calls with positive writes and explicitly zero reads after an earlier measured positive
+write in the same group (the warmup can supply that earlier creation). A first creation after
+uncached calls is not a repeated write. Missing counts are unknown,
 not zero; read-only OpenAI telemetry and runs without caching stay quiet.
 
 Counts come from `neatlogs.llm.token_count.cache_read` / `cache_write` and GenAI
@@ -153,6 +155,8 @@ Late arrivals or same-span corrections can also erase every qualifying prefix. A
 finding then resolves even when evaluation returns `null`: corrected telemetry no longer supports
 the provisional warning. This also applies when corrected counters or identity become unknown;
 resolution withdraws the warning rather than claiming that cache reuse was measured as healthy.
+When no firing prefix remains, pending halts from the corrected cache finding are withdrawn too.
+A non-null historical recovery retains a user-requested halt because the failure still happened.
 This is a diagnostic heuristic: calls to independent cache routes or different
 prompts within the same provider/model may intentionally write fresh caches. Inspect the
 evidence before changing the agent; the rule cannot infer cache identity from token counts.
