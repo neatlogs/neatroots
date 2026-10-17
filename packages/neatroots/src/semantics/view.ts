@@ -287,7 +287,7 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
   view.promptTokens = int(first(attrs, ["neatlogs.llm.token_count.prompt", "gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens", "llm.token_count.prompt", "ai.usage.promptTokens", "ai.usage.inputTokens"]));
   view.completionTokens = int(first(attrs, ["neatlogs.llm.token_count.completion", "gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens", "llm.token_count.completion", "ai.usage.completionTokens", "ai.usage.outputTokens"]));
   view.cacheReadTokens = cacheCount(first(attrs, ["neatlogs.llm.token_count.cache_read", "gen_ai.usage.cache_read.input_tokens", "gen_ai.usage.cache_read_input_tokens"]));
-  view.cacheWriteTokens = cacheCount(first(attrs, ["neatlogs.llm.token_count.cache_write", "gen_ai.usage.cache_creation.input_tokens", "gen_ai.usage.cache_creation_input_tokens", "gen_ai.usage.cache_write_input_tokens"]));
+  view.cacheWriteTokens = cacheCount(first(attrs, ["neatlogs.llm.token_count.cache_write", "gen_ai.usage.cache_write.input_tokens", "gen_ai.usage.cache_creation.input_tokens", "gen_ai.usage.cache_creation_input_tokens", "gen_ai.usage.cache_write_input_tokens"]));
   view.totalTokens =
     int(first(attrs, ["neatlogs.llm.token_count.total", "gen_ai.usage.total_tokens", "llm.token_count.total"])) ??
     (view.promptTokens !== undefined || view.completionTokens !== undefined

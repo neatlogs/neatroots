@@ -461,12 +461,13 @@ export class Engine {
           if (status === "raised") this.onFindingRaised(run, f, lc, hit.params, snap);
         }
       } else if (open && (hit || rule.rule.type === "cache_reuse")) {
-        // Cache snapshots are authoritative: late arrivals or same-ID corrections can erase
-        // every qualifying prefix. A null cache result then withdraws a provisional warning,
-        // including when corrected telemetry no longer establishes a comparable cache group.
+        // Corrections can erase this finding's cache evidence while another group still has
+        // genuine history. Only history overlapping the open finding can retain its halt.
         // A streak that ended still happened, so its halt stands. A requires_before whose earlier
         // call arrived late never happened at all, so its halt is withdrawn too.
-        const erasedCache = rule.rule.type === "cache_reuse" && hit === null;
+        const historicalEvidence = new Set(hit?.evidenceSpanIds ?? []);
+        const erasedCache = rule.rule.type === "cache_reuse"
+          && !open.evidence_span_ids.some((id) => historicalEvidence.has(id));
         this.resolve(open, { keepHalts: rule.rule.type !== "requires_before" && !erasedCache });
       }
     }

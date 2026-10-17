@@ -34,6 +34,61 @@ function findings(tb: TestRoots) {
   return tb.roots.store.findingsForTrace(traceId).filter((f) => f.check_id === "cache-not-reused");
 }
 
+for (const historyOrder of ["earlier", "later"] as const) {
+  for (const recovery of ["erased", "historical"] as const) {
+    it(`${recovery === "erased" ? "withdraws" : "retains"} the active group's halt with unrelated ${historyOrder} history`, async () => {
+      const { tb, calls } = await setup(true);
+      const shift = historyOrder === "earlier" ? -1_000_000_000n : 1_000_000_000n;
+      const history = calls.map((c) => ({ ...c, spanId: hex(8),
+        startTimeUnixNano: (BigInt(c.startTimeUnixNano) + shift).toString(),
+        endTimeUnixNano: (BigInt(c.endTimeUnixNano) + shift).toString(),
+        attributes: c.attributes.map((a) => a.key === "neatlogs.llm.model_name" ? s(a.key, "other-model") : a) }));
+      const initial = [...history, ...calls.slice(0, 3)];
+      tb.roots.ingest([batch(historyOrder === "earlier" ? initial : [...initial].reverse())]);
+      expect(await tb.roots.engine!.waitIdle(traceId, 5000)).toBe(true);
+      const [raised] = findings(tb);
+      expect(raised?.status).toBe("raised");
+      expect(raised.evidence_span_ids).toEqual(calls.slice(1, 3).map((c) => c.spanId));
+      expect(tb.roots.store.notesForTrace(traceId, "pending")).toMatchObject([{ kind: "halt", finding_id: raised.id }]);
+      const changed = recovery === "erased" ? { ...calls[2], attributes: [...calls[3].attributes] } : calls[3];
+      tb.roots.ingest([batch([changed])]);
+      expect(await tb.roots.engine!.waitIdle(traceId, 5000)).toBe(true);
+      const rule = tb.roots.engine!.registry.rules().find((c) => c.check.id === "cache-not-reused")!.check as RuleCheck;
+      const hit = evaluateRule(rule, loadTrace(tb.roots.store, traceId), false)!;
+      expect(hit.firing).toBe(false);
+      expect(hit.evidenceSpanIds.some((id) => raised.evidence_span_ids.includes(id))).toBe(recovery === "historical");
+      expect(tb.roots.store.getFinding(raised.id)?.status).toBe("resolved");
+      const note = await tb.roots.steering.gate(traceId, 1000);
+      if (recovery === "erased") expect(note).toBeUndefined();
+      else expect(note).toMatchObject({ kind: "halt", finding_id: raised.id });
+      const other = hex(16);
+      const final = [...history, ...(recovery === "erased" ? [...calls.slice(0, 2), changed] : calls)];
+      tb.roots.ingest([batch(final.map((c) => ({ ...c, traceId: other })).reverse())]);
+      expect(await tb.roots.engine!.waitIdle(other, 5000)).toBe(true);
+      expect(tb.roots.store.findingsForTrace(other).filter((f) => f.check_id === rule.id)).toEqual([]);
+      expect(await tb.roots.steering.gate(other, 1000)).toBeUndefined();
+    });
+  }
+}
+
+it("retains a halt when part of its original mixed-group evidence survives as genuine history", async () => {
+  const { tb, calls } = await setup(true);
+  const otherCalls = calls.map((c) => ({ ...c, spanId: hex(8), attributes: c.attributes.map((a) =>
+    a.key === "neatlogs.llm.model_name" ? s(a.key, "other-model") : a) }));
+  tb.roots.ingest([batch([...calls.slice(0, 3), ...otherCalls.slice(0, 3)])]);
+  expect(await tb.roots.engine!.waitIdle(traceId, 5000)).toBe(true);
+  const [raised] = findings(tb);
+  expect(raised?.status).toBe("raised");
+  expect(raised.evidence_span_ids).toHaveLength(4);
+  tb.roots.ingest([batch([otherCalls[3], { ...calls[2], attributes: [...calls[3].attributes] }])]);
+  expect(await tb.roots.engine!.waitIdle(traceId, 5000)).toBe(true);
+  const rule = tb.roots.engine!.registry.rules().find((c) => c.check.id === "cache-not-reused")!.check as RuleCheck;
+  expect(evaluateRule(rule, loadTrace(tb.roots.store, traceId), false)).toMatchObject({ firing: false,
+    evidenceSpanIds: otherCalls.slice(1, 3).map((c) => c.spanId) });
+  expect(tb.roots.store.getFinding(raised.id)?.status).toBe("resolved");
+  expect(await tb.roots.steering.gate(traceId, 1000)).toMatchObject({ kind: "halt", finding_id: raised.id });
+});
+
 for (const update of ["later reads", "same-ID writes"] as const) {
   it(`refreshes cache totals without changing evidence or duplicating a halt after ${update}`, async () => {
     const { tb, calls } = await setup(true);

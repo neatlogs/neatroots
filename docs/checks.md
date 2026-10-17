@@ -140,7 +140,8 @@ uncached calls is not a repeated write. Missing counts are unknown,
 not zero; read-only OpenAI telemetry and runs without caching stay quiet.
 
 Counts come from `neatlogs.llm.token_count.cache_read` / `cache_write` and GenAI
-`gen_ai.usage.cache_read.input_tokens` / `cache_creation.input_tokens` (also the
+`gen_ai.usage.cache_read.input_tokens` / `cache_write.input_tokens` (also the legacy
+`cache_creation.input_tokens` and the
 underscore `cache_read_input_tokens`, `cache_creation_input_tokens`, and
 `cache_write_input_tokens` variants). Counts must be nonnegative safe integers.
 These normalized fields do not alter prompt or total tokens or stored attributes.
@@ -155,8 +156,9 @@ Late arrivals or same-span corrections can also erase every qualifying prefix. A
 finding then resolves even when evaluation returns `null`: corrected telemetry no longer supports
 the provisional warning. This also applies when corrected counters or identity become unknown;
 resolution withdraws the warning rather than claiming that cache reuse was measured as healthy.
-When no firing prefix remains, pending halts from the corrected cache finding are withdrawn too.
-A non-null historical recovery retains a user-requested halt because the failure still happened.
+When no firing prefix remains for the open finding's evidence, its pending halts are withdrawn too.
+A historical recovery retains a user-requested halt only while it includes some of that finding's
+evidence. Unrelated history from another provider/model group cannot retain a corrected-away halt.
 This is a diagnostic heuristic: calls to independent cache routes or different
 prompts within the same provider/model may intentionally write fresh caches. Inspect the
 evidence before changing the agent; the rule cannot infer cache identity from token counts.

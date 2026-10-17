@@ -58,6 +58,7 @@ it("orders equal start times by span ID regardless of arrival", () => {
 });
 it("normalizes public aliases without changing token totals", () => {
   for (const [read, write] of [
+    ["gen_ai.usage.cache_read.input_tokens", "gen_ai.usage.cache_write.input_tokens"],
     ["gen_ai.usage.cache_read.input_tokens", "gen_ai.usage.cache_creation.input_tokens"],
     ["gen_ai.usage.cache_read_input_tokens", "gen_ai.usage.cache_creation_input_tokens"],
     ["gen_ai.usage.cache_read_input_tokens", "gen_ai.usage.cache_write_input_tokens"],
@@ -67,6 +68,20 @@ it("normalizes public aliases without changing token totals", () => {
     c.attributes.push(s("neatlogs.llm.token_count.cache_read", 0));
     expect(buildView(c, []).cacheReadTokens).toBe(0);
   }
+});
+
+it("evaluates dotted GenAI read/write counts while preserving raw spans and explicit zero precedence", () => {
+  const calls = [call(0, 100), call(0, 100), call(0, 100)];
+  for (const c of calls) c.attributes = c.attributes.map((a) => ({ ...a, key: a.key === "neatlogs.llm.token_count.cache_read"
+    ? "gen_ai.usage.cache_read.input_tokens" : a.key === "neatlogs.llm.token_count.cache_write"
+      ? "gen_ai.usage.cache_write.input_tokens" : a.key }));
+  const { hit, store } = evaluate(calls);
+  expect(hit).toMatchObject({ firing: true, evidenceSpanIds: calls.slice(1).map((c) => c.spanId),
+    params: { cache_write: "200", cache_read: "0" } });
+  expect(loadTrace(store, calls[0].traceId).spans[1]).toMatchObject({ cacheWriteTokens: 100, cacheReadTokens: 0 });
+  expect(store.getOtlpSpan(calls[0].traceId, calls[0].spanId)?.span.attributes).toEqual(calls[0].attributes);
+  calls[0].attributes.push(s("neatlogs.llm.token_count.cache_write", 0));
+  expect(buildView(calls[0], []).cacheWriteTokens).toBe(0);
 });
 it("rejects invalid counts and validates the rule configuration", () => {
   for (const value of [-1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1, true, "-1", "", "   ", "NaN", "1.5"]) {
