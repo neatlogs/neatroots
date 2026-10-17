@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 import { PendingButton } from "@/components/pending-button";
@@ -30,23 +30,25 @@ export function ReviewSheet({ id, onClose, onSaved }: { id: string; onClose: () 
 }
 
 function ReviewForm({ item, reload, onSaved }: { item: ReviewItem; reload: () => Promise<void>; onSaved: (id: string) => Promise<void> }) {
-  const [verdict, setVerdict] = useState<Verdict | "">(item.review?.verdict ?? "");
-  const [reason, setReason] = useState(item.review?.reason ?? "");
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
-  const [reloading, setReloading] = useState(false);
+  const initial = item.review ?? { verdict: "" as const, reason: "" };
+  const [verdict, setVerdict] = useState<Verdict | "">(initial.verdict);
+  const [reason, setReason] = useState(initial.reason);
   const qc = useQueryClient();
   const f = item.finding;
-  const save = async () => {
-    setPending(true); setError("");
-    try {
+  const action = useMutation({
+    mutationFn: async (kind: "save" | "reload") => {
+      if (kind === "reload") {
+        await reload();
+        await qc.invalidateQueries({ queryKey: ["review-evidence", f.trace_id] });
+        return;
+      }
       await post(`/api/reviews/${encodeURIComponent(f.id)}`, { verdict, reason, source: "human", evidence_version: item.evidence_version });
       toast.success("Review saved");
       await qc.invalidateQueries({ queryKey: ["review", f.id] });
       await onSaved(f.id);
-    } catch (e) { setError((e as Error).message); }
-    finally { setPending(false); }
-  };
+    },
+  });
+  const busy = action.isPending ? action.variables : null;
   return (
     <>
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-6 py-4">
@@ -61,26 +63,21 @@ function ReviewForm({ item, reload, onSaved }: { item: ReviewItem; reload: () =>
         {item.state === "stale" && <p role="status" className="rounded-lg border border-warning-border bg-warning-surface p-3 text-xs text-warning-fg">Evidence or the check changed since the last review. Inspect it again before saving.</p>}
         {typeof f.detail.quote === "string" && <blockquote className="border-l-2 border-border pl-3 text-sm break-words">{f.detail.quote}</blockquote>}
         <Evidence item={item} />
-        <fieldset className="flex flex-col gap-2" disabled={pending}>
+        <fieldset className="flex flex-col gap-2" disabled={busy === "save"}>
           <legend className="mb-2 text-sm font-medium">Was this check correct?</legend>
           {Object.entries(VERDICTS).map(([value, label]) => (
             <label key={value} className="flex cursor-pointer items-center gap-2 text-sm"><input type="radio" name="verdict" value={value} checked={verdict === value} onChange={() => setVerdict(value as Verdict)} />{label}</label>
           ))}
         </fieldset>
         <label className="flex flex-col gap-2 text-sm">Reason (optional)
-          <Textarea aria-label="Review reason" maxLength={4000} rows={3} value={reason} disabled={pending} onChange={(e) => setReason(e.target.value)} placeholder="What in the evidence supports your judgment?" />
+          <Textarea aria-label="Review reason" maxLength={4000} rows={3} value={reason} disabled={busy === "save"} onChange={(e) => setReason(e.target.value)} placeholder="What in the evidence supports your judgment?" />
         </label>
         {item.review && <p className="text-xs text-muted-foreground">Last review: {item.review.source} (self-reported) · {new Date(item.review.updated_ms).toLocaleString()}</p>}
-        {error && <p role="alert" className="text-sm text-danger-fg">{error}</p>}
+        {action.error && <p role="alert" className="text-sm text-danger-fg">{action.error.message}</p>}
       </div>
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-6 py-4">
-        <PendingButton size="sm" variant="outline" pending={reloading} disabled={pending} onClick={async () => {
-          setReloading(true);
-          try { await reload(); await qc.invalidateQueries({ queryKey: ["review-evidence", f.trace_id] }); setError(""); }
-          catch (e) { setError((e as Error).message); }
-          finally { setReloading(false); }
-        }}>Reload evidence</PendingButton>
-        <PendingButton size="sm" pending={pending} disabled={!verdict || reloading} pendingLabel="Saving review…" onClick={() => void save()}>Save review and next</PendingButton>
+        <PendingButton size="sm" variant="outline" pending={busy === "reload"} disabled={action.isPending} onClick={() => action.mutate("reload")}>Reload evidence</PendingButton>
+        <PendingButton size="sm" pending={busy === "save"} disabled={!verdict || action.isPending} pendingLabel="Saving review…" onClick={() => action.mutate("save")}>Save review and next</PendingButton>
       </div>
     </>
   );

@@ -18,6 +18,10 @@ test.describe("app shell", () => {
       await page.getByRole("link", { name: link, exact: true }).click();
       await expect(page.getByText(heading, { exact: true }).first()).toBeVisible();
     }
+    for (const route of ["unknown-page", "constructor"]) {
+      await open(page, route);
+      await expect(page.getByText("Home", { exact: true }).first()).toBeVisible();
+    }
     expect(errors).toEqual([]);
   });
 

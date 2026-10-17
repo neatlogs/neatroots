@@ -19,7 +19,7 @@ export function ReviewsPage({ query }: { query: URLSearchParams }) {
   const params = new URLSearchParams(query);
   params.delete("item");
   const qs = params.toString();
-  const { data, error, isLoading, refetch } = useQuery({ queryKey: ["reviews", qs], queryFn: () => api<ReviewQueue>(`/api/reviews?${qs}`) });
+  const { data: queue = { items: [], total: 0, next_cursor: null }, error, isLoading, refetch } = useQuery({ queryKey: ["reviews", qs], queryFn: () => api<ReviewQueue>(`/api/reviews?${qs}`) });
   const selected = query.get("item");
   const change = (key: string, value: string, filter = false) => {
     const next = new URLSearchParams(query);
@@ -28,17 +28,16 @@ export function ReviewsPage({ query }: { query: URLSearchParams }) {
     go(`reviews?${next}`);
   };
   const saved = async (id: string) => {
-    const index = data?.items.findIndex((i) => i.finding.id === id) ?? -1;
-    const next = data?.items[index + 1];
+    const index = queue.items.findIndex((i) => i.finding.id === id);
+    const next = queue.items[index + 1];
     await refetch();
-    if (next) change("item", next.finding.id);
-    else if (data?.next_cursor) {
-      const p = new URLSearchParams(params);
-      p.set("cursor", data.next_cursor);
-      const page = await api<ReviewQueue>(`/api/reviews?${p}`);
-      if (page.items[0]) p.set("item", page.items[0].finding.id);
-      go(`reviews?${p}`);
-    } else change("item", "");
+    if (next) return change("item", next.finding.id);
+    if (!queue.next_cursor) return change("item", "");
+    const p = new URLSearchParams(params);
+    p.set("cursor", queue.next_cursor);
+    const page = await api<ReviewQueue>(`/api/reviews?${p}`);
+    if (page.items[0]) p.set("item", page.items[0].finding.id);
+    go(`reviews?${p}`);
   };
 
   return (
@@ -51,18 +50,18 @@ export function ReviewsPage({ query }: { query: URLSearchParams }) {
           </Select>
           <Input aria-label="Filter project" placeholder="Project name" className="h-8 w-40" value={query.get("project") ?? ""} onChange={(e) => change("project", e.target.value, true)} />
           <Input aria-label="Filter check" placeholder="Check ID" className="h-8 w-40" value={query.get("check") ?? ""} onChange={(e) => change("check", e.target.value, true)} />
-          <span className="ml-auto text-xs text-muted-foreground tabular-nums" role="status">{data ? `${data.total} matching findings` : "Loading findings…"}</span>
+          <span className="ml-auto text-xs text-muted-foreground tabular-nums" role="status">{isLoading ? "Loading findings…" : `${queue.total} matching findings`}</span>
         </div>
       }>
         <p className="px-6 py-3 text-xs text-muted-foreground">Was the check correct on this evidence? Reviews stay local and do not dismiss or resolve findings.</p>
-        {error ? <p role="alert" className="px-6 text-sm text-danger-fg">Could not load reviews: {error.message}</p> : isLoading ? <p className="px-6 text-sm text-muted-foreground">Loading queue…</p> : !data?.items.length ? (
+        {error ? <p role="alert" className="px-6 text-sm text-danger-fg">Could not load reviews: {error.message}</p> : isLoading ? <p className="px-6 text-sm text-muted-foreground">Loading queue…</p> : !queue.items.length ? (
           <div className="px-6 py-12"><EmptyState variant="inline" title="No findings to review" description="Change the filters, or send another run to neatroots." /></div>
         ) : (
           <ListPageTable className="table-fixed">
             <TableHeader className="sticky top-[var(--list-dock-top,0px)] z-[var(--z-sticky)] bg-surface-subtle">
               <TableRow><TableHead className="pl-6">Finding</TableHead><TableHead className="hidden w-44 sm:table-cell">Project</TableHead><TableHead className="w-40 pr-6">Review</TableHead></TableRow>
             </TableHeader>
-            <TableBody>{data.items.map((item) => (
+            <TableBody>{queue.items.map((item) => (
               <TableRow key={item.finding.id} className="h-14">
                 <TableCell className="overflow-hidden pl-6">
                   <button className="focus-ring block w-full cursor-pointer truncate rounded-sm text-left text-sm text-foreground hover:underline" title={item.finding.title} onClick={() => change("item", item.finding.id)}>{item.finding.title}</button>
@@ -76,7 +75,7 @@ export function ReviewsPage({ query }: { query: URLSearchParams }) {
         )}
         <div className="sticky bottom-0 left-0 mt-auto flex flex-wrap items-center justify-end gap-2 border-t border-border bg-background px-6 py-3">
           {query.has("cursor") && <Button variant="outline" size="sm" onClick={() => change("cursor", "", true)}>Restart queue</Button>}
-          <Button variant="outline" size="sm" disabled={!data?.next_cursor} onClick={() => { const p = new URLSearchParams(params); p.set("cursor", data!.next_cursor!); go(`reviews?${p}`); }}>Next page</Button>
+          <Button variant="outline" size="sm" disabled={!queue.next_cursor} onClick={() => { const p = new URLSearchParams(params); p.set("cursor", queue.next_cursor!); go(`reviews?${p}`); }}>Next page</Button>
         </div>
       </ListPageLayout>
       {selected && <ReviewSheet key={selected} id={selected} onClose={() => change("item", "")} onSaved={saved} />}
