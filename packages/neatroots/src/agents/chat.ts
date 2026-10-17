@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS chat_events (session_id TEXT NOT NULL, seq INTEGER NO
 
 const READ_TOOLS = ["Read", "Grep", "Glob", "LS", "TodoWrite", "mcp__neatroots__*", "mcp__neatroots_app__*"];
 const EDIT_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+/** neatroots' MCP rerun runs the project's registered agent command, so it counts as a command. */
+const RERUN_TOOLS = ["mcp__neatroots__rerun", "mcp__neatroots_app__rerun"];
 
 /** Where agent CLIs get installed when they aren't on the PATH neatroots was started with. */
 function candidateDirs(): string[] {
@@ -250,11 +252,13 @@ export class AgentChats {
    * open chat that refetched on the result can still have read "running"; this tells it to look again.
    */
   private ended(id: string, state: "idle" | "error"): void {
+    if (!this.get(id)) return;
     this.update(id, { state });
     this.roots.bus.emit("chat", { session_id: id, state });
   }
 
-  private emit(id: string, e: Omit<ChatEvent, "seq" | "at">): ChatEvent {
+  private emit(id: string, e: Omit<ChatEvent, "seq" | "at">): ChatEvent | undefined {
+    if (!this.get(id)) return undefined;
     const row = this.roots.store.db.prepare("SELECT COALESCE(MAX(seq), 0) AS n FROM chat_events WHERE session_id = ?").get(id) as { n: number };
     const ev: ChatEvent = { ...e, seq: row.n + 1, at: Date.now() };
     this.roots.store.db.prepare("INSERT INTO chat_events (session_id, seq, json) VALUES (?, ?, ?)").run(id, ev.seq, JSON.stringify(ev));
@@ -282,6 +286,7 @@ export class AgentChats {
     let stderr = "";
     let sawResult = false;
     child.stdout!.on("data", (b: Buffer) => {
+      if (!this.get(id)) return;
       buf += b.toString();
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {
@@ -354,6 +359,10 @@ export class AgentChats {
     if (!client || !clientStatus(client).connected) args.push("--mcp-config", JSON.stringify({ mcpServers: { neatroots_app: { type: "http", url: this.mcpUrl() } } }));
     const allowed = [...READ_TOOLS, ...(s.allow_edits ? EDIT_TOOLS : []), ...(s.allow_commands ? ["Bash"] : [])];
     args.push("--allowedTools", allowed.join(","));
+    // Allowing tools isn't enough: the user's own Claude Code settings can allow more. Denying takes
+    // them away, so a chat stays read-only (and doesn't rerun agents) until the user allows it.
+    const denied = [...(s.allow_edits ? [] : EDIT_TOOLS), ...(s.allow_commands ? [] : ["Bash", ...RERUN_TOOLS])];
+    if (denied.length) args.push("--disallowedTools", denied.join(","));
     if (s.allow_edits) args.push("--permission-mode", "acceptEdits");
     args.push("--", prompt);
     return { cmd: "claude", args };

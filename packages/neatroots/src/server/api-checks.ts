@@ -1,12 +1,13 @@
 import type { Hono } from "hono";
 import YAML from "yaml";
 import type { Roots } from "../core.js";
-import { AnyCheck, isQuestion, type Check } from "../checks/types.js";
+import { AnyCheck, isQuestion, isRule, type Check } from "../checks/types.js";
 import { parseChecks, checkDirState } from "../checks/registry.js";
 import { checkWarnings } from "../checks/lint.js";
 import { draftCheckFromConcern } from "../engine/assist.js";
 import { err, body } from "./util.js";
 import { llmErrorMessage } from "../models/llm.js";
+import { regexProblem } from "../util/regex.js";
 
 /** Accepts a check as YAML text, a JSON object, or {yaml}. */
 export function checkFromInput(input: unknown): { check?: Check; error?: string } {
@@ -15,12 +16,24 @@ export function checkFromInput(input: unknown): { check?: Check; error?: string 
     const { checks, errors } = parseChecks(text);
     if (errors.length) return { error: errors.map((e) => e.message).join("; ") };
     if (checks.length !== 1) return { error: "expected exactly one check" };
-    return { check: checks[0] };
+    return newCheck(checks[0]);
   }
   const obj = (input as { check?: unknown })?.check ?? input;
   const parsed = AnyCheck.safeParse(obj);
   if (!parsed.success) return { error: parsed.error.issues.map((i) => `${i.path.join(".") || "check"}: ${i.message}`).join("; ") };
-  return { check: parsed.data as Check };
+  return newCheck(parsed.data as Check);
+}
+
+/**
+ * A check being saved or previewed gets the full regex check: a pattern that nests repeats, like
+ * (a+)+, is refused here, though one already saved in a file still loads.
+ */
+function newCheck(check: Check): { check?: Check; error?: string } {
+  if (isRule(check) && check.rule.type === "match") {
+    const problem = regexProblem(check.rule.pattern, check.rule.flags ?? "i");
+    if (problem) return { error: `rule.pattern: ${problem}` };
+  }
+  return { check };
 }
 
 /** Routes for checks: list, save, enable, draft from a concern, preview on past runs. */
@@ -64,7 +77,11 @@ export function mountChecksApi(app: Hono, roots: Roots): void {
       if (!state.ok && !state.creatable) return err(c, 400, `that checks directory ${state.reason}`);
     }
     const saved = roots.checks.save(check, dir ? { dir } : "user");
-    return c.json({ ok: true, id: saved.check.id, path: saved.path, source: saved.source, warnings: checkWarnings(check) });
+    const warnings = checkWarnings(check);
+    if (roots.steering.inactiveHalts([saved.check]).length) {
+      warnings.push("This halt rule won't stop the agent until steering is on for the project (off sends nothing, halts included). Turn it on in the sidebar or with neatroots steering advisory --project <name>.");
+    }
+    return c.json({ ok: true, id: saved.check.id, path: saved.path, source: saved.source, warnings });
   });
 
   app.post("/api/checks/:id/enabled", async (c) => {

@@ -1,6 +1,7 @@
 import type { Roots } from "../core.js";
 import { projectSettings, type SteeringMode } from "../config.js";
 import type { Note } from "../types.js";
+import { isRule, type Check } from "../checks/types.js";
 import { log } from "../util/log.js";
 
 export interface SteerEvent {
@@ -21,6 +22,28 @@ export class SteeringHub {
   idleWaiter?: (traceId: string, timeoutMs: number) => Promise<boolean>;
 
   constructor(private readonly roots: Roots) {}
+
+  /**
+   * The user's halt rules among `checks` that can't reach an agent, because steering is off for
+   * every project they apply to (off sends nothing, halts included).
+   */
+  inactiveHalts(checks: Check[]): string[] {
+    const projects = Object.keys(this.roots.config.projects);
+    return checks
+      .filter((c) => c.enabled !== false && isRule(c) && c.action === "halt")
+      .filter((c) => {
+        const scope = c.applies_to?.project;
+        const where = scope === undefined ? projects : Array.isArray(scope) ? scope : [scope];
+        return !where.some((p) => this.mode(p) !== "off");
+      })
+      .map((c) => c.id);
+  }
+
+  /** Logs the halt rules that won't stop agents until steering is on. */
+  warnInactiveHalts(checks: Check[]): void {
+    const ids = this.inactiveHalts(checks);
+    if (ids.length) log.warn(`halt rule${ids.length > 1 ? "s" : ""} ${ids.join(", ")} won't stop agents: steering is off where ${ids.length > 1 ? "they apply" : "it applies"}, and off sends nothing. Turn it on for the project: neatroots steering advisory --project <name>`);
+  }
 
   /** The steering mode for a project; off unless the user enabled it. */
   mode(project: string | null | undefined): SteeringMode {

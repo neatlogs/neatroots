@@ -55,6 +55,30 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`,
   });
 });
 
+describe.skipIf(process.platform === "win32")("deleting a chat while the agent is answering", () => {
+  it("cancels it and writes no further events for the removed session", async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
+    process.env.HOME = dir;
+    process.env.NEATROOTS_CODEX_BIN = script(
+      "codex",
+      `echo '{"type":"thread.started","thread_id":"thread_t"}'
+sleep 0.4
+echo '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"late"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`,
+    );
+    t = await makeRoots({ noEngine: true });
+    const s = t.roots.chats.create({ agent: "codex", cwd: dir });
+    const turn = t.roots.chats.send(s.id, "hi");
+    await new Promise((r) => setTimeout(r, 150));
+    expect(t.roots.chats.get(s.id)?.state).toBe("running");
+    t.roots.chats.remove(s.id);
+    await turn;
+    await new Promise((r) => setTimeout(r, 600));
+    expect(t.roots.chats.get(s.id)).toBeUndefined();
+    expect(t.roots.chats.events(s.id)).toEqual([]);
+  });
+});
+
 describe.skipIf(process.platform === "win32")("a chat with Claude Code whose sign-in has expired", () => {
   it("explains what to do, once", async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
@@ -188,5 +212,36 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`,
       const prompt = lines.slice(lines.indexOf("--") + 1).join("\n");
       expect(prompt.endsWith(i === 0 ? "hi" : "- list the files")).toBe(true);
     });
+  });
+});
+
+describe.skipIf(process.platform === "win32")("a read-only chat with Claude Code", () => {
+  it("denies edit, command and rerun tools until the chat allows them, whatever the user's own settings allow", async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
+    process.env.HOME = dir;
+    const log = path.join(dir, "args.log");
+    process.env.NEATROOTS_CLAUDE_BIN = script(
+      "claude",
+      `printf '%s\\n' "$@" >> "${log}"
+printf '%s\\n' ---- >> "${log}"
+echo '{"type":"system","subtype":"init","session_id":"s1","model":"m","mcp_servers":[]}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s1"}'`,
+    );
+    t = await makeRoots({ noEngine: true });
+    const denied = () => {
+      const calls = fs.readFileSync(log, "utf8").split("----\n").filter((c) => c.trim());
+      const args = calls[calls.length - 1].split("\n");
+      const at = args.indexOf("--disallowedTools");
+      return at < 0 ? [] : args[at + 1].split(",");
+    };
+    const readOnly = t.roots.chats.create({ agent: "claude", cwd: dir });
+    await t.roots.chats.send(readOnly.id, "look around");
+    expect(denied()).toEqual(expect.arrayContaining(["Edit", "MultiEdit", "Write", "NotebookEdit", "Bash", "mcp__neatroots__rerun", "mcp__neatroots_app__rerun"]));
+    const commands = t.roots.chats.create({ agent: "claude", cwd: dir, allow_commands: true });
+    await t.roots.chats.send(commands.id, "run the tests");
+    expect(denied()).toEqual(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+    const both = t.roots.chats.create({ agent: "claude", cwd: dir, allow_edits: true, allow_commands: true });
+    await t.roots.chats.send(both.id, "fix it");
+    expect(denied()).toEqual([]);
   });
 });
