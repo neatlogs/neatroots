@@ -3,6 +3,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import type { GenaiEvent } from "../semantics/genai-events.js";
 import { BlobStore } from "./blobs.js";
+import { SearchIds } from "./search-ids.js";
 import { sha256, newId } from "../util/ids.js";
 import { log } from "../util/log.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
@@ -116,6 +117,10 @@ CREATE INDEX IF NOT EXISTS spans_filter ON spans (span_kind, tool_name, model, i
 CREATE VIRTUAL TABLE IF NOT EXISTS span_fts USING fts5 (
   trace_id UNINDEXED, span_id UNINDEXED, name, tool_name, body, tokenize = 'porter unicode61'
 );
+-- The run and span of each span_fts row, by rowid, so span_fts rows are found by run or span
+-- without reading their text (see search-ids.ts).
+CREATE TABLE IF NOT EXISTS span_fts_ids (id INTEGER PRIMARY KEY, trace_id TEXT NOT NULL, span_id TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS span_fts_ids_span ON span_fts_ids (trace_id, span_id);
 
 CREATE TABLE IF NOT EXISTS logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -407,6 +412,7 @@ function searchText(v: Parameters<typeof preview>[0]): string {
 export class Store {
   readonly db: Database.Database;
   readonly blobs: BlobStore;
+  private readonly searchIds: SearchIds;
   private seq = 0;
   readonly dir: string;
   readonly file: string;
@@ -428,6 +434,7 @@ export class Store {
     this.db.pragma("busy_timeout = 5000");
     this.db.exec(SCHEMA);
     this.migrate();
+    this.searchIds = new SearchIds(this.db);
     this.blobs = new BlobStore(path.join(dir, "blobs"));
     const row = this.db.prepare("SELECT MAX(seq) AS s FROM spans").get() as { s: number | null };
     this.seq = row.s ?? 0;
@@ -509,7 +516,7 @@ export class Store {
             u = { traceId: span.traceId, spans: [], runCreated: false, rootEnded: false, completed: false };
             updates.set(span.traceId, u);
           }
-          const row = this.writeSpan(span, view, resourceId, scopeId, now);
+          const row = this.writeSpan(span, view, resourceId, scopeId, now, !previous);
           u.spans.push({ row, view, isNew: !previous });
           const runFlags = this.updateRun(span, view, row, resAttrs, now, previous);
           if (runFlags.created) u.runCreated = true;
@@ -524,7 +531,7 @@ export class Store {
     return [...updates.values()];
   }
 
-  private writeSpan(span: OtlpSpan, view: SpanView, resourceId: string, scopeId: string, now: number): SpanRow {
+  private writeSpan(span: OtlpSpan, view: SpanView, resourceId: string, scopeId: string, now: number, isNew: boolean): SpanRow {
     const used = new Set<string>();
     const attributes = this.blobs.offload(span.attributes, used);
     const events = span.events.map((e) => ({ ...e, attributes: this.blobs.offload(e.attributes, used) }));
@@ -588,7 +595,7 @@ export class Store {
         blobs: used.size ? JSON.stringify([...used]) : null,
       });
     if (!view.isMarker) {
-      this.indexSpan(span.traceId, span.spanId, span.name, view);
+      this.indexSpan(span.traceId, span.spanId, span.name, view, !isNew);
     }
     return row;
   }
@@ -847,12 +854,12 @@ export class Store {
         // With span filters the text must match a span that passes them: tool:issue_refund timeout means the
         // refund call mentions "timeout". Without the index there is no per-span text to match, as before.
         // INDEXED BY: probing the wide span rows for every text match is about twice as slow on a large store.
-        where.push(indexed ? `trace_id IN (SELECT s.trace_id FROM spans s INDEXED BY spans_filter WHERE ${span.join(" AND ")} AND (s.trace_id, s.span_id) IN (SELECT trace_id, span_id FROM span_fts WHERE span_fts MATCH @match))` : "0");
+        where.push(indexed ? `trace_id IN (SELECT s.trace_id FROM spans s INDEXED BY spans_filter WHERE ${span.join(" AND ")} AND (s.trace_id, s.span_id) IN (${this.searchIds.matching("trace_id, span_id")}))` : "0");
         if (indexed) p.match = match;
         return { where, p };
       }
       const like = likeText(f.text);
-      where.push(`(${indexed ? "trace_id IN (SELECT trace_id FROM span_fts WHERE span_fts MATCH @match) OR " : ""}root_name LIKE @like ESCAPE '\\' OR workflow LIKE @like ESCAPE '\\' OR input_preview LIKE @like ESCAPE '\\' OR output_preview LIKE @like ESCAPE '\\')`);
+      where.push(`(${indexed ? `trace_id IN (${this.searchIds.matching("trace_id")}) OR ` : ""}root_name LIKE @like ESCAPE '\\' OR workflow LIKE @like ESCAPE '\\' OR input_preview LIKE @like ESCAPE '\\' OR output_preview LIKE @like ESCAPE '\\')`);
       if (indexed) p.match = match;
       p.like = like;
     }
@@ -962,7 +969,7 @@ export class Store {
       return this.db
         .prepare(
           `SELECT trace_id, span_id, name, snippet(span_fts, 4, '[', ']', '…', 12) AS snippet
-           FROM span_fts WHERE span_fts MATCH ? ${traceIds ? `AND trace_id IN (${traceIds.map(() => "?").join(",")})` : "ORDER BY rank"} LIMIT ?`,
+           FROM span_fts WHERE span_fts MATCH ? ${traceIds ? `AND ${this.searchIds.inRuns(traceIds.length)}` : "ORDER BY rank"} LIMIT ?`,
         )
         .all(q, ...(traceIds ?? []), limit) as { trace_id: string; span_id: string; name: string; snippet: string }[];
     } catch {
@@ -1461,9 +1468,9 @@ export class Store {
   }
 
   /**
-   * Deletes runs in one go. The search index can't look rows up by run (trace_id is an unindexed
-   * column there), so each delete statement scans the whole index; doing it once for the batch,
-   * not once per run, is what keeps a large retention trim fast.
+   * Deletes runs in one go. Until the search index's run ids are filled in (the first start after
+   * an update), deleting from it by run scans the whole index; doing it once for the batch, not
+   * once per run, keeps a large retention trim fast.
    */
   deleteRuns(traceIds: string[]): void {
     if (!traceIds.length) return;
@@ -1471,7 +1478,8 @@ export class Store {
     const inIds = "trace_id IN (SELECT value FROM json_each(?))";
     const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
     const tx = this.db.transaction(() => {
-      for (const t of ["spans", "span_fts", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
+      this.searchIds.deleteRuns(ids);
+      for (const t of ["spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
         this.db.prepare(`DELETE FROM ${t} WHERE ${inIds}`).run(ids);
       }
       this.db.prepare(`DELETE FROM runs WHERE ${inIds}`).run(ids);
@@ -1521,10 +1529,17 @@ export class Store {
   }
 
   /** Full-text index for a span: its input, output and error, as much as SEARCH_LIMIT allows. */
-  private indexSpan(traceId: string, spanId: string, name: string, view: SpanView): void {
-    this.db.prepare("DELETE FROM span_fts WHERE trace_id = ? AND span_id = ?").run(traceId, spanId);
+  private indexSpan(traceId: string, spanId: string, name: string, view: SpanView, replace = true): void {
+    // A span stored for the first time has no index rows yet (they are only deleted with the span).
+    if (replace) this.searchIds.deleteSpan(traceId, spanId);
     const body = [searchText(view.input), searchText(view.output), searchText(view.error ?? undefined)].join("\n");
-    this.db.prepare("INSERT INTO span_fts (trace_id, span_id, name, tool_name, body) VALUES (?, ?, ?, ?, ?)").run(traceId, spanId, name, view.toolName ?? "", body);
+    const { lastInsertRowid } = this.db.prepare("INSERT INTO span_fts (trace_id, span_id, name, tool_name, body) VALUES (?, ?, ?, ?, ?)").run(traceId, spanId, name, view.toolName ?? "", body);
+    this.searchIds.add(lastInsertRowid, traceId, spanId);
+  }
+
+  /** Fills in the run and span of each search-index row, for a store from an older version. */
+  rebuildSearchIds(onDone?: (rows: number, ready: boolean) => void): void {
+    this.searchIds.rebuild(onDone);
   }
 
   /**
