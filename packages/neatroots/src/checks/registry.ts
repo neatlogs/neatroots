@@ -403,7 +403,7 @@ export class CheckRegistry {
     if (expected.destination !== this.destinationFingerprint(destination, beforeWrite)) throw new Error("approval target changed; review the destination and submit a new proposal");
     const approved = this.saveApprovedMcp(proposal.check, destination, beforeWrite);
     if (!approved.path || checkToYaml(approved.check) !== checkToYaml(proposal.check)) throw new Error("approval target changed; another file shadows the proposed definition");
-    if (dir && path.resolve(path.dirname(approved.path)) !== path.resolve(dir)) throw new Error("approval target changed; another file shadows the proposed destination");
+    if (path.resolve(approved.path) !== path.resolve(destination)) throw new Error("approval target changed; another file shadows the proposed destination");
     this.store.db.transaction(() => {
       this.store.setMeta(`approved_mcp:${id}`, sha256(JSON.stringify([checkToYaml(approved.check), path.resolve(approved.path!)])));
       this.store.deleteMcpCheckProposal(id);

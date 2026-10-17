@@ -101,9 +101,25 @@ MCP origin follows the check ID when a file is renamed, moved between registered
 or shadowed by another file with the same ID. The approval still requires the exact definition and
 path, so a moved or changed version stays inactive until reviewed again. A same-ID collision is
 treated conservatively as MCP-origin content; save it explicitly in the app to take ownership as a
-human-authored check. A successful human save clears the origin and approval metadata; a failed save
+human-authored check. A successful human save preserves history and disabled state while clearing origin and approval metadata; a failed save
 does not. Legacy file-backed MCP records follow the same rule, but never restore a missing file or
 load one from an unregistered directory. Shipped library checks retain their library identity.
+
+## Offline rule checks
+
+`neatroots check <files...>` loads the library, the selected home checks directory, and explicit
+`--checks` directories. It honors MCP origin, exact definition/path approval, and disabled state
+from the selected home database, including committed WAL records and legacy file-backed origins.
+Unapproved, edited, or moved MCP files remain inactive. Database-only checks and configured project
+directories are not automatically imported. Use an isolated `NEATROOTS_HOME` for repository-only CI;
+a fresh home needs no database.
+
+Offline checks read approval metadata and file-backed enablement in one native SQLite read-only
+transaction. They do not migrate the live database or write application data/schema; normal SQLite
+WAL coordination may create or update transient sidecars. No full database copy or size limit is
+required. Filesystem and SQLite-reported read/schema errors fail closed with exit code 2. This is
+not an independent damaged-WAL integrity checker: SQLite may ignore malformed WAL records during
+recovery. The offline command follows SQLite's native snapshot and WAL recovery semantics.
 
 ## Findings
 
