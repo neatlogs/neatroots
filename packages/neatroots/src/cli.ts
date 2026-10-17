@@ -138,8 +138,6 @@ program
         `# neatroots checks for this project\n\nYAML files in \`checks/\` are loaded by neatroots (https://github.com/neatlogs/neatroots) when it runs on this machine.\nA check with the same id as a library check replaces it. See \`neatroots checks --help\`.\n`,
       );
     }
-    if (!cfg.checkDirs.includes(checksDir)) cfg.checkDirs.push(checksDir);
-    console.log(`✓ checks folder: ${path.relative(cwd, checksDir)} (registered with neatroots)`);
     const envLines = [`NEATLOGS_ENDPOINT=http://localhost:${p}`, `NEATLOGS_API_KEY=neatroots-local`];
     if (opts.writeEnv) {
       const envPath = path.join(cwd, ".env");
@@ -166,15 +164,19 @@ program
       console.log(`→ point the Neatlogs SDK at neatroots (or rerun with --write-env):\n    ${envLines.join("\n    ")}`);
     }
     if (opts.steering) {
-      // Already validated at the top of the action.
-      cfg.projects[opts.project] = { ...(cfg.projects[opts.project] ?? {}), steering: opts.steering as SteeringMode };
       console.log(`✓ steering for ${opts.project}: ${opts.steering} (add the neatroots-steer hook to your agent; see docs/steering.md)`);
     }
-    saveConfig(cfg);
     if (await running(p)) {
-      await api(p, "/api/checks/reload", { method: "POST" }).catch(() => undefined);
-      if (opts.steering && opts.project) await api(p, "/api/settings", { method: "POST", body: JSON.stringify({ project: opts.project, steering: opts.steering }) }).catch(() => undefined);
+      await api(p, "/api/settings", {
+        method: "POST",
+        body: JSON.stringify({ check_dir: checksDir, ...(opts.steering && opts.project ? { project: opts.project, steering: opts.steering } : {}) }),
+      });
+    } else {
+      if (!cfg.checkDirs.includes(checksDir)) cfg.checkDirs.push(checksDir);
+      if (opts.steering && opts.project) cfg.projects[opts.project] = { ...(cfg.projects[opts.project] ?? {}), steering: opts.steering as SteeringMode };
+      saveConfig(cfg);
     }
+    console.log(`✓ checks folder: ${path.relative(cwd, checksDir)} (registered with neatroots)`);
     if (opts.mcp) {
       const c = findClient(opts.mcp);
       if (!c) throw new Error(`unknown agent "${opts.mcp}". Known: ${CLIENTS.map((x) => x.id).join(", ")}`);
