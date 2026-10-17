@@ -20,9 +20,11 @@ import { checkCoverage } from "./coverage.js";
 import { installInfo } from "../util/install.js";
 import { err, body, clampInt } from "./util.js";
 import { checkDirState } from "../checks/registry.js";
+import { isQuestion } from "../checks/types.js";
 import { askRuns } from "../engine/assist.js";
 import { loadTrace } from "../engine/trace.js";
-import { UnknownSpanError } from "../engine/engine.js";
+import { toQuestion, UnknownSpanError } from "../engine/engine.js";
+import { TRUST_MIN_AGREEMENT, TRUST_MIN_SAMPLES } from "../models/decision.js";
 import type { RunRow } from "../types.js";
 import { VERSION } from "../version.js";
 
@@ -136,7 +138,15 @@ export function mountApi(app: Hono, roots: Roots): void {
       classifier: {
         laya: { ...roots.laya.state, consent: roots.config.classifier.laya.consent ?? null },
         trust: Object.entries(roots.decisions.trust.all())
-          .map(([question, t]) => ({ question, n: t.n, agreement: t.n ? t.agree / t.n : null, trusted: roots.decisions.trusted([{ name: question, type: "yes_no", ask: "" }]) }))
+          .map(([question, t]) => {
+            const lc = roots.checks.get(question);
+            const curQ = lc && isQuestion(lc.check) ? toQuestion(lc.check, lc.check.params ?? {}) : undefined;
+            const stats = curQ ? roots.decisions.trust.get(curQ) : t;
+            const trusted = curQ
+              ? roots.decisions.trusted([curQ])
+              : stats.n >= TRUST_MIN_SAMPLES && stats.agree / stats.n >= TRUST_MIN_AGREEMENT;
+            return { question, n: stats.n, agreement: stats.n ? stats.agree / stats.n : null, trusted };
+          })
           .sort((a, b) => b.n - a.n),
         jev_cloud: { enabled: roots.config.classifier.jevCloud.enabled, has_key: !!(await getSecret("jev-api-key")) },
       },

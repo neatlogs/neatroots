@@ -105,7 +105,7 @@ function clip(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
-function toQuestion(c: QuestionCheck, params: Record<string, string>): DecisionQuestion {
+export function toQuestion(c: QuestionCheck, params: Record<string, string>): DecisionQuestion {
   const ask = fillTemplate(c.ask, params) || c.ask;
   if (c.kind === "yes_no") return { name: c.id, type: "yes_no", ask };
   if (c.kind === "choice") return { name: c.id, type: "choice", ask, options: c.options };
