@@ -247,6 +247,22 @@ function llmToolCalls(attrs: Attrs): SpanView["toolCalls"] {
   }));
 }
 
+function pydanticUserInput(attrs: Attrs): Plain | undefined {
+  const messages = maybeJson(attrs["pydantic_ai.all_messages"]);
+  if (!Array.isArray(messages)) return undefined;
+  for (const message of messages) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) continue;
+    const parts = (message as Record<string, Plain>).parts;
+    if (!Array.isArray(parts)) continue;
+    for (const part of parts) {
+      if (!part || typeof part !== "object" || Array.isArray(part)) continue;
+      const p = part as Record<string, Plain>;
+      if (p.part_kind === "user-prompt" && p.content !== undefined) return p.content;
+    }
+  }
+  return undefined;
+}
+
 function exceptionMessage(span: OtlpSpan): string | undefined {
   for (const e of span.events) {
     if (e.name !== "exception") continue;
@@ -273,8 +289,8 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
   view.agentName = str(first(attrs, ["neatlogs.agent.name", "agent.name", "gen_ai.agent.name"]));
   view.model = str(first(attrs, ["neatlogs.llm.model_name", "gen_ai.response.model", "gen_ai.request.model", "llm.model_name", "ai.response.model", "ai.model.id", "neatlogs.embedding.model_name"]));
   view.provider = str(first(attrs, ["neatlogs.llm.provider", "neatlogs.provider", "gen_ai.system", "gen_ai.provider.name", "llm.provider", "ai.model.provider"]));
-  view.promptTokens = int(first(attrs, ["neatlogs.llm.token_count.prompt", "gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens", "llm.token_count.prompt", "ai.usage.promptTokens", "ai.usage.inputTokens"]));
-  view.completionTokens = int(first(attrs, ["neatlogs.llm.token_count.completion", "gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens", "llm.token_count.completion", "ai.usage.completionTokens", "ai.usage.outputTokens"]));
+  view.promptTokens = int(first(attrs, ["neatlogs.llm.token_count.prompt", "gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens", "gen_ai.aggregated_usage.input_tokens", "llm.token_count.prompt", "ai.usage.promptTokens", "ai.usage.inputTokens"]));
+  view.completionTokens = int(first(attrs, ["neatlogs.llm.token_count.completion", "gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens", "gen_ai.aggregated_usage.output_tokens", "llm.token_count.completion", "ai.usage.completionTokens", "ai.usage.outputTokens"]));
   view.totalTokens =
     int(first(attrs, ["neatlogs.llm.token_count.total", "gen_ai.usage.total_tokens", "llm.token_count.total"])) ??
     (view.promptTokens !== undefined || view.completionTokens !== undefined
@@ -302,7 +318,11 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
       } else if (view.toolCalls && view.output === undefined) {
         view.output = [{ role: "assistant", tool_calls: view.toolCalls.map((c) => ({ id: c.id ?? null, name: c.name, arguments: c.arguments })) }];
       }
-      const tools = collectIndexed(attrs, "neatlogs.llm.tools").map((t) => str(t.name)).filter((x): x is string => !!x);
+      const definitions = maybeJson(attrs["gen_ai.tool.definitions"]);
+      const tools = [
+        ...collectIndexed(attrs, "neatlogs.llm.tools").map((t) => str(t.name)),
+        ...(Array.isArray(definitions) ? definitions.map((t) => (t && typeof t === "object" && !Array.isArray(t) ? str((t as Record<string, Plain>).name) : undefined)) : []),
+      ].filter((x): x is string => !!x);
       if (tools.length) view.tools = tools;
       break;
     }
@@ -316,8 +336,8 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
       view.output = maybeJson(first(attrs, ["neatlogs.workflow.output", ...genericOut]));
       break;
     case "AGENT":
-      view.input = maybeJson(first(attrs, ["neatlogs.agent.input", ...genericIn, "ai.prompt"]));
-      view.output = maybeJson(first(attrs, ["neatlogs.agent.output", ...genericOut, "ai.response.text"]));
+      view.input = maybeJson(first(attrs, ["neatlogs.agent.input", ...genericIn, "ai.prompt"])) ?? pydanticUserInput(attrs);
+      view.output = maybeJson(first(attrs, ["neatlogs.agent.output", ...genericOut, "ai.response.text", "final_result"]));
       break;
     case "RETRIEVER":
       view.input = maybeJson(first(attrs, ["neatlogs.retriever.query", ...genericIn]));
