@@ -10,19 +10,21 @@ export function EvidenceChips({ ids, names, onPick, max = 6 }: { ids: string[]; 
     return total > 1 ? `${name} #${n}` : name;
   };
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
+    <div data-testid="evidence-chip-list" className="flex min-w-0 flex-col items-start gap-1.5">
       <span className="text-xs text-muted-foreground">Seen in</span>
-      {ids.slice(0, max).map((id) => (
-        <button
-          key={id}
-          type="button"
-          onClick={() => onPick(id)}
-          title={`Open span ${id}`}
-          className="max-w-56 cursor-pointer truncate rounded-md border border-border bg-background px-2 py-0.5 font-mono text-2xs text-foreground transition-colors hover:bg-surface-subtle focus-visible:ring-1 focus-visible:ring-ring/50 focus-visible:outline-none"
-        >
-          {label(id)}
-        </button>
-      ))}
+      <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
+        {ids.slice(0, max).map((id) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => onPick(id)}
+            title={`Open span ${id}`}
+            className="min-w-0 max-w-full cursor-pointer whitespace-normal break-words rounded-md border border-border bg-background px-2 py-0.5 font-mono text-2xs text-foreground transition-colors hover:bg-surface-subtle focus-visible:ring-1 focus-visible:ring-ring/50 focus-visible:outline-none"
+          >
+            {label(id)}
+          </button>
+        ))}
+      </div>
       {ids.length > max && <span className="text-xs text-muted-foreground">+{ids.length - max} more</span>}
     </div>
   );

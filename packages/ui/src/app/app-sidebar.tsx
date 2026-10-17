@@ -16,6 +16,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Switch } from "@/components/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { post, type Status } from "@/lib/api";
 import type { ThemeChoice } from "@/lib/theme";
 import { cn } from "@/lib/utils";
@@ -122,7 +123,14 @@ export function AppSidebar({
         <div className="flex items-center gap-1 group-data-[collapsible=icon]:flex-col">
           {open && status && (
             <label className="flex min-w-0 flex-1 cursor-pointer items-center justify-between gap-2 rounded-sm px-2 py-1 text-sm text-muted-foreground hover:bg-sidebar-accent">
-              <span className="font-pixel">steering</span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="font-pixel">steering</span>
+                </TooltipTrigger>
+                <TooltipContent side="top" align="start">
+                  When a check fires mid-run, neatroots adds a short note to the agent's next model call. This needs the project's steering hook.
+                </TooltipContent>
+              </Tooltip>
               <Switch
                 aria-label="Steering for all projects"
                 checked={status.steering.enabled}
@@ -134,15 +142,23 @@ export function AppSidebar({
               />
             </label>
           )}
-          <button
-            type="button"
-            aria-label={`Theme: ${theme}. Switch to ${NEXT[theme]}`}
-            title={`Theme: ${theme}`}
-            onClick={() => setTheme(NEXT[theme])}
-            className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
-          >
-            <Icon icon={THEME_ICON[theme]} size="sm" />
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={`Theme: ${theme}. Switch to ${NEXT[theme]}`}
+                onClick={() => setTheme(NEXT[theme])}
+                className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+              >
+                <Icon icon={THEME_ICON[theme]} size="sm" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              {theme === "system"
+                ? "Theme follows your device. Click to cycle through light and dark."
+                : "Theme is " + theme + ". Click to cycle through system, light, and dark."}
+            </TooltipContent>
+          </Tooltip>
           {!open && (
             <button type="button" aria-label="Expand sidebar" onClick={toggleSidebar} className="flex size-8 cursor-pointer items-center justify-center rounded-sm text-muted-foreground hover:bg-sidebar-accent hover:text-foreground">
               <Icon icon={SidebarLeftIcon} size="sm" />
