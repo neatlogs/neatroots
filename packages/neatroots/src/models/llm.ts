@@ -4,6 +4,8 @@ import type { RootsConfig } from "../config.js";
 import { log } from "../util/log.js";
 import { BUILTIN_RULES, compileRules, CREDENTIAL_KINDS, redactString, type RedactionRule } from "../relay/redact.js";
 import { isLocalUrl, llmKeyName, providerById, strictSchema, type ProviderPreset } from "./providers.js";
+import { selectLocalModel, type LocalModelMetadata } from "./local-selection.js";
+export { TIER_PREFERENCES } from "./local-selection.js";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -55,13 +57,6 @@ export interface ProbeResult {
 }
 
 export class LlmUnavailableError extends Error {}
-
-/** Preferred models per memory tier, best first. Installed models are always preferred over downloads. */
-export const TIER_PREFERENCES: Record<string, string[]> = {
-  large: ["qwen3:14b", "gemma4", "gemma3:12b", "qwen3:8b", "llama3.1:8b", "mistral-nemo"],
-  medium: ["qwen3:8b", "gemma4", "llama3.1:8b", "gemma3:4b", "qwen3:4b", "llama3.2:3b"],
-  small: ["qwen3:4b", "llama3.2:3b", "gemma3:4b", "qwen3:1.7b", "gemma3:1b"],
-};
 
 export function hardwareTier(totalBytes = os.totalmem()): { tier: "large" | "medium" | "small"; memoryGb: number; description: string } {
   const gb = Math.round(totalBytes / 1024 ** 3);
@@ -177,6 +172,29 @@ class OpenAiTransport implements Transport {
     return (body.data ?? []).map((m) => m.id.replace(/^models\//, ""));
   }
 
+  /** Reads optional Ollama tag metadata; other local OpenAI-compatible servers may return 404. */
+  private async listLocalModelMetadata(): Promise<LocalModelMetadata[]> {
+    try {
+      const url = new URL(this.baseUrl);
+      const prefix = url.pathname.replace(/\/v1\/?$/, "").replace(/\/+$/, "");
+      url.pathname = `${prefix}/api/tags`;
+      url.search = "";
+      url.hash = "";
+      const res = await fetch(url, { headers: await this.headers(), signal: AbortSignal.timeout(1500) });
+      if (!res.ok) return [];
+      const body = (await res.json()) as { models?: { name?: unknown; model?: unknown; details?: { parameter_size?: unknown } }[] };
+      if (!Array.isArray(body.models)) return [];
+      return body.models.flatMap((model) => {
+        const name = typeof model.name === "string" ? model.name : typeof model.model === "string" ? model.model : undefined;
+        const parameterSize = typeof model.details?.parameter_size === "string" ? model.details.parameter_size : undefined;
+        return name ? [{ name, parameterSize }] : [];
+      });
+    } catch {
+      // Metadata is optional for non-Ollama local servers and must not make model discovery fail.
+      return [];
+    }
+  }
+
   /** Checks the server and resolves "auto" to an installed model. Cached for 30 s locally, 5 min for hosted APIs. */
   async probe(force = false): Promise<ProbeResult> {
     const ttl = this.t.local ? 30_000 : 300_000;
@@ -190,8 +208,15 @@ class OpenAiTransport implements Transport {
       if (want && want !== "auto") {
         this.resolvedModel = want;
       } else if (this.t.local) {
-        const prefs = TIER_PREFERENCES[hardwareTier().tier];
-        this.resolvedModel = prefs.map((p) => models.find((m) => m === p || m.startsWith(p + ":") || m.startsWith(p))).find(Boolean) ?? models[0];
+        const tier = hardwareTier().tier;
+        const metadata = models.length ? await this.listLocalModelMetadata() : [];
+        this.resolvedModel = selectLocalModel(tier, models, metadata);
+        if (!this.resolvedModel) {
+          const error = models.length
+            ? "no supported local chat model found for the " + tier + " memory tier; set llm.model explicitly to an installed chat model or install a supported chat model"
+            : "no chat model installed; set llm.model explicitly to an installed chat model or install one";
+          return (this.lastResult = { ok: false, models, error });
+        }
       } else {
         this.resolvedModel = undefined;
         return (this.lastResult = { ok: false, models, error: "pick a model (neatroots llm models lists them)" });

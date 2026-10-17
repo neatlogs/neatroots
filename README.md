@@ -206,6 +206,10 @@ neatroots llm login anthropic && neatroots llm use anthropic   # claude-opus-5-5
 neatroots llm local                                            # back to this machine only
 ```
 
+For LM Studio, llama.cpp, MLX, or another local server without Ollama size metadata, auto selection
+only recognizes exact supported size-tagged IDs. Set `llm.baseUrl` and `llm.model` explicitly for
+other served chat-model IDs; see [local LLM configuration and auto-selection limits](docs/getting-started.md#lm-studio-llamacpp-mlx-and-other-local-servers).
+
 With a hosted LLM on, the run content each LLM task needs is sent to that provider with secrets
 removed. Rules, storage and the app stay local. **Settings → Models** does the same in the app.
 
