@@ -1,9 +1,13 @@
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defaultConfig } from "../src/config.js";
+import { defaultConfig, saveConfig } from "../src/config.js";
 import { LayaManager } from "../src/models/laya.js";
 import { askForLaya, shouldAskForLaya } from "../src/models/laya-consent.js";
 import { freePort, makeRoots, poll, tmpHome, type TestRoots } from "./helpers.js";
@@ -15,6 +19,48 @@ afterEach(async () => {
 });
 
 describe("asking before downloading Laya", () => {
+  it("delegates installation to an already-running neatroots", async () => {
+    const home = tmpHome();
+    const cfg = defaultConfig();
+    cfg.port = await freePort();
+    saveConfig(cfg, path.join(home, "config.yaml"));
+    let installRequested = false;
+    const server = http.createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/health") return res.end('{"ok":true}');
+      if (req.url === "/api/classifier/laya" && req.method === "POST") {
+        installRequested = true;
+        return res.end('{"ok":true}');
+      }
+      if (req.url === "/api/status") return res.end(JSON.stringify({ classifier: { laya: { state: installRequested ? "running" : "not_installed", message: "ready", progress: 1, url: "http://127.0.0.1:4101" } } }));
+      res.statusCode = 404;
+      res.end('{}');
+    });
+    await new Promise<void>((resolve) => server.listen(cfg.port, "127.0.0.1", resolve));
+    try {
+      const packageDir = fileURLToPath(new URL("..", import.meta.url));
+      const tsx = fileURLToPath(import.meta.resolve("tsx"));
+      const child = spawn(process.execPath, ["--import", tsx, path.join(packageDir, "src", "cli.ts"), "laya", "install"], {
+        cwd: packageDir,
+        env: { ...process.env, NEATROOTS_HOME: home },
+        stdio: "pipe",
+      });
+      let output = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => (output += chunk));
+      child.stderr.on("data", (chunk: string) => (output += chunk));
+      const [code] = (await once(child, "close")) as [number];
+      expect(code, output).toBe(0);
+      expect(installRequested).toBe(true);
+      expect(output).toContain("Laya running");
+      expect(fs.existsSync(path.join(home, "laya"))).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("asks only while Laya is on, not installed and not yet answered", () => {
     const cfg = defaultConfig();
     expect(shouldAskForLaya(cfg, false)).toBe(true);
