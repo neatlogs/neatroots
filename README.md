@@ -172,12 +172,6 @@ neatlogs.init(workflow_name="refund-agent", flush_interval=0.5, instrumentations
   `check:` `session:` `has:problems` `since:7d`.
 - **Checks** lists the rules and questions in force. **New check** turns a sentence into a check and
   previews it on recent runs. Checks are YAML; keep shared ones in your repo's `.neatroots/checks/`.
-- **Finding reviews** queues findings for a local human judgment: confirmed problem, false positive,
-  or unsure, with an optional reason. Filter by project, check ID or review status, inspect the
-  evidence and save to continue. Reviews persist separately from dismiss/resolve actions and do
-  not change check precision or quieting. New or re-sent spans, changed finding evidence or a
-  changed check definition require another review. An identical span retransmission also marks
-  the review stale conservatively. Reviews follow run retention and are never sent to a model.
 - **Coding agents** chats with Claude Code or Codex in your project folder, with neatroots' tools
   attached. Read-only unless you allow edits or commands for that chat.
 
