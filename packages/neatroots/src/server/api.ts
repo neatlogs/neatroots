@@ -147,7 +147,7 @@ export function mountApi(app: Hono, roots: Roots): void {
       tier: { ...tier, platform: `${os.platform()} ${os.arch()}` },
       steering: { enabled: roots.config.steering.enabled, hooks_connected: roots.steering.listeners },
       mcp: { last_seen_ms: roots.mcpSeenMs },
-      cloud: { endpoint: roots.relay.endpoint(), has_key: !!(await getCloudKey()), has_token: !!(await getCloudToken()), project_id: roots.config.cloud.projectId ?? null },
+      cloud: { endpoint: roots.relay.endpoint(), has_key: !!(await getCloudKey()), has_token: !!(await getCloudToken()), project_id: roots.config.cloud.projectId ?? null, redact_patterns: roots.config.cloud.redactPatterns },
       classifier: {
         laya: { ...roots.laya.state, consent: roots.config.classifier.laya.consent ?? null },
         trust: Object.entries(roots.decisions.trust.all())
@@ -293,11 +293,17 @@ export function mountApi(app: Hono, roots: Roots): void {
     if (b.project && b.steering !== undefined && !STEERING_MODES.includes(b.steering)) return err(c, 400, `steering must be one of ${STEERING_MODES.join(", ")}`);
     if (b.classifier_backend && !["auto", "laya", "jev", "jev-cloud", "llm"].includes(b.classifier_backend)) return err(c, 400, "classifier_backend must be auto, laya, jev, jev-cloud or llm");
     if (b.cloud_endpoint && !allowedEndpoint(b.cloud_endpoint)) return err(c, 400, "cloud endpoint must be an https://*.neatlogs.com URL (or localhost for testing)");
-    for (const p of b.redact_patterns ?? []) {
-      try {
-        new RegExp(p);
-      } catch {
-        return err(c, 400, `invalid pattern: ${p}`);
+    // redact_patterns is typed string[] but arrives as JSON: a string used to pass the truthiness
+    // check, iterate character by character and be saved, turning each letter into a redaction rule.
+    const patterns: unknown = b.redact_patterns;
+    if (patterns !== undefined) {
+      if (!Array.isArray(patterns) || patterns.some((p) => typeof p !== "string")) return err(c, 400, "redact_patterns must be an array of strings");
+      for (const p of patterns as string[]) {
+        try {
+          new RegExp(p);
+        } catch {
+          return err(c, 400, `invalid pattern: ${p}`);
+        }
       }
     }
     // A check_dir is checked here with the rest, before anything is pushed or saved. Registering one
@@ -335,6 +341,9 @@ export function mountApi(app: Hono, roots: Roots): void {
     }
     roots.decisions.reset();
     if (b.cloud_endpoint) roots.config.cloud.endpoint = b.cloud_endpoint;
+    if (patterns !== undefined) roots.config.cloud.redactPatterns = patterns as string[];
+    if (b.check_dir && !roots.config.checkDirs.includes(b.check_dir)) {
+      roots.config.checkDirs.push(b.check_dir);
     if (b.redact_patterns) roots.config.cloud.redactPatterns = b.redact_patterns;
     if (checkDir && !roots.config.checkDirs.includes(checkDir)) {
       // Validated above, and reload() records anything it can't load instead of throwing.

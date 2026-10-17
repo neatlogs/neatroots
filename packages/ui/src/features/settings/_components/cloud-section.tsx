@@ -19,7 +19,7 @@ export function CloudSection({ status }: { status: Status }) {
   const keys = useKeyActions("/api/cloud/key", "Neatlogs Cloud");
   const { data } = useForwards();
   const [endpoint, setEndpoint] = useState(status.cloud.endpoint);
-  const [patterns, setPatterns] = useState("");
+  const [patterns, setPatterns] = useState((status.cloud.redact_patterns ?? []).join("\n"));
   const regions = REGIONS.some((r) => r.value === endpoint) ? REGIONS : [...REGIONS, { value: endpoint, label: endpoint }];
   const connected = status.cloud.has_key;
   return (
@@ -65,7 +65,7 @@ export function CloudSection({ status }: { status: Status }) {
               save.mutate({
                 body: {
                   cloud_endpoint: endpoint,
-                  ...(patterns.trim() ? { redact_patterns: patterns.split("\n").map((x) => x.trim()).filter(Boolean) } : {}),
+                  redact_patterns: patterns.split("\n").map((x) => x.trim()).filter(Boolean),
                 },
                 message: "Cloud settings saved",
               })
