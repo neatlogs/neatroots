@@ -1,0 +1,12 @@
+version: 1
+checks: ./checks
+rules:
+  - demo-secret-output
+fixtures:
+  - id: secret-is-detected
+    trace: ./traces/secret.json
+    expected:
+      - demo-secret-output
+  - id: clean-output-is-ignored
+    trace: ./traces/clean.json
+    expected: []
