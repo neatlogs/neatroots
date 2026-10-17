@@ -202,6 +202,11 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   app.post("/api/runs/:traceId/replay", async (c) => {
     const traceId = c.req.param("traceId");
     const b = await body<{ span_id?: string; messages?: { role: string; content: string }[]; edit?: { from: string; to: string }; input?: string; model?: string; system?: string }>(c);
+    for (const field of ["span_id", "input", "model", "system"] as const) {
+      if (b[field] !== undefined && typeof b[field] !== "string") return err(c, 400, `${field} must be a string`);
+    }
+    if (b.edit !== undefined && (typeof b.edit?.from !== "string" || typeof b.edit?.to !== "string")) return err(c, 400, "edit.from and edit.to must be strings");
+    if (b.messages !== undefined && (!Array.isArray(b.messages) || b.messages.some((m) => typeof m?.role !== "string" || typeof m?.content !== "string"))) return err(c, 400, "messages must be an array of {role, content} strings");
     try {
       if (b.span_id) return c.json(await roots.replays.replayLlm(traceId, b.span_id, { messages: b.messages, edit: b.edit, model: b.model || undefined, system: b.system || undefined }));
       const { replay } = roots.replays.startRun(traceId, { input: b.input, model: b.model || undefined, system: b.system || undefined });
