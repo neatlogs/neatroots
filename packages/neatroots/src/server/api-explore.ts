@@ -9,6 +9,7 @@ import { deleteCloudToken, getCloudToken, setCloudToken } from "../relay/keychai
 import { buildChat } from "../semantics/chat-view.js";
 import { body, clampInt, err } from "./util.js";
 import { runSummary } from "./api.js";
+import { bodyLimit } from "hono/body-limit";
 import type { RunFilter } from "../store/db.js";
 
 // Run views (chat, conversation), search, imports, cloud import, replays and the in-app coding
@@ -121,7 +122,9 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
     }
   });
   app.post("/api/imports/:id/cancel", (c) => (roots.imports.cancel(c.req.param("id")) ? c.json({ ok: true }) : err(c, 404, "no running import with that id")));
-  app.post("/api/imports/file", async (c) => {
+  // Same cap as the collector: a bigger body is refused before it is read into memory.
+  const importLimit = bodyLimit({ maxSize: 64 * 1024 * 1024, onError: (c) => err(c, 413, "the file is larger than 64 MB; split it, or send it to /v1/traces in parts") });
+  app.post("/api/imports/file", importLimit, async (c) => {
     const b = await body<{ name?: string; content?: string; project?: string }>(c);
     if (!b.content) return err(c, 400, "content is required");
     try {

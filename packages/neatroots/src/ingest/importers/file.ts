@@ -15,7 +15,7 @@ function fromDoc(doc: unknown, project: string): ResourceSpansBatch[] {
   if (Array.isArray(o.resourceSpans) || Array.isArray(o.resource_spans)) return decodeTraceJson(o);
   const exp = (o.data && typeof o.data === "object" ? o.data : o) as Record<string, unknown>;
   if (Array.isArray(exp.spans) && exp.trace && typeof exp.trace === "object") return fromNeatlogsExport(exp, project);
-  if (typeof o.name === "string") return httpTraceToBatches(o, project).batches;
+  if (typeof o.name === "string") return httpTraceToBatches(o, project, { stableIds: true }).batches;
   throw new ImportError("not OTLP JSON, a Neatlogs trace export or a Neatlogs HTTP trace");
 }
 

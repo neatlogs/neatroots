@@ -3,8 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { checkFiles, recordOrVerifyCheckManifest } from "../src/checks/offline.js";
+import * as ruleEvaluation from "../src/checks/rules.js";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const dir = fs.mkdtempSync(path.join(packageRoot, ".tmp-check-repro-"));
@@ -55,6 +56,23 @@ function runCli(args: string[], home: string) {
 }
 
 describe("reproducible offline checks", () => {
+  it.each([false, true])("keeps repository rules under timed evaluation (reproducible=%s)", (reproducible) => {
+    const checks = writeCheck(`timed-${reproducible}`, "rules.yaml", repoRules.replace("repo-clean", "repo-z").replace("repo-other", "repo-a"));
+    // Observe real evaluation without stubbing it: retaining a rule's source across sorting
+    // is what keeps main's regex time limit enabled for repository checks in both modes.
+    const evaluate = vi.spyOn(ruleEvaluation, "evaluateRule");
+    try {
+      const result = checkFiles([trace], { dirs: [checks], only: ["repo-a", "repo-z"], reproducible });
+      expect(result.runs[0].findings).toEqual([]);
+      expect(evaluate.mock.calls).toHaveLength(2);
+      expect(evaluate.mock.calls.map((args) => [args[0].id, args[4]])).toEqual(
+        (reproducible ? ["repo-a", "repo-z"] : ["repo-z", "repo-a"]).map((id) => [id, true]),
+      );
+    } finally {
+      evaluate.mockRestore();
+    }
+  });
+
   it("loads only repository checks and creates a stable lock that rejects drift", () => {
     const checks = writeCheck("repo", "rules.yaml", repoRules);
     const home = path.join(dir, "home");

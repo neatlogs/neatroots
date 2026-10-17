@@ -1,6 +1,6 @@
 {
   "name": "@neatlogs/neatroots-steer",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Steering hook for neatroots: adds neatroots' guidance notes to your agent's next LLM call and gives it a check_my_work tool.",
   "license": "Apache-2.0",
   "type": "module",

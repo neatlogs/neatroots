@@ -1,6 +1,16 @@
 import type { RuleCheck } from "./types.js";
 import { finalOutput, selectSpans, type SpanInfo, type TraceSnapshot } from "../engine/trace.js";
 import { preview } from "../semantics/view.js";
+import { log } from "../util/log.js";
+import { testWithin } from "../util/regex.js";
+
+/** How long one check's pattern may run on one span before it is treated as too slow. */
+const MATCH_MS = 50;
+/** Patterns that ran out of time; skipped from then on, so a bad check costs one short stall. */
+const tooSlow = new Set<string>();
+/** Results for patterns run under the time limit, per span, so a span is tested once per pattern. */
+const matchMemo = new Map<string, boolean>();
+const TIMED_OUT = Symbol("timed out");
 
 export interface RuleHit {
   /** Whether the condition holds now, looking at the latest spans. */
@@ -96,7 +106,7 @@ function matchTexts(v: unknown): string[] {
  * a finding later resolves. `fresh` names the spans that just arrived: a streak they complete
  * fires even if a later span in the same batch already ended it.
  */
-export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>): RuleHit | null {
+export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, untrusted = false): RuleHit | null {
   const r = check.rule;
   switch (r.type) {
     case "repeat": {
@@ -192,20 +202,44 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       return { firing: true, evidenceSpanIds: [], params: { value: String(Math.round(value)), metric: r.metric } };
     }
     case "match": {
+      const key = `${r.flags ?? "i"}/${r.pattern}`;
+      if (untrusted && tooSlow.has(key)) return null;
       let re: RegExp;
       try {
         re = new RegExp(r.pattern, r.flags ?? "i");
       } catch {
         return null;
       }
-      const hits = selectSpans(t.spans, r.span).filter((s) => {
-        const v = r.field === "input" ? s.input : r.field === "output" ? s.output : r.field === "error" ? s.error : s.name;
-        if (v === undefined || v === null) return false;
-        return matchTexts(v).some((text) => {
-          re.lastIndex = 0;
-          return re.test(text);
+      // Library patterns are known to be fast. Patterns from checks people (or coding agents) write
+      // run under a time limit, since a regex can backtrack for minutes and stall the server.
+      const test = (text: string): boolean => {
+        re.lastIndex = 0;
+        if (!untrusted) return re.test(text);
+        const ok = testWithin(re, text, MATCH_MS);
+        if (ok === undefined) throw TIMED_OUT;
+        return ok;
+      };
+      let hits: SpanInfo[];
+      try {
+        hits = selectSpans(t.spans, r.span).filter((s) => {
+          const v = r.field === "input" ? s.input : r.field === "output" ? s.output : r.field === "error" ? s.error : s.name;
+          if (v === undefined || v === null) return false;
+          const texts = matchTexts(v);
+          if (!untrusted) return texts.some(test);
+          const memo = `${key}\u0000${t.run?.trace_id ?? ""}\u0000${s.id}\u0000${r.field}\u0000${texts.reduce((n, x) => n + x.length, 0)}`;
+          const known = matchMemo.get(memo);
+          if (known !== undefined) return known;
+          const found = texts.some(test);
+          if (matchMemo.size >= 50_000) matchMemo.clear();
+          matchMemo.set(memo, found);
+          return found;
         });
-      });
+      } catch (e) {
+        if (e !== TIMED_OUT) throw e;
+        tooSlow.add(key);
+        log.warn(`check ${check.id}: its pattern took over ${MATCH_MS} ms on one span, so it is skipped until neatroots restarts. Simplify the regex (overlapping alternatives in a repeat, like (a|aa)+, are slow).`);
+        return null;
+      }
       if (!hits.length) return null;
       return { firing: true, evidenceSpanIds: hits.map((s) => s.id), params: { count: String(hits.length), span: hits[0].ref } };
     }

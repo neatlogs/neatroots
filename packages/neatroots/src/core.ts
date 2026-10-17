@@ -62,6 +62,7 @@ export class Roots {
     );
     this.checks = new CheckRegistry(this.store, path.join(this.home, "checks"), () => this.config.checkDirs);
     this.steering = new SteeringHub(this);
+    this.steering.warnInactiveHalts(this.checks.rules().filter((c) => c.source === "user" || c.source === "project").map((c) => c.check));
     this.relay = new Relay(this);
     this.imports = new ImportJobs(this);
     this.replays = new Replays(this);

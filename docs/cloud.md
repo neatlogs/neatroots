@@ -7,6 +7,11 @@ public API (`https://app.neatlogs.com/api/v1/public`), which takes a different c
 service-account token (`nlsa_…`) sent as `Authorization: Bearer`, with `x-project-id` naming the
 project.
 
+neatroots sends your Neatlogs key (and, for imports, your service-account token) only to an https
+`*.neatlogs.com` address, or to localhost for testing. To use another https address, such as a
+self-hosted Neatlogs, set `cloud.endpoint` and `cloud.trustEndpoint: true` in `config.yaml`; plain
+http to another machine is always refused.
+
 ## Compatibility
 
 - **Ingest.** neatroots accepts exactly what the SDKs send to the cloud: `POST /v1/traces` (protobuf or
@@ -33,15 +38,30 @@ The relay is tested end to end by forwarding into a second neatroots instance an
 - From a coding agent: `push_to_cloud` asks; you confirm in the app before anything is sent.
 
 Before each send neatroots shows a redaction preview. Emails, phone numbers, private keys and credentials
-are always redacted: API keys (OpenAI, Anthropic, AWS access key ids, GitHub classic and fine-grained
-tokens, Slack, Google, Stripe, Hugging Face, Groq, npm, Google OAuth), bearer tokens, JWTs, `Basic`
-authorization, AWS secret access keys and passwords in URLs (`scheme://user:password@host`). Add your own
-patterns in Settings. Redaction also inspects OTLP byte
+are always redacted:
+- API keys and tokens: OpenAI, Anthropic, AWS access key ids (`AKIA…`, `ASIA…`), GitHub classic and
+  fine-grained tokens, Slack tokens and webhook URLs, Google, Stripe (`sk_`/`rk_` and `whsec_`), Hugging
+  Face, Groq, npm, SendGrid, Google OAuth, Neatlogs service-account tokens (`nlsa_…`) and `x-api-key` values;
+- bearer tokens of 20 characters or more, JWTs and `Basic` authorization;
+- AWS secret access keys and session tokens (as config keys, JSON or SDK options), Azure storage and
+  Service Bus keys, and JSON `password` / `client_secret` fields;
+- private keys (PEM, OpenSSH, PGP), including one cut off before its END line, which is redacted to the
+  end of the value;
+- passwords in URLs (`scheme://user:password@host`).
+
+Add your own patterns in Settings. If one of your patterns can't be applied (it isn't a valid regex, or it
+takes longer than 100 ms on a value), nothing is sent and the send log says which pattern to fix. For the
+hosted LLM the request fails, or goes to your local LLM if `fallbackToLocal` is on and one is running.
+Redaction also inspects OTLP byte
 attributes when they contain valid UTF-8 text, while arbitrary binary values remain unchanged. The
 SDK's own `mask` and PII options still apply first, in your process. Every send is logged (Settings →
 Neatlogs Cloud).
 
 The project API key is stored in the macOS Keychain (`neatroots cloud login`), never in the database.
+
+Requests that carry the project API key or the service-account token don't follow HTTP redirects:
+a redirect is logged as a failed send or import, so the key never reaches another host. If your
+endpoint moved, set it to the final URL.
 
 ## Importing
 
