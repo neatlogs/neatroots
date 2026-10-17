@@ -181,6 +181,29 @@ describe("engine", () => {
     await tb.roots.engine!.waitIdle(t, 5000);
     expect(tb.roots.store.notesForTrace(t)).toEqual([]);
   });
+
+  it("deduplicates a finding when question evaluations finish together", async () => {
+    const { tb } = await setup(["did it fail"]);
+    const { t } = startRun(tb);
+    const engine = tb.roots.engine as any;
+    const run = engine.live.get(t);
+    const check = { id: "concurrent-check", kind: "yes_no", scope: "trace", title: "Concurrent check", ask: "Did it fail?", flag_at: 0.8 };
+    const snap = { spans: [], run: tb.roots.store.getRun(t) };
+    engine.decisions.decide = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return {
+        answers: { [check.id]: { name: check.id, type: "yes_no", probability: 0.9, distribution: { yes: 0.9, no: 0.1 }, choice: "yes" } },
+        backend: "test",
+        model: "test",
+        latencyMs: 20,
+      };
+    };
+    engine.llm.isAvailable = async () => false;
+
+    await Promise.all([engine.decideAndApply(run, check, {}, "It failed.", [], snap, null), engine.decideAndApply(run, check, {}, "It failed.", [], snap, null)]);
+
+    expect(tb.roots.store.findingsForTrace(t).filter((f) => f.check_id === check.id)).toHaveLength(1);
+  });
 });
 
 describe("planning", () => {
