@@ -4,6 +4,7 @@ import { TOOLS as BASE_TOOLS, toolResultText } from "./tools.js";
 import { EXPLORE_TOOLS } from "./explore-tools.js";
 
 const TOOLS = [...BASE_TOOLS, ...EXPLORE_TOOLS];
+export const READ_ONLY_TOOL_NAMES = TOOLS.filter((tool) => tool.readOnly).map((tool) => tool.name);
 import { VERSION } from "../version.js";
 
 const INSTRUCTIONS = `neatroots checks AI agent runs on this machine with local models and records findings.

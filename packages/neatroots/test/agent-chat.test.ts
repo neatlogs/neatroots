@@ -43,7 +43,7 @@ echo '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"
 echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`,
     );
     t = await makeRoots({ noEngine: true });
-    const s = t.roots.chats.create({ agent: "codex", cwd: dir, allow_edits: true });
+    const s = t.roots.chats.create({ agent: "codex", cwd: dir, allow_edits: true, allow_commands: true });
     await t.roots.chats.send(s.id, "hi");
     await t.roots.chats.send(s.id, "and again");
     const events = t.roots.chats.events(s.id);
@@ -52,6 +52,63 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`,
     const [first, second] = fs.readFileSync(log, "utf8").trim().split("\n");
     expect(first).toMatch(/--sandbox workspace-write/);
     expect(second).toMatch(/^exec resume thread_t .*-c sandbox_mode="workspace-write"/);
+  });
+
+  it("uses workspace-write only when both edits and commands are allowed", async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
+    process.env.HOME = dir;
+    const log = path.join(dir, "args.log");
+    process.env.NEATROOTS_CODEX_BIN = script(
+      "codex",
+      `echo "$1 $2 $3 $4 $5" >> "${log}"
+echo '{"type":"thread.started","thread_id":"thread_t"}'
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`,
+    );
+    t = await makeRoots({ noEngine: true });
+    for (const permissions of [
+      { allow_edits: false, allow_commands: false },
+      { allow_edits: true, allow_commands: false },
+      { allow_edits: false, allow_commands: true },
+      { allow_edits: true, allow_commands: true },
+    ]) {
+      const s = t.roots.chats.create({ agent: "codex", cwd: dir, ...permissions });
+      await t.roots.chats.send(s.id, "hi");
+    }
+    expect(fs.readFileSync(log, "utf8").trim().split("\n").map((line) => line.match(/--sandbox (\S+)/)?.[1])).toEqual([
+      "read-only",
+      "read-only",
+      "read-only",
+      "workspace-write",
+    ]);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("a read-only chat with Claude Code", () => {
+  it("pre-approves only MCP tools marked read-only", async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
+    process.env.HOME = dir;
+    const log = path.join(dir, "tools.log");
+    process.env.NEATROOTS_CLAUDE_BIN = script(
+      "claude",
+      `prev=""
+for a in "$@"; do
+  [ "$prev" = "--allowedTools" ] && printf '%s' "$a" > "${log}"
+  prev="$a"
+done
+echo '{"type":"system","subtype":"init","session_id":"s1","model":"claude","mcp_servers":[]}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"s1"}'`,
+    );
+    t = await makeRoots({ noEngine: true });
+    const s = t.roots.chats.create({ agent: "claude", cwd: dir });
+    await t.roots.chats.send(s.id, "inspect the run");
+
+    const allowed = fs.readFileSync(log, "utf8").split(",");
+    expect(allowed).toContain("mcp__neatroots__get_current_run");
+    expect(allowed).toContain("mcp__neatroots_app__query_sql");
+    expect(allowed).not.toContain("mcp__neatroots__create_check");
+    expect(allowed).not.toContain("mcp__neatroots__rerun");
+    expect(allowed).not.toContain("mcp__neatroots__replay");
+    expect(allowed.some((tool) => tool.endsWith("__*"))).toBe(false);
   });
 });
 

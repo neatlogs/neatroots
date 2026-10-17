@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import type { Roots } from "../core.js";
 import { findClient, clientStatus, listClients } from "../mcp/clients.js";
+import { READ_ONLY_TOOL_NAMES } from "../mcp/server.js";
 import { log } from "../util/log.js";
 
 // Claude Code and Codex inside the app. Each turn runs the agent's own CLI headless in the
@@ -46,7 +47,14 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
 CREATE TABLE IF NOT EXISTS chat_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY (session_id, seq));
 `;
 
-const READ_TOOLS = ["Read", "Grep", "Glob", "LS", "TodoWrite", "mcp__neatroots__*", "mcp__neatroots_app__*"];
+const READ_TOOLS = [
+  "Read",
+  "Grep",
+  "Glob",
+  "LS",
+  "TodoWrite",
+  ...["neatroots", "neatroots_app"].flatMap((server) => READ_ONLY_TOOL_NAMES.map((tool) => `mcp__${server}__${tool}`)),
+];
 const EDIT_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
 /** neatroots' MCP rerun runs the project's registered agent command, so it counts as a command. */
 const RERUN_TOOLS = ["mcp__neatroots__rerun", "mcp__neatroots_app__rerun"];
@@ -369,7 +377,9 @@ export class AgentChats {
   }
 
   private codexArgs(s: ChatSession, prompt: string): { cmd: string; args: string[] } {
-    const mode = s.allow_edits || s.allow_commands ? "workspace-write" : "read-only";
+    // Codex has one workspace sandbox switch, not separate edit and shell permissions. Never let
+    // either permission silently grant the other; both must be on before it can write or execute.
+    const mode = s.allow_edits && s.allow_commands ? "workspace-write" : "read-only";
     const args = ["exec"];
     // `codex exec resume` rejects --sandbox; every codex takes the same setting as a -c override.
     if (s.agent_session_id) args.push("resume", s.agent_session_id, "--json", "--skip-git-repo-check", "-c", `sandbox_mode="${mode}"`);
