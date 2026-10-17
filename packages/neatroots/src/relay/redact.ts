@@ -1,4 +1,5 @@
 import type { AnyValue, KeyValue, ResourceSpansBatch } from "../otlp/types.js";
+import vm from "node:vm";
 import { replaceWithin } from "../util/regex.js";
 
 export interface RedactionRule {
@@ -89,7 +90,70 @@ function mask(s: string): string {
   return s.slice(0, 3) + "•".repeat(Math.min(12, s.length - 5)) + s.slice(-2);
 }
 
-export function redactString(s: string, rules: RedactionRule[], where: string, hits: RedactionHit[]): string {
+/** Opt-in work limits. The caller owns aggregate match counts; limited passes retain no samples. */
+export interface RedactionLimits {
+  node(depth: number): void;
+  output(fragment: string, stringLength: number): void;
+  match(kind: string): void;
+}
+
+const limitedSandbox = vm.createContext(Object.create(null));
+const limitedScript = new vm.Script("apply()");
+
+function redactLimited(s: string, rules: RedactionRule[], limits: RedactionLimits): string {
+  let out = s;
+  for (const rule of rules) {
+    const apply = () => {
+      rule.re.lastIndex = 0;
+      const parts: string[] = [];
+      let end = 0;
+      let length = 0;
+      const append = (part: string) => {
+        length += part.length;
+        limits.output(part, length); // check BEFORE retaining a fragment or joining the output
+        parts.push(part);
+      };
+      // String.replace(globalRegex, callback) collects matches before invoking callbacks.
+      // exec consumes one at a time, so a match limit actually bounds retained work.
+      let match: RegExpExecArray | null;
+      while ((match = rule.re.exec(out)) !== null) {
+        limits.match(rule.kind);
+        append(out.slice(end, match.index));
+        const prefix = rule.keepPrefix && typeof match[1] === "string" ? match[1] : "";
+        append(`${prefix}[redacted:${rule.kind}]`);
+        end = match.index + match[0].length;
+        if (!rule.re.global) break;
+        if (match[0].length === 0) {
+          // AdvanceStringIndex semantics: do not loop forever on a zero-width match.
+          const index = rule.re.lastIndex;
+          const unicode = rule.re.unicode || rule.re.flags.includes("v");
+          rule.re.lastIndex = index + (unicode && (out.codePointAt(index) ?? 0) > 0xffff ? 2 : 1);
+        }
+      }
+      append(out.slice(end));
+      return parts.join("");
+    };
+    if (!rule.timed) { out = apply(); continue; }
+    // Keep incremental match/output budgets AND main's per-pattern execution limit.
+    // The VM deadline covers exec and callbacks; replaceWithin would collect all matches first.
+    limitedSandbox.apply = apply;
+    try {
+      out = String(limitedScript.runInContext(limitedSandbox, { timeout: PATTERN_MS }));
+    } catch (error) {
+      if ((error as { code?: string }).code === "ERR_SCRIPT_EXECUTION_TIMEOUT") {
+        throw new RedactionPatternError(`redaction pattern took longer than ${PATTERN_MS} ms on one value, so diagnostic export was refused.`);
+      }
+      throw error;
+    } finally {
+      limitedSandbox.apply = undefined;
+    }
+  }
+  return out;
+}
+
+export function redactString(s: string, rules: RedactionRule[], where: string, hits: RedactionHit[], limits?: RedactionLimits): string {
+  limits?.node(0);
+  if (limits) return redactLimited(s, rules, limits);
   let out = s;
   for (const r of rules) {
     r.re.lastIndex = 0;
@@ -112,50 +176,52 @@ export function redactString(s: string, rules: RedactionRule[], where: string, h
   return out;
 }
 
-function redactValue(v: AnyValue, rules: RedactionRule[], where: string, hits: RedactionHit[]): AnyValue {
-  if ("stringValue" in v) return { stringValue: redactString(v.stringValue, rules, where, hits) };
+function redactValue(v: AnyValue, rules: RedactionRule[], where: string, hits: RedactionHit[], limits?: RedactionLimits, depth = 0): AnyValue {
+  limits?.node(depth);
+  if ("stringValue" in v) return { stringValue: redactString(v.stringValue, rules, where, hits, limits) };
   if ("bytesValue" in v) {
     const bytes = Buffer.from(v.bytesValue, "base64");
     const text = bytes.toString("utf8");
     // OTLP bytes may contain arbitrary binary data. Only inspect canonical UTF-8 so decoding can
     // never replace invalid sequences or otherwise change bytes that are not actually text.
     if (!Buffer.from(text, "utf8").equals(bytes)) return v;
-    const redacted = redactString(text, rules, where, hits);
+    const redacted = redactString(text, rules, where, hits, limits);
     return redacted === text ? v : { bytesValue: Buffer.from(redacted, "utf8").toString("base64") };
   }
-  if ("arrayValue" in v) return { arrayValue: { values: v.arrayValue.values.map((x) => redactValue(x, rules, where, hits)) } };
-  if ("kvlistValue" in v) return { kvlistValue: { values: redactKvs(v.kvlistValue.values, rules, where, hits) } };
+  if ("arrayValue" in v) return { arrayValue: { values: v.arrayValue.values.map((x) => redactValue(x, rules, where, hits, limits, depth + 1)) } };
+  if ("kvlistValue" in v) return { kvlistValue: { values: redactKvs(v.kvlistValue.values, rules, where, hits, limits, depth + 1) } };
   return v;
 }
 
-function redactKvs(kvs: KeyValue[], rules: RedactionRule[], where: string, hits: RedactionHit[]): KeyValue[] {
-  return kvs.map((kv) => ({ key: kv.key, value: redactValue(kv.value, rules, `${where} ${kv.key}`, hits) }));
+function redactKvs(kvs: KeyValue[], rules: RedactionRule[], where: string, hits: RedactionHit[], limits?: RedactionLimits, depth = 0): KeyValue[] {
+  limits?.node(depth);
+  return kvs.map((kv) => ({ key: kv.key, value: redactValue(kv.value, rules, limits ? "" : `${where} ${kv.key}`, hits, limits, depth + 1) }));
 }
 
-/** Returns redacted copies of the batches and every redaction made. */
-export function redactBatches(batches: ResourceSpansBatch[], rules: RedactionRule[]): { batches: ResourceSpansBatch[]; hits: RedactionHit[] } {
+/** Returns redacted copies and detailed hits by default; limited callers own aggregate counts. */
+export function redactBatches(batches: ResourceSpansBatch[], rules: RedactionRule[], limits?: RedactionLimits): { batches: ResourceSpansBatch[]; hits: RedactionHit[] } {
   const hits: RedactionHit[] = [];
   const out = batches.map((b) => ({
-    resource: { ...b.resource, attributes: redactKvs(b.resource.attributes, rules, "resource", hits) },
+    resource: { ...b.resource, attributes: redactKvs(b.resource.attributes, rules, "resource", hits, limits) },
     scope: {
       ...b.scope,
-      ...(b.scope.name ? { name: redactString(b.scope.name, rules, "scope name", hits) } : {}),
-      ...(b.scope.attributes ? { attributes: redactKvs(b.scope.attributes, rules, "scope", hits) } : {}),
+      ...(b.scope.name ? { name: redactString(b.scope.name, rules, "scope name", hits, limits) } : {}),
+      ...(b.scope.attributes ? { attributes: redactKvs(b.scope.attributes, rules, "scope", hits, limits) } : {}),
     },
     spans: b.spans.map((s) => {
       // Span and event names often carry a URL or a tool argument, so they are redacted too,
       // and the hit labels use the redacted name so a preview never echoes the raw value.
-      const name = redactString(s.name, rules, `span name [${s.spanId.slice(0, 6)}]`, hits);
+      const name = redactString(s.name, rules, `span name [${s.spanId.slice(0, 6)}]`, hits, limits);
       return {
         ...s,
         name,
-        attributes: redactKvs(s.attributes, rules, `${name} [${s.spanId.slice(0, 6)}]`, hits),
+        attributes: redactKvs(s.attributes, rules, limits ? "" : `${name} [${s.spanId.slice(0, 6)}]`, hits, limits),
         events: s.events.map((e) => {
-          const eventName = redactString(e.name, rules, `${name} event name`, hits);
-          return { ...e, name: eventName, attributes: redactKvs(e.attributes, rules, `${name} event ${eventName}`, hits) };
+          const eventName = redactString(e.name, rules, limits ? "" : `${name} event name`, hits, limits);
+          return { ...e, name: eventName, attributes: redactKvs(e.attributes, rules, limits ? "" : `${name} event ${eventName}`, hits, limits) };
         }),
-        links: s.links.map((l) => ({ ...l, attributes: redactKvs(l.attributes, rules, `${name} link`, hits) })),
-        status: s.status.message ? { ...s.status, message: redactString(s.status.message, rules, `${name} status`, hits) } : s.status,
+        links: s.links.map((l) => ({ ...l, attributes: redactKvs(l.attributes, rules, limits ? "" : `${name} link`, hits, limits) })),
+        status: s.status.message ? { ...s.status, message: redactString(s.status.message, rules, limits ? "" : `${name} status`, hits, limits) } : s.status,
       };
     }),
   }));

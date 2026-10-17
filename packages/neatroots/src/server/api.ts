@@ -16,6 +16,7 @@ import { mountChecksApi } from "./api-checks.js";
 import { mountInsightsApi } from "./api-insights.js";
 import { mountAgentsApi } from "./api-agents.js";
 import { importSource, mountExploreApi } from "./api-explore.js";
+import { mountDiagnosticExportApi } from "./api-diagnostic-export.js";
 import { checkCoverage } from "./coverage.js";
 import { installInfo } from "../util/install.js";
 import { err, body, clampInt } from "./util.js";
@@ -116,6 +117,7 @@ export function mountApi(app: Hono, roots: Roots): void {
   mountInsightsApi(app, roots);
   mountAgentsApi(app);
   mountExploreApi(app, roots);
+  mountDiagnosticExportApi(app, roots);
 
   app.get("/api/status", async (c) => {
     const status = engine ? await engine.status() : null;

@@ -168,6 +168,49 @@ neatlogs.init(workflow_name="refund-agent", flush_interval=0.5, instrumentations
   how to start it: `neatroots rerun add <project> "uv run agent.py"`. During a replay the agent sees
   `NEATROOTS_REPLAY_INPUT`, `_MODEL` and `_SYSTEM_PROMPT`; `neatroots_steer.replay_input()` and
   `wrap()` apply them. Replays are new runs linked to the original.
+- **Diagnostic export.** From a run, choose **More actions → Prepare diagnostic export** to preview
+  and download a versioned JSON bundle with its trace, findings and relevant checks. It uses the
+  same built-in and configured custom redaction patterns as cloud forwarding on retained data.
+  Full stored trace evidence remains, with redaction. Check identities use consistent opaque aliases,
+  including saved parameter keys and finding/decision references; stored IDs are unchanged.
+  Current definition bodies are included only from the curated library. Non-library checks retain
+  kind, enabled/applicability/source metadata and numeric/enum rule summaries, with an explicit
+  body-omission marker: user/project locations do not prove human authorship of adopted drafts.
+  Saved plan parameter values are included only when the saved creator is explicitly `user`;
+  planner/default parameter keys retain aliases with null values. This deliberately sacrifices
+  generated parameter completeness because clipped planner evidence may have lost secret delimiters.
+  No historical check bodies are reconstructed from current definitions.
+  Run previews, finding titles/prose, arbitrary finding detail, model decision answers, question titles,
+  and investigation cause/fix prose are omitted. Findings retain span IDs, known source/backend,
+  probability/status, model/timestamps and explanation evidence IDs/grounding/model/timestamp.
+  Fixed schema discriminators/enums are protected at their schema positions; identical data-bearing
+  strings and parameter-map keys still redact. Pattern matching cannot guarantee detection of every
+  transformed sensitive value, and source/creator markers are not a cryptographic authorship proof.
+  Aliases use fresh randomness rather than content hashes, and cannot collide with original IDs.
+  At exact OTLP schema positions, matching trace/span IDs use correlated fixed-width hex aliases
+  across parents, links and exported evidence references. Matching or invalid int64/nanosecond
+  strings become decimal zero. Valid exponent-form integers canonicalize exactly to decimal, with
+  original and canonical spellings checked for redaction. The application export timestamp stays
+  valid at its schema position; identically named user data still redacts. Byte values retain base64 encoding, with valid unpadded/URL-safe
+  spellings canonicalized to padded standard base64. This keeps accepted exports
+  reimportable while sacrificing matched timing/value fidelity. Identically named user data still
+  undergoes ordinary redaction. Scalar preparation shares the export's node/work budgets.
+  Exports above a conservative 2 MiB source-data budget or 4 MiB compact JSON budget are refused before
+  large payloads are hydrated or a response is serialized. Redaction additionally refuses more than
+  10,000 matches, 64 MiB of cumulative intermediate UTF-8 output, or 50,000 visited nodes/depth 64
+  across trace and metadata passes; these conservative work limits can refuse smaller inputs too.
+  Matching is incremental and retains counts rather than per-match samples. Custom patterns also
+  run under cloud forwarding's 100 ms limit on each value. Invalid or timed-out
+  saved patterns refuse the entire export with a settings error. Built-in rules remain unchanged;
+  these are work limits, not a total request-duration guarantee. Refusal produces no partial bundle.
+  The preview renders at most 32 Ki characters; downloading an accepted export retains its complete
+  sanitized JSON. Download filenames use unrelated random tokens.
+  It does not gather extra environment or machine state. Nothing is uploaded
+  automatically, and pattern matches cannot guarantee every sensitive value is removed. Currently
+  enabled rules that apply to the run
+  are included even when they raised no finding, and are marked as current. The bundle keeps saved
+  plan IDs and redacted per-run plan parameters separate from current check definitions because
+  historical definition bodies are not retained.
 - **Search** (⌘K) finds text in any span. Filters: `project:` `status:` `kind:` `tool:` `model:`
   `check:` `session:` `has:problems` `since:7d`.
 - **Checks** lists the rules and questions in force. **New check** turns a sentence into a check and
