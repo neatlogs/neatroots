@@ -222,7 +222,16 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       let hits: SpanInfo[];
       try {
         hits = selectSpans(t.spans, r.span).filter((s) => {
-          const v = r.field === "input" ? s.input : r.field === "output" ? s.output : r.field === "error" ? s.error : s.name;
+          const v =
+            r.field === "input"
+              ? s.input
+              : r.field === "output"
+                ? s.output
+                : r.field === "error"
+                  ? s.error
+                  : r.field === "finish_reason"
+                    ? s.finishReason
+                    : s.name;
           if (v === undefined || v === null) return false;
           const texts = matchTexts(v);
           if (!untrusted) return texts.some(test);

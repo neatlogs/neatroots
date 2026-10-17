@@ -16,6 +16,7 @@ export interface SpanInfo {
   durationMs: number;
   status: "ok" | "error" | "unset";
   error?: string;
+  finishReason?: string;
   toolName?: string;
   model?: string;
   tokens?: number;
@@ -87,6 +88,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
       durationMs: row.duration_ms,
       status: statusOf(row),
       error: v.error,
+      finishReason: v.finishReason,
       toolName: v.toolName,
       model: v.model,
       tokens: v.totalTokens,

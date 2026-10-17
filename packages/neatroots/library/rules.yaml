@@ -56,6 +56,17 @@
     metric: total_tokens
     at_least: 200000
 
+- id: reply-truncated
+  kind: rule
+  title: A model reply was cut off at its token limit
+  rule:
+    type: match
+    span: { type: llm }
+    field: finish_reason
+    pattern: '^(max_tokens|length|MAX_TOKENS)$'
+    flags: 'i'
+  guidance: The reply hit max_tokens and is incomplete. Raise max_tokens for this call or ask the model to continue before using the reply.
+
 - id: secret-in-output
   kind: rule
   title: Something that looks like a secret key in model output
