@@ -83,3 +83,45 @@ it("keeps providers separate even when model names match", () => {
   calls[2].attributes.push(s("neatlogs.llm.provider", "bedrock"));
   expect(evaluate(calls).hit).toBeNull();
 });
+
+it("does not pool calls with missing or blank provider/model identities", () => {
+  for (const key of ["neatlogs.llm.provider", "neatlogs.llm.model_name"]) {
+    for (const value of [undefined, "", "   "]) {
+      const calls = [call(0, 10), call(0, 10), call(0, 10)];
+      for (const c of calls) {
+        c.attributes = c.attributes.filter((a) => a.key !== key);
+        if (value !== undefined) c.attributes.push(s(key, value));
+      }
+      expect(evaluate(calls).hit, `${key}=${JSON.stringify(value)}`).toBeNull();
+    }
+  }
+});
+
+it("cannot let unknown-model reads hide an identified model's writes", () => {
+  const known = [call(0, 10), call(0, 10), call(0, 10)];
+  const unknown = [call(1000, 0), call(1000, 0), call(1000, 0)];
+  for (const c of unknown) c.attributes = c.attributes.filter((a) => a.key !== "neatlogs.llm.model_name");
+  expect(evaluate([...known, ...unknown]).hit?.evidenceSpanIds).toEqual(known.slice(1).map((c) => c.spanId));
+});
+
+it("returns historical evidence after a firing prefix recovers, independent of batch order", () => {
+  const calls = [call(0, 100), call(0, 100), call(0, 100), call(300, 0)];
+  const prefix = evaluate(calls.slice(0, 3)).hit;
+  expect(prefix?.firing).toBe(true);
+  for (const order of [calls, [...calls].reverse(), [calls[3], calls[1], calls[0], calls[2]]]) {
+    expect(evaluate(order).hit).toEqual({ ...prefix, firing: false });
+  }
+});
+
+it("does not invent a historical failure before min_calls or when every measured prefix is healthy", () => {
+  expect(evaluate([call(0, 100), call(0, 100), call(200, 0)]).hit).toBeNull();
+  expect(evaluate([call(0, 100), call(500, 0), call(0, 100), call(0, 100)]).hit).toBeNull();
+  expect(evaluate([call(0, 100), call(), call(200, 0), call(0, 100)]).hit).toBeNull();
+});
+
+it("keeps an active group firing when a different group's historical miss recovers", () => {
+  const recovered = [call(0, 100, "a"), call(0, 100, "a"), call(0, 100, "a"), call(300, 0, "a")];
+  const active = [call(0, 10, "b"), call(0, 10, "b"), call(0, 10, "b")];
+  expect(evaluate([...recovered, ...active]).hit).toMatchObject({ firing: true,
+    evidenceSpanIds: active.slice(1).map((c) => c.spanId), params: { cache_write: "20", cache_read: "0" } });
+});

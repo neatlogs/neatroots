@@ -145,6 +145,10 @@ These normalized fields do not alter prompt or total tokens or stored attributes
 
 Ordering uses call start time, then span ID for ties, independent of ingestion order.
 Separate providers/models get separate warmups so one model's reads cannot hide another's
-writes. This is a diagnostic heuristic: calls to independent cache routes or different
+writes. Calls missing a nonblank provider or model are excluded from this comparison.
+If later reads clear a previously firing chronological prefix, the rule returns historical
+evidence with `firing: false`, resolving the live finding and withdrawing pending non-halt
+guidance. A recovered trace ingested in one batch creates no actionable cache finding.
+This is a diagnostic heuristic: calls to independent cache routes or different
 prompts within the same provider/model may intentionally write fresh caches. Inspect the
 evidence before changing the agent; the rule cannot infer cache identity from token counts.

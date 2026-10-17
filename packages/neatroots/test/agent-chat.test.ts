@@ -55,6 +55,30 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`,
   });
 });
 
+describe.skipIf(process.platform === "win32")("deleting a chat while the agent is answering", () => {
+  it("cancels it and writes no further events for the removed session", async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
+    process.env.HOME = dir;
+    process.env.NEATROOTS_CODEX_BIN = script(
+      "codex",
+      `echo '{"type":"thread.started","thread_id":"thread_t"}'
+sleep 0.4
+echo '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"late"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`,
+    );
+    t = await makeRoots({ noEngine: true });
+    const s = t.roots.chats.create({ agent: "codex", cwd: dir });
+    const turn = t.roots.chats.send(s.id, "hi");
+    await new Promise((r) => setTimeout(r, 150));
+    expect(t.roots.chats.get(s.id)?.state).toBe("running");
+    t.roots.chats.remove(s.id);
+    await turn;
+    await new Promise((r) => setTimeout(r, 600));
+    expect(t.roots.chats.get(s.id)).toBeUndefined();
+    expect(t.roots.chats.events(s.id)).toEqual([]);
+  });
+});
+
 describe.skipIf(process.platform === "win32")("a chat with Claude Code whose sign-in has expired", () => {
   it("explains what to do, once", async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
