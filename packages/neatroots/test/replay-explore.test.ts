@@ -1,5 +1,6 @@
+import fs from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadTrace } from "../src/engine/trace.js";
 import { EXPLORE_TOOLS } from "../src/mcp/explore-tools.js";
 import { toChat } from "../src/replay/replay.js";
@@ -18,6 +19,20 @@ afterEach(async () => {
 });
 
 const tool = (name: string) => EXPLORE_TOOLS.find((x) => x.name === name)!;
+
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+function hangingCommand(dir: string, pids: string): string {
+  const code = `const fs=require('node:fs'),{spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync(process.argv[1],process.pid+' '+child.pid);process.on('SIGTERM',()=>{});setInterval(()=>{},1000)`;
+  return `cd ${JSON.stringify(dir)} && node -e ${JSON.stringify(code)} ${JSON.stringify(pids)}`;
+}
 
 /** root agent → LLM (asks for lookup) → tool → LLM (answers); plus a sub-agent with its own LLM call. */
 function seed(tr: TestRoots, session = "conv-1") {
@@ -95,6 +110,55 @@ describe("replay", () => {
     expect(r.state).toBe("failed");
     expect(r.error).toMatch(/rerun folder .*deleted-agent-dir doesn't exist/);
     expect(t.roots.replays.get(r.id)?.state).toBe("failed");
+  });
+
+  it("ends a timed-out agent and its child process, even when the agent ignores SIGTERM", async () => {
+    const realSetTimeout = globalThis.setTimeout;
+    const timers = vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => realSetTimeout(fn, ms === 15 * 60_000 ? 300 : ms, ...args)) as typeof setTimeout);
+    const dir = tmpHome();
+    const pidsFile = path.join(dir, "pids");
+    let pids: number[] = [];
+    try {
+      t = await makeRoots({ noEngine: true });
+      const x = seed(t);
+      t.roots.config.rerun["support-agent"] = { command: hangingCommand(dir, pidsFile) };
+      const { done } = t.roots.replays.startRun(x.traceId);
+      await until(() => fs.existsSync(pidsFile));
+      pids = fs.readFileSync(pidsFile, "utf8").split(" ").map(Number);
+      const r = await done;
+      expect(r).toMatchObject({ state: "failed", new_trace_id: null });
+      expect(r.error).toMatch(/15-minute replay limit/);
+      await until(() => pids.every((pid) => !alive(pid)));
+    } finally {
+      timers.mockRestore();
+      for (const pid of pids) if (alive(pid)) process.kill(pid, "SIGKILL");
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("ends a running agent and its child process when neatroots stops", async () => {
+    const dir = tmpHome();
+    const pidsFile = path.join(dir, "pids");
+    let pids: number[] = [];
+    let home = "";
+    try {
+      t = await makeRoots({ noEngine: true });
+      home = t.roots.home;
+      const x = seed(t);
+      t.roots.config.rerun["support-agent"] = { command: hangingCommand(dir, pidsFile) };
+      const { done } = t.roots.replays.startRun(x.traceId);
+      await until(() => fs.existsSync(pidsFile));
+      pids = fs.readFileSync(pidsFile, "utf8").split(" ").map(Number);
+      t.roots.close();
+      const r = await done;
+      expect(r).toMatchObject({ state: "failed", error: "interrupted because neatroots stopped" });
+      await until(() => pids.every((pid) => !alive(pid)));
+      t = undefined;
+    } finally {
+      for (const pid of pids) if (alive(pid)) process.kill(pid, "SIGKILL");
+      if (home) fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("refuses to register a rerun command in a folder that doesn't exist", async () => {
