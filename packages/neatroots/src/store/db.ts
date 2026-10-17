@@ -20,6 +20,7 @@ import type {
   SpanRow,
 } from "../types.js";
 import type { OtlpLogRecord } from "../otlp/codec.js";
+import { createTrustStore, type TrustStore } from "../models/decision.js";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -410,6 +411,7 @@ export class Store {
   readonly blobs: BlobStore;
   private readonly searchIds: SearchIds;
   private seq = 0;
+  private trustFlush?: () => void;
   readonly dir: string;
   readonly file: string;
 
@@ -437,6 +439,7 @@ export class Store {
   }
 
   close(): void {
+    this.trustFlush?.();
     this.db.close();
   }
 
@@ -1458,6 +1461,31 @@ export class Store {
       },
       all: () => ({ ...data }),
     };
+  }
+
+  /** Laya-vs-LLM agreement per question definition, persisted so trust survives restarts. */
+  trustStore(): TrustStore {
+    this.trustFlush?.();
+    const initial = json<Record<string, unknown>>(this.getMeta("laya_trust"), {});
+    let timer: NodeJS.Timeout | undefined;
+    let pending: unknown;
+    const writeNow = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      if (pending !== undefined && this.db.open) {
+        this.setMeta("laya_trust", JSON.stringify(pending));
+        pending = undefined;
+      }
+    };
+    this.trustFlush = writeNow;
+    return createTrustStore(initial, (data) => {
+      pending = data;
+      clearTimeout(timer);
+      timer = setTimeout(writeNow, 1000);
+      timer.unref();
+    });
   }
 
   /** Full-text index for a span: its input, output and error, as much as SEARCH_LIMIT allows. */

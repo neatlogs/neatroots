@@ -347,23 +347,159 @@ export class LlmDecisionBackend implements DecisionBackend {
 
 // ----------------------------------------------------------------- router
 
-/** Per-question agreement between Laya and the LLM, measured in shadow mode. */
-export interface TrustStore {
-  get(question: string): { n: number; agree: number };
-  record(question: string, agreed: boolean): void;
-  all(): Record<string, { n: number; agree: number }>;
+export interface TrustStats {
+  n: number;
+  agree: number;
 }
 
-export function memoryTrust(): TrustStore {
-  const m: Record<string, { n: number; agree: number }> = {};
-  return {
-    get: (q) => m[q] ?? { n: 0, agree: 0 },
-    record: (q, a) => {
-      const cur = m[q] ?? { n: 0, agree: 0 };
-      m[q] = { n: cur.n + 1, agree: cur.agree + (a ? 1 : 0) };
-    },
-    all: () => ({ ...m }),
+export interface StoredTrustRecord {
+  n?: number;
+  agree?: number;
+  activeSig?: string;
+  defs?: Record<string, TrustStats>;
+  /** True only for in-memory name-seeded counts not yet bound to a question definition. */
+  seeded?: boolean;
+}
+
+/** Stable hash of the effective question definition (type, ask text, options or levels). */
+export function questionSignature(q: DecisionQuestion): string {
+  const canonical = {
+    type: q.type,
+    ask: q.ask.trim(),
+    options:
+      q.type === "choice"
+        ? Object.fromEntries(Object.entries(q.options ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+        : undefined,
+    levels: q.type === "score" ? [...(q.levels ?? [])] : undefined,
   };
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex").slice(0, 16);
+}
+
+/** Per-question agreement between Laya and the LLM, measured in shadow mode. */
+export interface TrustStore {
+  get(question: string | DecisionQuestion): TrustStats;
+  record(question: string | DecisionQuestion, agreed: boolean): void;
+  activate?(question: DecisionQuestion): void;
+  all(): Record<string, TrustStats>;
+}
+
+/** Creates an in-memory or persisted trust store mapping question definitions to agreement stats. */
+export function createTrustStore(
+  initial?: Record<string, unknown>,
+  onWrite?: (data: Record<string, StoredTrustRecord>) => void,
+): TrustStore {
+  let data: Record<string, StoredTrustRecord> = {};
+  for (const [name, raw] of Object.entries(initial ?? {})) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const r = raw as Record<string, unknown>;
+    if (r.defs && typeof r.defs === "object" && !Array.isArray(r.defs)) {
+      const defs: Record<string, TrustStats> = {};
+      for (const [sig, st] of Object.entries(r.defs as Record<string, unknown>)) {
+        if (!st || typeof st !== "object") continue;
+        const s = st as { n?: unknown; agree?: unknown };
+        if (typeof s.n === "number" && typeof s.agree === "number") defs[sig] = { n: s.n, agree: s.agree };
+      }
+      data[name] = {
+        activeSig: typeof r.activeSig === "string" ? r.activeSig : undefined,
+        defs,
+      };
+    }
+    // Legacy name-only records ({ n, agree } without defs) are intentionally ignored so an
+    // unverified definition is never silently promoted.
+  }
+
+  const bindSeededIfNeeded = (q: DecisionQuestion): TrustStats | undefined => {
+    const entry = data[q.name];
+    if (!entry || !entry.seeded || entry.activeSig || typeof entry.n !== "number" || typeof entry.agree !== "number") {
+      return undefined;
+    }
+    const sig = questionSignature(q);
+    const stats = { n: entry.n, agree: entry.agree };
+    const defs = { ...(entry.defs ?? {}), [sig]: stats };
+    data = { ...data, [q.name]: { activeSig: sig, defs } };
+    onWrite?.(data);
+    return stats;
+  };
+
+  return {
+    get: (question) => {
+      if (typeof question === "string") {
+        const entry = data[question];
+        if (!entry) return { n: 0, agree: 0 };
+        if (entry.activeSig && entry.defs?.[entry.activeSig]) return { ...entry.defs[entry.activeSig] };
+        if (entry.seeded && typeof entry.n === "number" && typeof entry.agree === "number") return { n: entry.n, agree: entry.agree };
+        return { n: 0, agree: 0 };
+      }
+      const bound = bindSeededIfNeeded(question);
+      if (bound) return { ...bound };
+      const entry = data[question.name];
+      if (!entry) return { n: 0, agree: 0 };
+      const sig = questionSignature(question);
+      const stats = entry.defs?.[sig];
+      return stats ? { ...stats } : { n: 0, agree: 0 };
+    },
+    record: (question, agreed) => {
+      if (typeof question === "string") {
+        const cur = data[question];
+        if (cur?.activeSig) {
+          const defs = { ...(cur.defs ?? {}) };
+          const prev = defs[cur.activeSig] ?? { n: 0, agree: 0 };
+          defs[cur.activeSig] = { n: prev.n + 1, agree: prev.agree + (agreed ? 1 : 0) };
+          data = { ...data, [question]: { activeSig: cur.activeSig, defs } };
+        } else {
+          const n = (cur?.seeded ? (cur.n ?? 0) : 0) + 1;
+          const agree = (cur?.seeded ? (cur.agree ?? 0) : 0) + (agreed ? 1 : 0);
+          data = { ...data, [question]: { ...(cur?.defs ? { defs: cur.defs } : {}), n, agree, seeded: true } };
+        }
+        onWrite?.(data);
+        return;
+      }
+      const sig = questionSignature(question);
+      const cur = data[question.name];
+      const defs = { ...(cur?.defs ?? {}) };
+      const base =
+        cur?.seeded && !cur.activeSig && typeof cur.n === "number" && typeof cur.agree === "number"
+          ? { n: cur.n, agree: cur.agree }
+          : (defs[sig] ?? { n: 0, agree: 0 });
+      defs[sig] = { n: base.n + 1, agree: base.agree + (agreed ? 1 : 0) };
+      data = {
+        ...data,
+        [question.name]: {
+          activeSig: cur?.activeSig ?? sig,
+          defs,
+        },
+      };
+      onWrite?.(data);
+    },
+    activate: (question) => {
+      if (!question.name || question.name === "_") return;
+      bindSeededIfNeeded(question);
+      const sig = questionSignature(question);
+      const cur = data[question.name];
+      if (cur?.activeSig === sig) return;
+      data = {
+        ...data,
+        [question.name]: {
+          activeSig: sig,
+          defs: { ...(cur?.defs ?? {}) },
+        },
+      };
+      onWrite?.(data);
+    },
+    all: () => {
+      const out: Record<string, TrustStats> = {};
+      for (const [name, entry] of Object.entries(data)) {
+        if (entry.activeSig) out[name] = { ...(entry.defs?.[entry.activeSig] ?? { n: 0, agree: 0 }) };
+        else if (entry.seeded && typeof entry.n === "number" && typeof entry.agree === "number") out[name] = { n: entry.n, agree: entry.agree };
+      }
+      return out;
+    },
+  };
+}
+
+/** In-memory trust store for tests and default operation. */
+export function memoryTrust(): TrustStore {
+  return createTrustStore();
 }
 
 /** Laya answers a question on its own once it agrees with the LLM this often, on this many answers. */
@@ -422,10 +558,10 @@ export class DecisionModel {
     this.llmBackend = new LlmDecisionBackend(llm);
   }
 
-  /** Whether Laya has earned every one of these questions. */
+  /** Whether Laya has earned every one of these questions for their current definitions. */
   trusted(questions: DecisionQuestion[]): boolean {
     return questions.every((q) => {
-      const t = this.trust.get(q.name);
+      const t = this.trust.get(q);
       return t.n >= TRUST_MIN_SAMPLES && t.agree / t.n >= TRUST_MIN_AGREEMENT;
     });
   }
@@ -471,11 +607,16 @@ export class DecisionModel {
   /** Asks Laya the same questions after an LLM answer and records whether it agreed. */
   private shadow(state: string, questions: DecisionQuestion[], reference: DecisionResult): void {
     if (!this.cfg.laya.enabled || this.cfg.backend !== "auto") return;
+    const snapshot = questions.map((q) => ({
+      ...q,
+      ...(q.options ? { options: { ...q.options } } : {}),
+      ...(q.levels ? { levels: [...q.levels] } : {}),
+    }));
     void (async () => {
       if (!(await this.laya.available())) return;
       try {
-        const r = await this.laya.decide(state, questions);
-        for (const q of questions) this.trust.record(q.name, sameVerdict(reference.answers[q.name], r.answers[q.name]));
+        const r = await this.laya.decide(state, snapshot);
+        for (const q of snapshot) this.trust.record(q, sameVerdict(reference.answers[q.name], r.answers[q.name]));
       } catch {
         /* shadow failures do not matter */
       }
@@ -483,6 +624,7 @@ export class DecisionModel {
   }
 
   async decide(state: string, questions: DecisionQuestion[], opts: DecideOptions = {}): Promise<DecisionResult> {
+    for (const q of questions) this.trust.activate?.(q);
     const key = createHash("sha256").update(state).update(JSON.stringify(questions)).digest("hex");
     const hit = this.cache.get(key);
     if (hit) return { ...hit, latencyMs: 0 };
