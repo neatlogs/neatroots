@@ -300,6 +300,11 @@ export interface RunFilter {
   includeDoctor?: boolean;
 }
 
+export interface SweepResult {
+  removed: number;
+  blobCandidates: string[];
+}
+
 type AggregateSpan = Pick<SpanRow, "is_marker" | "span_kind" | "status_code" | "prompt_tokens" | "completion_tokens" | "total_tokens">;
 
 interface RunContribution {
@@ -381,6 +386,7 @@ export const SEARCH_LIMIT = { head: 150_000, tail: 50_000 };
 const SEARCH_INDEX_VERSION = 2;
 /** A store over its size cap is trimmed to this share of the cap, so it isn't trimmed every hour. */
 export const RETENTION_LOW_WATER = 0.9;
+const RETENTION_BLOBS_META = "retention_blob_candidates";
 
 /** Free text as an FTS5 query: each word quoted, so operators and punctuation match literally. */
 function ftsQuery(text: string): string {
@@ -1295,7 +1301,27 @@ export class Store {
 
   /** Deletes the oldest unpinned runs past the age or size limit. Returns how many runs were removed. */
   sweep(maxAgeDays: number, maxBytes: number): number {
+    return this.sweepResult(maxAgeDays, maxBytes, {}).removed;
+  }
+
+  /** Worker-thread retention: leave blob reclamation to the main thread where ingest runs. */
+  sweepDetached(maxAgeDays: number, maxBytes: number, startedMs: number): SweepResult {
+    const result = this.sweepResult(maxAgeDays, maxBytes, { updatedBefore: startedMs, batchSize: 20 });
+    return { ...result, blobCandidates: json(this.getMeta(RETENTION_BLOBS_META), []) };
+  }
+
+  private sweepResult(maxAgeDays: number, maxBytes: number, options: { updatedBefore?: number; batchSize?: number }): SweepResult {
     let removed = 0;
+    const blobCandidates: string[] = options.updatedBefore === undefined ? [] : json(this.getMeta(RETENTION_BLOBS_META), []);
+    const remove = (ids: string[]) => {
+      const size = options.batchSize ?? Math.max(1, ids.length);
+      for (let i = 0; i < ids.length; i += size) {
+        const result = this.deleteRunsDetailed(ids.slice(i, i + size), options.updatedBefore);
+        removed += result.removed;
+        if (options.updatedBefore === undefined) this.reclaimUnreferencedBlobs(result.blobCandidates);
+        else blobCandidates.push(...result.blobCandidates);
+      }
+    };
     // Skip the age sweep for a non-positive age: a cutoff of "now" (days = 0)
     // would delete every unpinned run. maxBytes pruning below still runs.
     if (Number.isFinite(maxAgeDays) && maxAgeDays >= 1) {
@@ -1303,28 +1329,27 @@ export class Store {
       const old = this.db
         .prepare("SELECT trace_id FROM runs WHERE pinned = 0 AND COALESCE(ended_ms, received_ms) < ?")
         .all(cutoff) as { trace_id: string }[];
-      this.deleteRuns(old.map((r) => r.trace_id));
-      removed += old.length;
+      remove(old.map((r) => r.trace_id));
     }
     // Measure what the database holds, not the file size: SQLite keeps the file (and WAL) at its
     // high-water mark after a delete and reuses the freed pages, so the file size never drops
     // after a delete and measuring it would delete every unpinned run.
-    let size = this.storedBytes();
+    const pendingBlobBytes = () => this.unreferencedBlobs(blobCandidates).reduce((n, sha) => n + this.blobs.sizeOf(sha), 0);
+    let size = this.storedBytes() - pendingBlobBytes();
     if (size > maxBytes) {
       // Deleting from the full-text index leaves "deleted" markers until it is compacted, so the
       // size can read high. Compact (once per sweep, and only when over the cap) before trusting it.
       this.compactSearchIndex();
-      size = this.storedBytes();
+      size = this.storedBytes() - pendingBlobBytes();
     }
     if (size > maxBytes) {
       // Trim the oldest unpinned runs down to a low-water mark below the cap, so a store sitting
       // at its cap isn't trimmed (and compacted) again on every hourly sweep.
       const oldest = this.oldestRunsCovering(size - maxBytes * RETENTION_LOW_WATER, size);
-      this.deleteRuns(oldest);
-      removed += oldest.length;
+      remove(oldest);
     }
     if (removed) this.db.pragma("wal_checkpoint(TRUNCATE)");
-    return removed;
+    return { removed, blobCandidates };
   }
 
   /**
@@ -1405,29 +1430,57 @@ export class Store {
    * once per run, keeps a large retention trim fast.
    */
   deleteRuns(traceIds: string[]): void {
-    if (!traceIds.length) return;
-    const ids = JSON.stringify(traceIds);
+    const { blobCandidates } = this.deleteRunsDetailed(traceIds);
+    this.reclaimUnreferencedBlobs(blobCandidates);
+  }
+
+  private deleteRunsDetailed(traceIds: string[], updatedBefore?: number): SweepResult {
+    if (!traceIds.length) return { removed: 0, blobCandidates: [] };
     const inIds = "trace_id IN (SELECT value FROM json_each(?))";
-    const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
     const tx = this.db.transaction(() => {
+      if (updatedBefore !== undefined) {
+        traceIds = (
+          this.db.prepare(`SELECT trace_id FROM runs WHERE ${inIds} AND pinned = 0 AND updated_ms < ?`).all(JSON.stringify(traceIds), updatedBefore) as { trace_id: string }[]
+        ).map((r) => r.trace_id);
+      }
+      if (!traceIds.length) return { removed: 0, blobCandidates: [] };
+      const ids = JSON.stringify(traceIds);
+      const blobCandidates = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
       this.searchIds.deleteRuns(ids);
       for (const t of ["spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
         this.db.prepare(`DELETE FROM ${t} WHERE ${inIds}`).run(ids);
       }
       this.db.prepare(`DELETE FROM runs WHERE ${inIds}`).run(ids);
+      if (updatedBefore !== undefined && blobCandidates.length) {
+        const pending = json<string[]>(this.getMeta(RETENTION_BLOBS_META), []);
+        this.setMeta(RETENTION_BLOBS_META, JSON.stringify([...new Set([...pending, ...blobCandidates])]));
+      }
+      return { removed: traceIds.length, blobCandidates };
     });
-    tx();
+    return updatedBefore === undefined ? tx() : tx.immediate();
+  }
+
+  /** Reclaims retention payloads after its worker has committed the corresponding row deletes. */
+  reclaimBlobs(candidates: Iterable<string>): void {
+    const shas = [...new Set(candidates)];
     this.reclaimUnreferencedBlobs(shas);
+    const done = new Set(shas);
+    const pending = json<string[]>(this.getMeta(RETENTION_BLOBS_META), []).filter((sha) => !done.has(sha));
+    this.setMeta(RETENTION_BLOBS_META, JSON.stringify(pending));
   }
 
   /** Deletes candidate payloads only after checking every remaining span reference. */
   private reclaimUnreferencedBlobs(candidates: Iterable<string>): void {
+    for (const sha of this.unreferencedBlobs(candidates)) this.blobs.delete(sha);
+  }
+
+  private unreferencedBlobs(candidates: Iterable<string>): string[] {
     const shas = [...new Set(candidates)];
-    if (!shas.length) return;
+    if (!shas.length) return [];
     const used = new Set(
       (this.db.prepare("SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.blobs IS NOT NULL AND j.value IN (SELECT value FROM json_each(?))").all(JSON.stringify(shas)) as { sha: string }[]).map((r) => r.sha),
     );
-    for (const sha of shas) if (!used.has(sha)) this.blobs.delete(sha);
+    return shas.filter((sha) => !used.has(sha));
   }
 
   stats(): { runs: number; spans: number; findings: number; bytes: number } {
