@@ -181,6 +181,35 @@ describe("engine", () => {
     await tb.roots.engine!.waitIdle(t, 5000);
     expect(tb.roots.store.notesForTrace(t)).toEqual([]);
   });
+
+  it("isolates deferred failures and drains work queued by finishing triage", async () => {
+    const { tb } = await setup();
+    const { t, root } = startRun(tb);
+    const run = (tb.roots.engine as any).live.get(t);
+    const completed: string[] = [];
+    run.deferred.push(
+      async () => {
+        throw new Error("investigation failed");
+      },
+      async () => {
+        completed.push("existing");
+      },
+    );
+    const triage = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        run.deferred.push(async () => {
+          completed.push("late");
+        });
+        resolve();
+      }, 25);
+    });
+    run.triageJobs.add(triage);
+    void triage.finally(() => run.triageJobs.delete(triage));
+
+    tb.roots.ingest([batch([span({ traceId: t, spanId: root, name: "refund", kind: "workflow" }), markerSpan(t, root)])]);
+    await until(() => tb.roots.store.getSummary(t), 15000);
+    expect(completed).toEqual(["existing", "late"]);
+  });
 });
 
 describe("planning", () => {
