@@ -19,6 +19,8 @@ import { log } from "./util/log.js";
 export interface RootsOptions {
   home?: string;
   config?: RootsConfig;
+  /** Process-only start flags. They affect this instance but are omitted when settings are saved. */
+  runtime?: { port?: number; grpcPort?: number; layaEnabled?: boolean };
   /** Skip the check engine (used by tests and read-only tools). */
   noEngine?: boolean;
 }
@@ -41,6 +43,7 @@ export class Roots {
   readonly replays: Replays;
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
+  private readonly persistedRuntime: NonNullable<RootsOptions["runtime"]> = {};
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
   /** The run and span the app has in focus, for the MCP get_current_run tool. */
@@ -51,6 +54,18 @@ export class Roots {
   constructor(opts: RootsOptions = {}) {
     this.home = opts.home ?? rootsHome();
     this.config = opts.config ?? loadConfig();
+    if (opts.runtime?.port !== undefined) {
+      this.persistedRuntime.port = this.config.port;
+      this.config.port = opts.runtime.port;
+    }
+    if (opts.runtime?.grpcPort !== undefined) {
+      this.persistedRuntime.grpcPort = this.config.grpcPort;
+      this.config.grpcPort = opts.runtime.grpcPort;
+    }
+    if (opts.runtime?.layaEnabled !== undefined) {
+      this.persistedRuntime.layaEnabled = this.config.classifier.laya.enabled;
+      this.config.classifier.laya.enabled = opts.runtime.layaEnabled;
+    }
     this.store = new Store(path.join(this.home, "data"));
     this.llm = new LlmClient(this.config.llm, { secret: (n) => getSecret(n), redactPatterns: () => this.config.cloud.redactPatterns });
     this.laya = new LayaManager(this.home, this.config.classifier);
@@ -83,7 +98,16 @@ export class Roots {
 
   /** Saves to this instance's own home (the one it was opened with), never another one. */
   saveConfig(): void {
-    saveConfig(this.config, path.join(this.home, "config.yaml"));
+    const saved = structuredClone(this.config);
+    if (this.persistedRuntime.port !== undefined) saved.port = this.persistedRuntime.port;
+    if (this.persistedRuntime.grpcPort !== undefined) saved.grpcPort = this.persistedRuntime.grpcPort;
+    if (this.persistedRuntime.layaEnabled !== undefined) saved.classifier.laya.enabled = this.persistedRuntime.layaEnabled;
+    saveConfig(saved, path.join(this.home, "config.yaml"));
+  }
+
+  /** An explicit live setting supersedes the corresponding process-only start flag. */
+  persistRuntimeSetting(setting: "layaEnabled"): void {
+    delete this.persistedRuntime[setting];
   }
 
   /** Applies retention now and every hour. */
