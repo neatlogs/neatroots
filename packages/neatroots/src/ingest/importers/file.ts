@@ -81,10 +81,12 @@ function readBatches(text: string, name: string, project: string): ResourceSpans
     }
   }
   const out: ResourceSpansBatch[] = [];
-  trimmed.split(/\r?\n/).forEach((line, i) => {
-    if (!line.trim()) return;
+  // Split the original text so leading blank lines still count in error locations.
+  text.split(/\r?\n/).forEach((line, i) => {
+    const content = line.trim();
+    if (!content) return;
     try {
-      out.push(...fromDoc(JSON.parse(line), project));
+      out.push(...fromDoc(JSON.parse(content), project));
     } catch (err) {
       throw new ImportError(`${name} line ${i + 1}: ${(err as Error).message}`);
     }
