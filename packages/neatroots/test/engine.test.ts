@@ -84,6 +84,22 @@ describe("engine", () => {
     expect(llm.requests.some((r) => r.response_format?.json_schema?.name === "plan")).toBe(true);
   });
 
+  it("falls back to a stable default plan when planner arrays are malformed", async () => {
+    const llm = await mockLlm({ plannerJson: { rationale: "bad shape", checks: {}, new_questions: "not an array" } });
+    const tb = await makeRoots({ llmUrl: llm.url });
+    cleanup.push(async () => {
+      await tb.close();
+      await llm.close();
+    });
+    const { t, root } = startRun(tb);
+    const planId = await until(() => tb.roots.store.getRun(t)?.plan_id);
+    expect(tb.roots.store.getPlan(planId)?.created_by).toBe("default");
+
+    tb.roots.ingest([batch([toolSpan(t, root, "lookup_order", "{}", "ok")])]);
+    await tb.roots.engine!.waitIdle(t, 5000);
+    expect(llm.requests.filter((request) => request.response_format?.json_schema?.name === "plan")).toHaveLength(1);
+  });
+
   it("gate mode waits for checks before the hook's claim", async () => {
     const { tb } = await setup();
     tb.roots.steering.setMode("test-agent", "gate");
