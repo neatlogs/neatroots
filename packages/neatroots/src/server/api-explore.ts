@@ -247,8 +247,15 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   });
   app.patch("/api/chat/sessions/:id", async (c) => {
     const b = await body<{ allow_edits?: boolean; allow_commands?: boolean; title?: string }>(c);
+    if (b.allow_edits !== undefined && typeof b.allow_edits !== "boolean") return err(c, 400, "allow_edits must be a boolean");
+    if (b.allow_commands !== undefined && typeof b.allow_commands !== "boolean") return err(c, 400, "allow_commands must be a boolean");
+    if (b.title !== undefined && typeof b.title !== "string") return err(c, 400, "title must be a string");
+    const patch: { allow_edits?: boolean; allow_commands?: boolean; title?: string } = {};
+    if (b.allow_edits !== undefined) patch.allow_edits = b.allow_edits;
+    if (b.allow_commands !== undefined) patch.allow_commands = b.allow_commands;
+    if (b.title !== undefined) patch.title = b.title;
     try {
-      return c.json(roots.chats.update(c.req.param("id"), b));
+      return c.json(roots.chats.update(c.req.param("id"), patch));
     } catch (e) {
       return err(c, 404, (e as Error).message);
     }
