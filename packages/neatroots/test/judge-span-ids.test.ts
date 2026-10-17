@@ -65,4 +65,25 @@ describe("judge with span ids", () => {
     expect(body.reason).toContain("no span deadbeef");
     expect(seen).toEqual([]);
   });
+
+  it("refuses a non-string or blank question instead of judging it", async () => {
+    const { tb, seen } = await setup();
+    const { t } = run(tb);
+    const post = async (question: unknown) => {
+      const r = await fetch(`${tb.url}/api/steer/check`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ trace_id: t, question }),
+      });
+      return { status: r.status, body: (await r.json()) as { error?: string } };
+    };
+    for (const bad of [123, {}, [1], true, "  ", ""]) {
+      const r = await post(bad); // was 200 with a judged answer for everything but ""
+      expect(r.status, JSON.stringify(bad)).toBe(400);
+      expect(r.body.error).toBe("question required");
+    }
+    expect(seen).toEqual([]);
+    expect((await post("Did a tool call fail?")).status).toBe(200);
+    expect(seen).toHaveLength(1);
+  });
 });

@@ -478,7 +478,8 @@ export function mountApi(app: Hono, roots: Roots): void {
   app.post("/api/steer/check", async (c) => {
     if (!engine) return err(c, 503, "engine not running");
     const b = await body<{ trace_id?: string; question?: string; span_ids?: string[] }>(c);
-    if (typeof b.trace_id !== "string" || !b.trace_id || !b.question) return err(c, 400, "trace_id and question required");
+    if (typeof b.trace_id !== "string" || !b.trace_id) return err(c, 400, "trace_id and question required");
+    if (typeof b.question !== "string" || !b.question.trim()) return err(c, 400, "question required");
     if (!roots.store.getRun(b.trace_id)) return c.json({ probability: null, answer: "unknown", reason: "neatroots has not received spans for this run yet", evidence_span_ids: [] });
     try {
       const r = await engine.judge(b.trace_id, b.question, { spanIds: b.span_ids });
