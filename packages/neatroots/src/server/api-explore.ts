@@ -114,7 +114,7 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   app.post("/api/imports", async (c) => {
     const b = await body<{ source: string; values?: Record<string, string>; since_ms?: number; until_ms?: number; limit?: number; project?: string }>(c);
     try {
-      const { job } = roots.imports.start(b.source, b.values ?? {}, { sinceMs: b.since_ms, untilMs: b.until_ms, limit: b.limit, project: b.project || undefined });
+      const { job } = roots.imports.start(b.source, b.values ?? {}, { sinceMs: b.since_ms, untilMs: b.until_ms, limit: b.limit, project: b.project });
       return c.json(job, 202);
     } catch (e) {
       return err(c, 400, (e as Error).message);

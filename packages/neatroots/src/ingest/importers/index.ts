@@ -76,12 +76,19 @@ export class ImportJobs {
     values: Record<string, string>,
     opts: { sinceMs?: number; untilMs?: number; limit?: number; project?: string } = {},
   ): { job: ImportJob; done: Promise<ImportJob> } {
+    if (typeof sourceId !== "string" || !sourceId) throw new ImportError("source must be a string");
+    if (!values || typeof values !== "object" || Array.isArray(values) || Object.values(values).some((v) => typeof v !== "string")) throw new ImportError("import values must be strings");
+    if (opts.project !== undefined && typeof opts.project !== "string") throw new ImportError("project must be a string");
+    if (opts.limit !== undefined && (!Number.isInteger(opts.limit) || opts.limit < 1)) throw new ImportError("limit must be a positive integer");
+    if (opts.sinceMs !== undefined && !Number.isFinite(opts.sinceMs)) throw new ImportError("since_ms must be a finite number");
+    if (opts.untilMs !== undefined && !Number.isFinite(opts.untilMs)) throw new ImportError("until_ms must be a finite number");
     const source = this.source(sourceId);
     if (!source) throw new ImportError(`unknown import source "${sourceId}"`);
     const missing = source.fields.filter((f) => f.required && !values[f.name]?.trim()).map((f) => f.label);
     if (missing.length) throw new ImportError(`${source.label} needs: ${missing.join(", ")}`);
     const filled = { ...Object.fromEntries(source.fields.filter((f) => f.default).map((f) => [f.name, f.default!])), ...values };
     const untilMs = opts.untilMs ?? Date.now();
+    if (opts.sinceMs !== undefined && opts.sinceMs > untilMs) throw new ImportError("since_ms must not be after until_ms");
     const job: ImportJob = {
       id: crypto.randomUUID(),
       source: source.id,
