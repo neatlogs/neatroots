@@ -678,7 +678,7 @@ export class Store {
         if (!run.root_ended) flags.rootEnded = true;
       }
     }
-    if (view.sessionId && (!run.session_id || !span.parentSpanId)) {
+    if (view.sessionId && view.sessionId !== run.session_id && (!run.session_id || !span.parentSpanId)) {
       sets.push("session_id = @session");
       p.session = view.sessionId;
     }
