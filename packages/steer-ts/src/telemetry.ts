@@ -63,41 +63,51 @@ export async function instrumentRequest(
   // This promise is deliberately observed even if provider construction throws.
   void completed.catch(() => undefined);
   let settled = false;
+  let invoked = false;
+  const start = (span?: unknown) => {
+    if (invoked) return completed;
+    invoked = true;
+    const attribute = (key: string, value: string | number | boolean) => {
+      try { (span as Span | undefined)?.setAttribute(key, value); }
+      catch { /* Telemetry must not change the provider outcome. */ }
+    };
+    const streams = new WeakMap<object, AsyncIterable<unknown>>();
+    const lifetime: Lifetime = {
+      finish(value) { if (!settled) { settled = true; finish(value); } },
+      fail(error) { if (!settled) { settled = true; fail(error); } },
+      response(response) {
+        attribute("http.response.status_code", response.status);
+        const id = response.headers.get("x-request-id") ?? response.headers.get("request-id");
+        if (id) attribute("neatlogs.llm.request_id", id);
+      },
+      observe(value) {
+        if (value && typeof value === "object" && Symbol.asyncIterator in value) {
+          let wrapped = streams.get(value);
+          if (!wrapped) { wrapped = observeStream(value as AsyncIterable<unknown>, lifetime, attribute, provider); streams.set(value, wrapped); }
+          return wrapped;
+        }
+        usage(value, attribute);
+        lifetime.finish(value);
+        return value;
+      },
+    };
+    try { resolveRequest({ value: new TracedRequest(invoke() as RawRequest, lifetime) }); }
+    catch (error) { rejectRequest(error); lifetime.fail(error); }
+    return completed;
+  };
   try {
-    void telemetry.trace({
+    // The public SDK enters its span context and calls start synchronously. Keep
+    // provider construction there; adapters that defer/omit it fall back below.
+    void Promise.resolve(telemetry.trace({
       name: `${provider}.${path}`, kind: "LLM", input,
       attributes: {
         "neatlogs.llm.provider": provider,
         "neatlogs.llm.model_name": String(input.model ?? ""),
         "neatlogs.llm.is_streaming": input.stream === true,
       },
-    }, (span) => {
-      const attribute = (key: string, value: string | number | boolean) => (span as Span).setAttribute(key, value);
-      const streams = new WeakMap<object, AsyncIterable<unknown>>();
-      const lifetime: Lifetime = {
-        finish(value) { if (!settled) { settled = true; finish(value); } },
-        fail(error) { if (!settled) { settled = true; fail(error); } },
-        response(response) {
-          attribute("http.response.status_code", response.status);
-          const id = response.headers.get("x-request-id") ?? response.headers.get("request-id");
-          if (id) attribute("neatlogs.llm.request_id", id);
-        },
-        observe(value) {
-          if (value && typeof value === "object" && Symbol.asyncIterator in value) {
-            let wrapped = streams.get(value);
-            if (!wrapped) { wrapped = observeStream(value as AsyncIterable<unknown>, lifetime, attribute, provider); streams.set(value, wrapped); }
-            return wrapped;
-          }
-          usage(value, attribute);
-          lifetime.finish(value);
-          return value;
-        },
-      };
-      try { resolveRequest({ value: new TracedRequest(invoke() as RawRequest, lifetime) }); }
-      catch (error) { rejectRequest(error); lifetime.fail(error); }
-      return completed;
-    }).catch((error) => { rejectRequest(error); fail(error); });
-  } catch (error) { rejectRequest(error); fail(error); }
+    }, start)).catch(() => undefined);
+  } catch { /* A broken adapter cannot suppress the provider request. */ }
+  start();
   return ready;
 }
 
