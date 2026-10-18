@@ -31,6 +31,9 @@ export function useReplay(traceId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: ReplayRequest) => post<Replay | ReplayBatch>(`/api/runs/${traceId}/replay`, body),
-    onSettled: () => void qc.invalidateQueries({ queryKey: runKeys.detail(traceId) }),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: runKeys.detail(traceId) });
+      void qc.invalidateQueries({ queryKey: ["replay-batches", traceId] });
+    },
   });
 }

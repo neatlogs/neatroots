@@ -212,7 +212,9 @@ export const EXPLORE_TOOLS = [
       const traceId = resolved.traceId;
       if (a.times !== undefined) {
         if (a.span_id || a.messages) throw new Error("times is only supported for whole-agent replay");
-        return batchTool(roots, traceId, a.times, { input: a.input, model: a.model, system: a.system });
+        const result = await batchTool(roots, traceId, a.times, { input: a.input, model: a.model, system: a.system });
+        const note = [fallbackNote(resolved).note, (result as { note?: string }).note].filter(Boolean).join(" ");
+        return note ? { ...result, note } : result;
       }
       if (!a.span_id) throw new Error("span_id is required for an LLM replay; use times for a whole-agent batch");
       const r = await roots.replays.replayLlm(traceId, resolveSpan(roots, traceId, a.span_id), { messages: a.messages, model: a.model, system: a.system });
