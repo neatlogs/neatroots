@@ -262,6 +262,8 @@ can read) and never in the database.
 
 ## Documentation
 
+- [Accessibility](docs/ACCESSIBILITY.md): accessibility goals, current assessment and reporting barriers.
+
 - [Getting started](docs/getting-started.md): install, models, sending runs, reading them, replay,
   coding agents, privacy and troubleshooting.
 - [Tester guide](docs/tester-guide.md): a 45-minute session for people trying neatroots, and what to

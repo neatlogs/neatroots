@@ -28,10 +28,10 @@ on screenshots, visual position or colored output.
 
 ## Current assessment
 
-The repository's [Playwright configuration](packages/ui/playwright.config.ts)
+The repository's [Playwright configuration](https://github.com/neatlogs/neatroots/blob/main/packages/ui/playwright.config.ts)
 runs a Chromium project against a real local server with a mock LLM and seeded
-runs, using a desktop viewport. The [browser tests](packages/ui/e2e) exercise
-application flows. For example, the [navigation tests](packages/ui/e2e/navigation.spec.ts)
+runs, using a desktop viewport. The [browser tests](https://github.com/neatlogs/neatroots/tree/main/packages/ui/e2e) exercise
+application flows. For example, the [navigation tests](https://github.com/neatlogs/neatroots/blob/main/packages/ui/e2e/navigation.spec.ts)
 check the search keyboard shortcut, search focus and theme-button names.
 
 These are automated functional checks, not certification of screen-reader or
@@ -59,11 +59,11 @@ attachments. A text description is useful even without an image.
 
 ## Contributing and ownership
 
-The [maintainer and core team](MAINTAINERS.md) review proposals and triage reports
+The [maintainer and core team](https://github.com/neatlogs/neatroots/blob/main/MAINTAINERS.md) review proposals and triage reports
 under the repository's contribution process. This proposal does not set a
 response or resolution deadline.
 
-For UI changes, follow [AGENTS.md](AGENTS.md), including screenshots in light
+For UI changes, follow [AGENTS.md](https://github.com/neatlogs/neatroots/blob/main/AGENTS.md), including screenshots in light
 and dark themes and at a 390px width. Also manually exercise the affected task
 with a keyboard, check focus and labels, and check zoom and reflow. Where
 relevant, check reduced motion and assistive-technology behavior. Describe
