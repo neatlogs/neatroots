@@ -301,11 +301,10 @@ export class LlmDecisionBackend implements DecisionBackend {
       if (q.type === "score") {
         prompt += "Levels:\n" + (q.levels ?? []).map((l, i) => `${i}: ${l}`).join("\n") + "\nAnswer with the level number.";
       }
-      // Hosted models that give no logprobs state their confidence instead.
-      const askConfidence = !this.llm.logprobs;
-      if (askConfidence) prompt += `\nAlso give "confidence": how likely your answer is right, from 0 to 1.`;
-      const properties: Record<string, unknown> = { answer: { type: "string", enum: labels } };
-      if (askConfidence) properties.confidence = { type: "number" };
+      // Token logprobs are preferred, but stated confidence remains the fallback when a provider
+      // advertises logprobs and then rejects or omits them.
+      prompt += `\nAlso give "confidence": how likely your answer is right, from 0 to 1.`;
+      const properties: Record<string, unknown> = { answer: { type: "string", enum: labels }, confidence: { type: "number" } };
       try {
         const r = await this.llm.chat(
           [
@@ -313,8 +312,8 @@ export class LlmDecisionBackend implements DecisionBackend {
             { role: "user", content: prompt },
           ],
           {
-            schema: { name: "answer", schema: { type: "object", properties, required: askConfidence ? ["answer", "confidence"] : ["answer"] } },
-            maxTokens: askConfidence ? 48 : 24,
+            schema: { name: "answer", schema: { type: "object", properties, required: ["answer", "confidence"] } },
+            maxTokens: 48,
             logprobs: true,
             topLogprobs: 10,
             timeoutSec: 60,
