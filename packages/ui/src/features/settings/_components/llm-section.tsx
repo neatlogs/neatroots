@@ -4,6 +4,7 @@ import { PendingButton } from "@/components/pending-button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { StatusPill } from "@/components/ui/status-pill";
 import { Switch } from "@/components/ui/switch";
 import type { LlmInfo, Status } from "@/lib/api";
@@ -97,6 +98,12 @@ function LocalLlm({ llm, status }: { llm: LlmInfo; status: Status }) {
       <Collapsible>
         <CollapsibleTrigger className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">Change the local server</CollapsibleTrigger>
         <CollapsibleContent className="flex flex-col gap-4 pt-4">
+          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Local server presets">
+            <span className="text-xs text-muted-foreground">Fill server URL</span>
+            <Button variant="secondary" size="sm" onClick={() => setUrl("http://localhost:11434/v1")}>Ollama</Button>
+            <Button variant="secondary" size="sm" onClick={() => setUrl("http://localhost:8000/v1")}>Razer AIKit</Button>
+          </div>
+          <p className="text-xs text-muted-foreground">Presets fill the URL only. Review the model and save below. AIKit uses its expected default address; availability depends on your local server.</p>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <SettingField label="Server URL" htmlFor="llm-url" hint="Any OpenAI-compatible server: Ollama, LM Studio, llama.cpp, MLX.">
               <Input id="llm-url" className="h-8 font-mono text-xs" value={url} onChange={(e) => setUrl(e.target.value)} />
