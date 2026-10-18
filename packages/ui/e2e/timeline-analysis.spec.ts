@@ -116,3 +116,43 @@ for (const theme of ['light', 'dark', 'mobile'] as const) {
     await expect(page.getByRole('dialog').getByText('lookup_order').first()).toBeVisible();
   });
 }
+
+for (const theme of ['light', 'dark', 'mobile'] as const) {
+  test(`exact zero timing labels (${theme})`, async ({ page }, testInfo) => {
+    const fixtures = [
+      span('format-root', 0, 10, null, 'WORKFLOW'),
+      span('exact-zero', 0, 0, 'format-root'),
+      span('positive-sub-ms', 1, 1.5, 'format-root'),
+      span('fully-covered', 2, 4, 'format-root'),
+      span('covering-child', 2, 4, 'fully-covered'),
+      { ...span('no-timing', 6, 6, 'format-root'), end_ns: '0' },
+    ];
+    await page.route(`${state().url}/api/runs/${state().supportRun}`, async (route) => {
+      const response = await route.fetch();
+      const original = await response.json();
+      await route.fulfill({ response, json: { ...original, spans: fixtures } });
+    });
+    await open(page, `runs/${state().supportRun}?view=timeline`);
+    if (theme === 'mobile') await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate((dark) => document.documentElement.classList.toggle('dark', dark), theme === 'dark');
+    await page.getByTestId('run-views').getByRole('tab', { name: 'Timeline' }).click();
+    const breakdown = page.getByTestId('timing-breakdown');
+    await breakdown.locator('summary').click();
+    const zero = breakdown.getByRole('row').filter({ hasText: 'exact-zero' });
+    await expect(zero.getByRole('cell').nth(1)).toHaveText('0 ms');
+    await expect(zero.getByRole('cell').nth(2)).toHaveText('0 ms');
+    const covered = breakdown.getByRole('row').filter({ hasText: 'fully-covered' });
+    await expect(covered.getByRole('cell').nth(1)).toHaveText('2 ms');
+    await expect(covered.getByRole('cell').nth(2)).toHaveText('0 ms');
+    const positive = breakdown.getByRole('row').filter({ hasText: 'positive-sub-ms' });
+    await expect(positive.getByRole('cell').nth(1)).toHaveText('<1 ms');
+    await expect(positive.getByRole('cell').nth(2)).toHaveText('<1 ms');
+    const unavailable = breakdown.getByRole('row').filter({ hasText: 'no-timing' });
+    await expect(unavailable.getByRole('cell').nth(1)).toHaveText('Unavailable');
+    await expect(unavailable.getByRole('cell').nth(2)).toHaveText('Unavailable');
+    await expect(breakdown.getByText('0 ms–1 ms: 1 ms', { exact: true })).toBeVisible();
+    await breakdown.locator('summary + div').evaluate((element) => { element.scrollTop = 0; });
+    await breakdown.locator('table').evaluate((element) => { element.parentElement!.scrollLeft = 0; });
+    await page.screenshot({ path: testInfo.outputPath(`zero-${theme}.png`), fullPage: true });
+  });
+}

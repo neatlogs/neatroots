@@ -17,6 +17,7 @@ const BAR: Record<string, string> = {
   AGENT: "bg-foreground-subtle",
 };
 
+/** Choose at most nine axis marks for a positive display extent, including long recorded runs. */
 function ticks(total: number): number[] {
   const steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000];
   const step = steps.find((s) => total / s <= 8) ?? Math.ceil(total / 8 / 600_000) * 600_000;

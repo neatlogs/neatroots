@@ -2,13 +2,14 @@ import type { Span } from "@/lib/api";
 
 type Interval = { start: number; end: number };
 
+/** Parse a bounded decimal OTLP uint64 without losing precision; invalid input returns null. */
 function rawTimestamp(value: string): bigint | null {
-  // OTLP timestamps are uint64 decimal strings. Bound parsing and preserve nanosecond precision.
   if (typeof value !== "string" || value.length === 0 || value.length > 20 || /[^0-9]/.test(value)) return null;
   const timestamp = BigInt(value);
   return timestamp <= 18_446_744_073_709_551_615n ? timestamp : null;
 }
 
+/** Return completed, valid recorded bounds (including equal bounds), or null for unavailable evidence. */
 export function recordedInterval(span: Span): Interval | null {
   const rawStart = span.start_ns === undefined ? undefined : rawTimestamp(span.start_ns);
   const rawEnd = span.end_ns === undefined ? undefined : rawTimestamp(span.end_ns);
@@ -18,6 +19,7 @@ export function recordedInterval(span: Span): Interval | null {
   if (!Number.isFinite(span.start_ms) || !Number.isFinite(span.end_ms) || span.end_ms < span.start_ms || Math.abs(span.start_ms) > Number.MAX_SAFE_INTEGER || Math.abs(span.end_ms) > Number.MAX_SAFE_INTEGER) return null;
   return { start: span.start_ms, end: span.end_ms };
 }
+/** Merge overlapping/touching intervals into disjoint copies; sorts the supplied array in place. */
 function union(intervals: Interval[]): Interval[] {
   const result: Interval[] = [];
   for (const interval of intervals.sort((a, b) => a.start - b.start || a.end - b.end)) {
@@ -28,7 +30,12 @@ function union(intervals: Interval[]): Interval[] {
   return result;
 }
 
-/** Recorded wall-clock evidence only; never CPU time or inferred waiting. */
+/**
+ * Derive elapsed/outside-child time and leaf-activity gaps from recorded wall-clock evidence.
+ * Invalid child timing makes the parent's outside time null; valid zero durations remain zero.
+ * Child coverage is clipped and merged; gaps exclude workflow/agent envelopes.
+ * No result measures CPU time or proves waiting.
+ */
 export function analyzeTiming(spans: Span[]) {
   const children = new Map<string, Span[]>();
   for (const span of spans) {
