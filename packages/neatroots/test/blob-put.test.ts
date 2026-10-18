@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BlobStore } from "../src/store/blobs.js";
@@ -68,6 +69,86 @@ describe("BlobStore.put", () => {
     expect(blobs.put(payload)).toBe(sha);
     expect(blobs.get(sha)).toBe(payload);
   });
+
+  it("creates an empty payload and repairs same-length corruption", () => {
+    const dir = path.join(home(), "blobs");
+    const blobs = new BlobStore(dir);
+    const empty = blobs.put("");
+    expect(fs.existsSync(fileOf(dir, empty))).toBe(true);
+    const sha = blobs.put(payload);
+    fs.writeFileSync(fileOf(dir, sha), Buffer.alloc(Buffer.byteLength(payload), 120));
+    expect(blobs.put(payload)).toBe(sha);
+    expect(blobs.get(sha)).toBe(payload);
+  });
+
+  it("propagates existing-file read failures without attempting replacement", () => {
+    const blobs = new BlobStore(path.join(home(), "blobs"));
+    const error = Object.assign(new Error("permission denied"), { code: "EACCES" });
+    vi.spyOn(fs, "readFileSync").mockImplementationOnce(() => { throw error; });
+    const open = vi.spyOn(fs, "openSync");
+    expect(() => blobs.put(payload)).toThrow(error);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("preserves the old final and original error when replacement and cleanup fail", () => {
+    const dir = path.join(home(), "blobs");
+    const blobs = new BlobStore(dir);
+    const sha = blobs.put(payload);
+    fs.writeFileSync(fileOf(dir, sha), "old");
+    const error = Object.assign(new Error("rename denied"), { code: "EACCES" });
+    vi.spyOn(fs, "renameSync").mockImplementationOnce(() => { throw error; });
+    vi.spyOn(fs, "rmSync").mockImplementationOnce(() => { throw new Error("cleanup denied"); });
+    expect(() => blobs.put(payload)).toThrow(error);
+    expect(fs.readFileSync(fileOf(dir, sha), "utf8")).toBe("old");
+  });
+
+  it("never removes a temporary file it could not exclusively create", () => {
+    const blobs = new BlobStore(path.join(home(), "blobs"));
+    const error = Object.assign(new Error("collision"), { code: "EEXIST" });
+    const realOpen = fs.openSync;
+    const open = vi.spyOn(fs, "openSync").mockImplementation(((file, flags, mode) => {
+      if (flags === "wx") throw error;
+      return realOpen(file, flags, mode);
+    }) as typeof fs.openSync);
+    const remove = vi.spyOn(fs, "rmSync");
+    expect(() => blobs.put(payload)).toThrow(error);
+    expect(open).toHaveBeenCalledWith(expect.stringMatching(/\.tmp$/), "wx");
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("keeps the previous final when a replacement write runs out of space", () => {
+    const dir = path.join(home(), "blobs");
+    const blobs = new BlobStore(dir);
+    const sha = blobs.put(payload);
+    fs.writeFileSync(fileOf(dir, sha), "old");
+    const error = Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    const write = fs.writeFileSync;
+    vi.spyOn(fs, "writeFileSync").mockImplementationOnce(((file, data, opts) => {
+      write(file, Buffer.from(data as Uint8Array).subarray(0, 10), opts);
+      throw error;
+    }) as typeof fs.writeFileSync);
+    expect(() => blobs.put(payload)).toThrow(error);
+    expect(fs.readFileSync(fileOf(dir, sha), "utf8")).toBe("old");
+    expect(fs.readdirSync(path.dirname(fileOf(dir, sha)))).toEqual([sha.slice(2)]);
+  });
+
+  it("publishes complete identical payloads from concurrent processes", async () => {
+    const dir = path.join(home(), "blobs");
+    const source = new URL("../src/store/blobs.ts", import.meta.url).href;
+    const script = `import { BlobStore } from ${JSON.stringify(source)};
+      const store = new BlobStore(${JSON.stringify(dir)});
+      for (let i = 0; i < 8; i++) store.put("payload " + "\u00e9".repeat(40000));`;
+    await Promise.all(Array.from({ length: 4 }, () => new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script]);
+      let stderr = "";
+      child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+      child.once("error", reject);
+      child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(stderr || `exit ${code}`)));
+    })));
+    const sha = sha256(payload);
+    expect(new BlobStore(dir).get(sha)).toBe(payload);
+    expect(fs.readdirSync(path.dirname(fileOf(dir, sha)))).toEqual([sha.slice(2)]);
+  }, 20_000);
 
   it("leaves no temporary files behind after a normal write", () => {
     const dir = path.join(home(), "blobs");

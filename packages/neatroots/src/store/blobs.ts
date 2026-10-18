@@ -23,19 +23,29 @@ export class BlobStore {
   put(data: string): string {
     const sha = sha256(data);
     const f = this.file(sha);
-    // A file left short by a crash or a full disk has the right name but not the right content.
-    // Keep a complete one; rewrite anything else, through a temporary file so the final name
-    // only ever points at a whole payload.
-    if (this.sizeOf(sha) !== Buffer.byteLength(data, "utf8")) {
-      fs.mkdirSync(path.dirname(f), { recursive: true });
-      const tmp = `${f}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-      try {
-        fs.writeFileSync(tmp, data, "utf8");
-        fs.renameSync(tmp, f);
-      } catch (err) {
-        fs.rmSync(tmp, { force: true });
-        throw err;
+    const bytes = Buffer.from(data, "utf8");
+    try {
+      // Verify content as well as length: an intact pathname is not proof of an intact write.
+      if (fs.readFileSync(f).equals(bytes)) return sha;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    const tmp = `${f}.${process.pid}.${randomBytes(16).toString("hex")}.tmp`;
+    // Exclusive creation prevents cleanup from removing another writer's temporary file.
+    let fd: number | undefined = fs.openSync(tmp, "wx");
+    try {
+      fs.writeFileSync(fd, bytes);
+      fs.closeSync(fd);
+      fd = undefined;
+      fs.renameSync(tmp, f);
+    } catch (err) {
+      // Cleanup is best effort; the caller must see the original persistence failure.
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch { /* preserve original error */ }
       }
+      try { fs.rmSync(tmp, { force: true }); } catch { /* recovered at owner startup */ }
+      throw err;
     }
     return sha;
   }
