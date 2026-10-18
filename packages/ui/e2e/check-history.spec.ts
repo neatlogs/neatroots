@@ -38,7 +38,10 @@ test("check history retains edited definitions and run provenance is read-only",
     for (const [name, width, theme] of [["light", 1440, "light"], ["dark", 1440, "dark"], ["mobile", 390, "light"]] as const) {
       await page.setViewportSize({ width, height: 960 });
       await page.evaluate((t) => document.documentElement.classList.toggle("dark", t === "dark"), theme);
-      await provenance.scrollIntoViewIfNeeded();
+      // Crossing the breakpoint remounts DetailLayout's content; wait for that commit before scrolling.
+      await expect(page.locator("[data-layout]")).toHaveAttribute("data-layout", width === 390 ? "stacked" : "split");
+      await page.getByTestId("check-provenance").scrollIntoViewIfNeeded();
+      await expect(page.getByTestId("check-provenance")).toBeInViewport();
       await page.screenshot({ path: info.outputPath(`run-provenance-${name}.png`), animations: "disabled" });
     }
   } finally {

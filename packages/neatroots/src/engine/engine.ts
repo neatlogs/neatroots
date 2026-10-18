@@ -433,7 +433,13 @@ export class Engine {
       if (hit?.firing) {
         const snapshot = captureEvaluation(rule, hit.params, null, JSON.stringify(hit.evidenceSpanIds.map((id) => snap.spans.find((s) => s.id === id))), hit.evidenceSpanIds);
         if (open) {
-          this.roots.store.checkHistory.record(run.traceId, snapshot, { backend: "rule", model: null }, null, open.id);
+          const last = this.roots.store.checkHistory.latestForFinding(open.id);
+          const evaluationChanged = !last
+            || last.revision_id !== snapshot.revision.id
+            || JSON.stringify(last.snapshot.params) !== JSON.stringify(snapshot.params)
+            || JSON.stringify(last.snapshot.evidence_span_ids) !== JSON.stringify(snapshot.evidence_span_ids)
+            || last.snapshot.evidence_sha256 !== snapshot.evidence_sha256;
+          if (evaluationChanged) this.roots.store.checkHistory.record(run.traceId, snapshot, { backend: "rule", model: null }, null, open.id);
           const changed = JSON.stringify(open.evidence_span_ids) !== JSON.stringify(hit.evidenceSpanIds);
           if (changed) {
             const f = this.roots.store.updateFinding(open.id, { evidence_span_ids: hit.evidenceSpanIds, detail: { ...open.detail, params: hit.params } });

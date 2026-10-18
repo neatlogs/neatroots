@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AnyCheck, type QuestionCheck } from "../src/checks/types.js";
 import { checkRevision, fingerprint } from "../src/checks/canonical.js";
 import { TOOLS } from "../src/mcp/tools.js";
+import { captureEvaluation } from "../src/store/check-history.js";
 import { Store } from "../src/store/db.js";
 import { loadTrace } from "../src/engine/trace.js";
 import { createApp } from "../src/server/app.js";
@@ -79,6 +80,8 @@ describe("check revision history", () => {
     expect(rows.map((r) => r.finding_id)).toEqual([findings[0].id, findings[0].id]);
     expect(new Set(rows.map((r) => r.revision_id)).size).toBe(2);
     expect(new Set(rows.map((r) => r.decision_id)).size).toBe(2);
+    await ask({ ...question(), flag_at: 0.7 }, { tool: "two" }, "two");
+    expect(tb.roots.store.checkHistory.forTrace(traceId)).toHaveLength(3); // Identical question evaluations still append.
   });
 
   it("records the applied LLM threshold and score comparator", async () => {
@@ -109,6 +112,64 @@ describe("check revision history", () => {
     expect(tb.roots.store.db.prepare("SELECT * FROM check_history_runs WHERE trace_id = ?").get(traceId)).toBeUndefined();
   });
 
+  it("deduplicates unchanged open rule observations but records modified same-ID evidence and revisions", async () => {
+    const { tb, traceId, engine, run } = await fixture();
+    const check = AnyCheck.parse({ id: "history-dedup-rule", kind: "rule", rule: { type: "count", at_least: 1 } });
+    tb.roots.checks.save(check, "db", "planner");
+    const snap = structuredClone(loadTrace(tb.roots.store, traceId));
+    const rows = () => tb.roots.store.checkHistory.forTrace(traceId).filter((r) => r.check_id === check.id);
+    const apply = () => engine["applyRules"](run, snap, true);
+    // Equal timestamps and deliberately reversed lexical IDs prove insertion order is used.
+    const clock = vi.spyOn(Date, "now").mockReturnValue(123456789);
+    try {
+      apply();
+      const finding = tb.roots.store.openFindingFor(traceId, check.id)!;
+      tb.roots.store.db.prepare("UPDATE check_evaluations SET id = 'z-first' WHERE finding_id = ?").run(finding.id);
+      apply();
+      expect(rows()).toHaveLength(1);
+      snap.spans[0].output = "changed evidence under the same span ID";
+      apply();
+      expect(rows()).toHaveLength(2);
+      const second = rows().find((r) => r.id !== "z-first")!;
+      expect(second.snapshot.evidence_span_ids).toEqual(rows().find((r) => r.id === "z-first")!.snapshot.evidence_span_ids);
+      expect(second.snapshot.evidence_sha256).not.toBe(rows().find((r) => r.id === "z-first")!.snapshot.evidence_sha256);
+      tb.roots.store.db.prepare("UPDATE check_evaluations SET id = 'a-second' WHERE id = ?").run(second.id);
+      apply();
+      expect(rows()).toHaveLength(2);
+      expect(tb.roots.store.getFinding(finding.id)).toEqual(finding); // ID-only finding update remains unchanged.
+      snap.spans[0].id = "new-evidence-id";
+      apply();
+      expect(rows()).toHaveLength(3);
+      expect(tb.roots.store.getFinding(finding.id)!.evidence_span_ids).toEqual(["new-evidence-id"]);
+      tb.roots.checks.save({ ...check, title: "Changed definition" }, "db", "planner");
+      apply();
+      expect(rows()).toHaveLength(4);
+      expect(new Set(rows().map((r) => r.revision_id)).size).toBe(2);
+      apply();
+      expect(rows()).toHaveLength(4);
+    } finally { clock.mockRestore(); }
+  });
+
+  it("records changed threshold params even with empty evidence IDs without updating the finding", async () => {
+    const { tb, traceId, engine, run } = await fixture();
+    const check = AnyCheck.parse({ id: "history-threshold", kind: "rule", rule: { type: "threshold", metric: "span_count", at_least: 1 } });
+    tb.roots.checks.save(check, "db", "planner");
+    const snap = structuredClone(loadTrace(tb.roots.store, traceId));
+    const apply = () => engine["applyRules"](run, snap, true);
+    const rows = () => tb.roots.store.checkHistory.forTrace(traceId).filter((r) => r.check_id === check.id);
+    apply();
+    const finding = tb.roots.store.openFindingFor(traceId, check.id)!;
+    snap.run!.span_count = 2;
+    apply();
+    expect(rows()).toHaveLength(2);
+    expect(rows().map((r) => r.snapshot.params.value).sort()).toEqual(["1", "2"]);
+    expect(rows().every((r) => r.snapshot.evidence_span_ids.length === 0)).toBe(true);
+    expect(new Set(rows().map((r) => r.snapshot.evidence_sha256)).size).toBe(1);
+    expect(tb.roots.store.getFinding(finding.id)).toEqual(finding);
+    apply();
+    expect(rows()).toHaveLength(2);
+  });
+
   it("bounds run/MCP summaries and pages full history without losing occurrences", async () => {
     const { tb, traceId, engine, ask } = await fixture();
     vi.spyOn(engine.decisions, "decide").mockResolvedValue(result("bad"));
@@ -128,20 +189,29 @@ describe("check revision history", () => {
     expect(tb.roots.store.checkHistory.pageInfo("finding", finding.id, 25)).toMatchObject({ total: 105, truncated: true });
   });
 
-  it("retains active/referenced revisions while bounding unreferenced history", () => {
+  it("retains exactly 2000 unreferenced revisions separately from newer active/referenced revisions", () => {
     const dir = tmpHome(); const store = new Store(dir);
     cleanup.push(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
-    const old = checkRevision(question());
-    store.checkHistory.setActive([question()]);
+    const active = question();
+    const referenced = { ...question(), id: "referenced-history" };
+    const traceId = hex(16);
+    store.ingest([batch([span({ traceId, name: "root", kind: "workflow" })])]);
+    store.checkHistory.setActive([active]);
+    store.checkHistory.record(traceId, captureEvaluation(referenced, {}, null, "evidence", []), { backend: "rule" });
+    const protectedIds = [checkRevision(active).id, checkRevision(referenced).id];
     store.db.transaction(() => {
       const insert = store.db.prepare("INSERT INTO check_revisions VALUES (?, ?, ?, ?)");
-      for (let i = 0; i < 2005; i++) insert.run(`unused-${i}`, "unused", "{}", Date.now() + i);
+      for (let i = 0; i < 2005; i++) insert.run(`unused-${i}`, "unused", "{}", i);
+      store.db.prepare("UPDATE check_revisions SET first_seen_ms = 10000 WHERE id IN (?, ?)").run(...protectedIds);
     })();
     store.checkHistory.collect();
-    expect(store.checkHistory.revisions(old.check_id)).toHaveLength(1);
-    expect((store.db.prepare("SELECT count(*) n FROM check_revisions").get() as { n: number }).n).toBe(2001);
+    const survivors = (store.db.prepare("SELECT id FROM check_revisions").all() as { id: string }[]).map((r) => r.id);
+    expect(new Set(survivors)).toEqual(new Set([...protectedIds, ...Array.from({ length: 2000 }, (_, i) => `unused-${i + 5}`)]));
+    expect(store.checkHistory.revisions(active.id)).toHaveLength(1);
+    expect(store.checkHistory.revisions(referenced.id)).toHaveLength(1);
     store.checkHistory.setActive([]);
-    expect(store.checkHistory.revisions(old.check_id)).toHaveLength(0);
+    expect(store.checkHistory.revisions(active.id)).toHaveLength(1); // Newly unreferenced, newest timestamp.
+    expect(store.checkHistory.revisions(referenced.id)).toHaveLength(1); // Still referenced.
   });
 
   it("exposes read-only history, leaves legacy decisions unknown, and preserves active stats", async () => {

@@ -116,6 +116,13 @@ export class CheckHistory {
     return { total, limit, offset, truncated: offset + limit < total };
   }
 
+  /** finding_id's index includes rowid: a bounded lookup in actual insertion order, even within one millisecond. */
+  latestForFinding(findingId: string): Pick<CheckEvaluation, "revision_id" | "snapshot"> | undefined {
+    const row = this.db.prepare("SELECT revision_id, snapshot FROM check_evaluations WHERE finding_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(findingId) as { revision_id: string; snapshot: string } | undefined;
+    return row ? { revision_id: row.revision_id, snapshot: JSON.parse(row.snapshot) } : undefined;
+  }
+
   forFinding(findingId: string): CheckEvaluation[] {
     return (this.db.prepare("SELECT * FROM check_evaluations WHERE finding_id = ? ORDER BY created_ms, id LIMIT 25").all(findingId) as Record<string, unknown>[])
       .map((r) => ({ ...(r as unknown as CheckEvaluation), snapshot: JSON.parse(r.snapshot as string), execution_settings: JSON.parse(r.execution_settings as string) }));
@@ -129,6 +136,9 @@ export class CheckHistory {
   collect(): void {
     this.db.exec(`DELETE FROM check_revisions WHERE id NOT IN (SELECT revision_id FROM active_check_revisions)
       AND id NOT IN (SELECT revision_id FROM check_evaluations)
-      AND id NOT IN (SELECT id FROM check_revisions ORDER BY first_seen_ms DESC, id LIMIT 2000)`);
+      AND id NOT IN (SELECT id FROM check_revisions
+        WHERE id NOT IN (SELECT revision_id FROM active_check_revisions)
+          AND id NOT IN (SELECT revision_id FROM check_evaluations)
+        ORDER BY first_seen_ms DESC, id LIMIT 2000)`);
   }
 }

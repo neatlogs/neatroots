@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Check } from "./types.js";
 
-/** Parsed definitions, sorted by codepoint; compatible with offline check manifests. */
+/** Parsed definitions, sorted by UTF-16 code units; compatible with offline check manifests. */
 export function canonicalJson(value: unknown): string {
   const canonical = (v: unknown): unknown => {
     if (Array.isArray(v)) return v.map(canonical);
