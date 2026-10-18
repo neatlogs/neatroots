@@ -244,6 +244,9 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
               · {d.replay_of.kind === "llm" ? "one LLM call" : "the whole agent"}
               {d.replay_of.overrides.model ? ` on ${d.replay_of.overrides.model}` : ""}
             </span>
+            <a href={`#/compare?${new URLSearchParams({ a: d.replay_of.trace_id, b: traceId })}`} className="text-foreground underline underline-offset-4 hover:text-primary">
+              Compare with original
+            </a>
           </div>
         )}
         <ProblemsPanel

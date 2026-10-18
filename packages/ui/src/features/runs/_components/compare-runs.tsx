@@ -91,7 +91,7 @@ export function CompareRuns({ query }: { query: URLSearchParams }) {
   const linked = original.data?.replays.filter((r) => r.new_trace_id) ?? [];
   return <ListPageLayout title="Compare runs" icon={<Icon icon={BarChartHorizontalIcon} />} actions={<Button variant="secondary" onClick={() => go("runs")}>View runs</Button>}>
     <div className="flex min-w-0 flex-col gap-6 p-4 md:p-6">
-      <p className="text-sm text-muted-foreground">Compare an original with its replay, or any two recorded runs. Changes are comparison minus original.</p>
+      <p className="text-sm text-muted-foreground">Compare an original with its replay, or two recorded runs from the same project. Changes are comparison minus original.</p>
       <Panel>
         <div className="grid gap-4 md:grid-cols-2">
           <RunPicker label="Original" value={a} onChange={(id) => select(id, b)} selected={original.data?.run} />
@@ -107,7 +107,7 @@ export function CompareRuns({ query }: { query: URLSearchParams }) {
       </Panel>
       {!a || !b ? <EmptyState variant="inline" title="Select two runs" description="Choose an original and a replay or another run to see what changed." />
         : a === b ? <EmptyState variant="inline" title="Choose a different run" description="The original and comparison currently refer to the same run." />
-        : comparison.error ? <EmptyState variant="inline" state="error" title="Couldn't compare these runs" description={`${comparison.error.message}. A run may have been removed by retention.`} />
+        : comparison.error ? <EmptyState variant="inline" state="error" title="Couldn't compare these runs" description={comparison.error.message} />
         : !d ? <EmptyState variant="inline" state="loading" title="Comparing runs" />
         : <>
           <div className="grid gap-4 md:grid-cols-2">{([d.a, d.b] as const).map((r, i) => <Panel key={i}>

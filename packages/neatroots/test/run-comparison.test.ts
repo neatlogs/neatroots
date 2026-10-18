@@ -24,7 +24,11 @@ it("shares the HTTP and MCP comparison, preserves full output and chronological 
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual(result);
   const mcp = await EXPLORE_TOOLS.find((x) => x.name === "compare_runs")!.run(t.roots, { a, b });
-  expect(mcp).toMatchObject({ a: { output: result.a.output, tools: result.a.tools }, same_tool_sequence: false });
+  expect(mcp).toEqual({
+    a: { summary: result.a.summary, tools: result.a.tools, output: result.a.output, problems: result.a.problems },
+    b: { summary: result.b.summary, tools: result.b.tools, output: result.b.output, problems: result.b.problems },
+    fixed: result.fixed, new_problems: result.new_problems, same_tool_sequence: result.same_tool_sequence,
+  });
   expect(mcp).not.toHaveProperty("a.full_output");
   expect(compareRuns(t.roots, a, a).same_tool_sequence).toBe(true);
 });
@@ -65,4 +69,33 @@ it("returns useful HTTP errors for absent selections and removed runs", async ()
   expect((await fetch(`${t.url}/api/compare`)).status).toBe(400);
   expect((await fetch(`${t.url}/api/compare?a=missing&b=missing`)).status).toBe(404);
   expect(() => compareRuns(t.roots, "missing", "missing")).toThrow("run not found");
+});
+
+it("rejects cross-project HTTP comparisons while preserving MCP capability and shape", async () => {
+  t = await makeRoots({ noEngine: true, serve: true });
+  const a = hex(16), b = hex(16);
+  t.roots.ingest([batch([span({ traceId: a, name: "one", kind: "workflow" })], "one-project"),
+    batch([span({ traceId: b, name: "two", kind: "workflow" })], "another-project")]);
+  const response = await fetch(`${t.url}/api/compare?a=${a}&b=${b}`);
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: "Choose two runs from the same project to compare in the app." });
+  const result = compareRuns(t.roots, a, b);
+  const mcp = await EXPLORE_TOOLS.find((x) => x.name === "compare_runs")!.run(t.roots, { a, b });
+  expect(mcp).toEqual({
+    a: { summary: result.a.summary, tools: result.a.tools, output: result.a.output, problems: result.a.problems },
+    b: { summary: result.b.summary, tools: result.b.tools, output: result.b.output, problems: result.b.problems },
+    fixed: result.fixed, new_problems: result.new_problems, same_tool_sequence: result.same_tool_sequence,
+  });
+});
+
+it("identifies missing or deleted selections on either side", async () => {
+  t = await makeRoots({ noEngine: true, serve: true });
+  const a = hex(16), b = hex(16);
+  t.roots.ingest([batch([span({ traceId: a, name: "one", kind: "workflow" }), span({ traceId: b, name: "two", kind: "workflow" })])]);
+  t.roots.store.deleteRun(b);
+  for (const [left, right, side] of [[a, b, "Comparison"], [b, a, "Original"]]) {
+    const response = await fetch(`${t.url}/api/compare?a=${left}&b=${right}`);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: `${side} run not found. It may have been deleted or removed by retention.` });
+  }
 });

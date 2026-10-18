@@ -1,9 +1,18 @@
 import { expect, test } from "@playwright/test";
 import { api, open, state, watchErrors } from "./util";
 
+let comparisonRun: string;
+test.beforeAll(async () => {
+  comparisonRun = (await api<{ trace_id: string }>("/v1/trace", { method: "POST", body: JSON.stringify({
+    name: "comparison research", project: "e2e-support", output: "Solar batteries store daytime energy for the night.",
+    children: [{ name: "web_search", kind: "TOOL", tool_name: "web_search", input: "solar batteries", output: "facts" }],
+  }) })).trace_id;
+});
+
 test("selects two runs, shows changes, swaps and survives reload", async ({ page }) => {
   const errors = watchErrors(page);
-  const { supportRun, researchRun } = state();
+  const { supportRun } = state();
+  const researchRun = comparisonRun;
   await open(page, `runs/${supportRun}`);
   await page.getByRole("button", { name: "Compare runs", exact: true }).click();
   await expect(page.getByText("Select two runs", { exact: true })).toBeVisible();
@@ -41,7 +50,8 @@ test("links a real replay back to its original and handles invalid selections", 
 });
 
 test("labels stored root output previews", async ({ page }) => {
-  const { supportRun, researchRun } = state();
+  const { supportRun } = state();
+  const researchRun = comparisonRun;
   await page.route("**/api/compare?*", async (route) => {
     const response = await route.fetch();
     const data = await response.json();
@@ -60,7 +70,7 @@ test("keeps run-picker errors visible with paginated run searches", async ({ pag
       await route.fulfill({ status: 503, json: { error: "fixture search unavailable" } });
     } else await route.continue();
   });
-  await open(page, `compare?a=${state().supportRun}&b=${state().researchRun}`);
+  await open(page, `compare?a=${state().supportRun}&b=${comparisonRun}`);
   await expect(page.getByTestId("metric-tokens")).toBeVisible();
   await page.getByRole("textbox", { name: "Search original runs", exact: true }).fill("fixture-unavailable");
   await expect(page.getByText("Couldn't load runs. Try searching again.", { exact: true })).toBeVisible();
@@ -74,7 +84,7 @@ for (const label of ["Original", "Comparison"] as const) {
     for (let i = 0; i < 155; i += 25) {
       const batch = await Promise.all(Array.from({ length: Math.min(25, 155 - i) }, (_, k) => api<{ trace_id: string }>("/v1/trace", {
         method: "POST",
-        body: JSON.stringify({ name: search, project: search, input: `${search} ${i + k}`, output: "done", start: new Date(Date.UTC(2020, 0, 1) + (i + k) * 1000).toISOString(), duration_ms: 5 }),
+        body: JSON.stringify({ name: search, project: "e2e-support", input: `${search} ${i + k}`, output: "done", start: new Date(Date.UTC(2020, 0, 1) + (i + k) * 1000).toISOString(), duration_ms: 5 }),
       })));
       ids.push(...batch.map((run) => run.trace_id));
     }
@@ -91,7 +101,7 @@ for (const label of ["Original", "Comparison"] as const) {
         await route.fulfill({ status: 503, json: { error: "fixture page unavailable" } });
       } else await route.continue();
     });
-    await open(page, `compare?a=${state().supportRun}&b=${state().researchRun}`);
+    await open(page, `compare?a=${state().supportRun}&b=${comparisonRun}`);
     await page.getByRole("textbox", { name: `Search ${label.toLowerCase()} runs`, exact: true }).fill(search);
     const more = page.getByRole("button", { name: `Load more ${label.toLowerCase()} runs`, exact: true });
     await expect(more).toBeVisible();
@@ -118,7 +128,7 @@ for (const mode of ["light", "dark", "mobile"] as const) {
     const errors = watchErrors(page);
     await page.addInitScript((theme) => localStorage.setItem("neatroots-theme", theme), mode === "dark" ? "dark" : "light");
     if (mode === "mobile") await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(`${state().url}/#/compare?a=${state().supportRun}&b=${state().researchRun}`);
+    await page.goto(`${state().url}/#/compare?a=${state().supportRun}&b=${comparisonRun}`);
     await expect(page.getByTestId("metric-tokens")).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: info.outputPath(`compare-${mode}.png`), fullPage: true });
@@ -160,5 +170,38 @@ for (const outcome of ["finished", "missing"] as const) {
     // Observe longer than the refresh interval to catch an unwanted third request.
     await page.waitForTimeout(3500);
     expect(requests).toBe(2);
+  });
+}
+
+test("explains cross-project comparison and missing original or deleted other run", async ({ page }) => {
+  await open(page, `compare?a=${state().supportRun}&b=${state().researchRun}`);
+  await expect(page.getByText("Choose two runs from the same project to compare in the app.", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("metric-tokens")).toHaveCount(0);
+  await open(page, `compare?a=unknown-original&b=${comparisonRun}`);
+  await expect(page.getByText("Original run not found. It may have been deleted or removed by retention.", { exact: true })).toBeVisible();
+  const removed = await api<{ trace_id: string }>("/v1/trace", { method: "POST", body: JSON.stringify({ name: "removed", project: "e2e-support", output: "done" }) });
+  await api(`/api/runs/${removed.trace_id}`, { method: "DELETE" });
+  await open(page, `compare?a=${state().supportRun}&b=${removed.trace_id}`);
+  await expect(page.getByText("Comparison run not found. It may have been deleted or removed by retention.", { exact: true })).toBeVisible();
+});
+
+for (const mode of ["light", "dark", "mobile"] as const) {
+  test(`replay banner opens its preselected pair in ${mode}`, async ({ page }, info) => {
+    const id = state().secondTurn;
+    const detail = await api<{ spans: { span_id: string; span_kind: string }[] }>(`/api/runs/${id}`);
+    const replay = await api<{ new_trace_id: string }>(`/api/runs/${id}/replay`, { method: "POST", body: JSON.stringify({ span_id: detail.spans.find((s) => s.span_kind === "LLM")!.span_id }) });
+    await page.addInitScript((theme) => localStorage.setItem("neatroots-theme", theme), mode === "dark" ? "dark" : "light");
+    if (mode === "mobile") await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${state().url}/#/runs/${replay.new_trace_id}`);
+    await expect(page.getByRole("link", { name: `run ${id.slice(0, 8)}`, exact: true })).toHaveAttribute("href", `#/runs/${id}`);
+    const link = page.getByRole("link", { name: "Compare with original", exact: true });
+    await expect(link).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath(`replay-banner-${mode}.png`), fullPage: true });
+    await link.click();
+    await expect(page).toHaveURL(new RegExp(`a=${id}&b=${replay.new_trace_id}`));
+    await expect(page.getByTestId("metric-tokens")).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Original run", exact: true })).toContainText(id.slice(0, 8));
+    await expect(page.getByRole("combobox", { name: "Comparison run", exact: true })).toContainText(replay.new_trace_id.slice(0, 8));
   });
 }

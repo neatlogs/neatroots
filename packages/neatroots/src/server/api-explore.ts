@@ -54,7 +54,11 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
     const a = c.req.query("a");
     const b = c.req.query("b");
     if (!a || !b) return err(c, 400, "select two runs (a and b)");
-    if (!roots.store.getRun(a) || !roots.store.getRun(b)) return err(c, 404, "run not found");
+    const original = roots.store.getRun(a), comparison = roots.store.getRun(b);
+    if (!original) return err(c, 404, "Original run not found. It may have been deleted or removed by retention.");
+    if (!comparison) return err(c, 404, "Comparison run not found. It may have been deleted or removed by retention.");
+    // The app compares within a project; MCP retains its existing cross-project capability.
+    if (original.project !== comparison.project) return err(c, 400, "Choose two runs from the same project to compare in the app.");
     return c.json(compareRuns(roots, a, b));
   });
 

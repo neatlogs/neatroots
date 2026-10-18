@@ -5,7 +5,16 @@ system prompt, or the input. It answers "would this have gone better if…" befo
 
 Every replay is a new run, linked to the run it came from, and checked like any other run, so its
 problems show up the same way. The original run lists its replays, and the
-replay links back. `compare_runs` (MCP) puts the two side by side.
+replay links back. **Compare with original** in the replay banner opens the comparison with both
+runs selected. You can also use **Compare runs** on a run or a comparison link in its Replays panel.
+The app compares runs within the same project and explains when a selected run has been deleted
+or removed by retention. It shows recorded status, duration, tokens, ordered tool calls, outputs,
+and findings present only before, only after, or in both runs. Differences do not establish causality
+or prove a fix; a one-call replay covers less work than a whole-agent run.
+
+The `compare_runs` MCP tool uses the same comparison logic and retains its existing response shape
+and ability to compare across projects. The app uses full recorded output when available; MCP
+retains its output preview.
 
 ## One LLM call
 
