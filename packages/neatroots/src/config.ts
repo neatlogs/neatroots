@@ -13,6 +13,8 @@ export interface ProjectSettings {
 }
 
 export interface RootsConfig {
+  /** Inferred inactivity interruption: 0 disables; otherwise 1..10080 minutes. */
+  runIdleMinutes?: number;
   port: number;
   host: string;
   /** OTLP over gRPC (what plain OpenTelemetry exporters send to Neatlogs). 0 turns it off. */
@@ -112,10 +114,15 @@ export interface RootsConfig {
   projects: Record<string, Partial<ProjectSettings>>;
 }
 
+export function validRunIdleMinutes(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && (value === 0 || (value >= 1 && value <= 10080));
+}
+
 export const DEFAULT_PORT = 4100;
 
 export function defaultConfig(): RootsConfig {
   return {
+    runIdleMinutes: 10,
     port: DEFAULT_PORT,
     host: "127.0.0.1",
     grpcPort: 4317,
@@ -234,6 +241,7 @@ export function loadConfig(): RootsConfig {
   cfg.retention.days = Math.min(Math.round(cfg.retention.days), 3650);
   if (!Number.isFinite(cfg.retention.maxGb) || cfg.retention.maxGb <= 0) cfg.retention.maxGb = 5;
   cfg.retention.maxGb = Math.min(cfg.retention.maxGb, 10_000);
+  if (!validRunIdleMinutes(cfg.runIdleMinutes)) cfg.runIdleMinutes = 10;
   return cfg;
 }
 

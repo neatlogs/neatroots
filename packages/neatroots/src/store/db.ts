@@ -1,3 +1,4 @@
+import { RunLiveness } from "./run-liveness.js";
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
@@ -276,6 +277,7 @@ export interface TraceUpdate {
   runCreated: boolean;
   rootEnded: boolean;
   completed: boolean;
+  idleRecovered?: boolean;
 }
 
 export interface RunFilter {
@@ -408,6 +410,7 @@ function searchText(v: Parameters<typeof preview>[0]): string {
 export class Store {
   readonly db: Database.Database;
   readonly blobs: BlobStore;
+  readonly liveness: RunLiveness;
   private readonly searchIds: SearchIds;
   private seq = 0;
   readonly dir: string;
@@ -430,6 +433,7 @@ export class Store {
     this.db.pragma("busy_timeout = 5000");
     this.db.exec(SCHEMA);
     this.migrate();
+    this.liveness = new RunLiveness(this.db);
     this.searchIds = new SearchIds(this.db);
     this.blobs = new BlobStore(path.join(dir, "blobs"));
     const row = this.db.prepare("SELECT MAX(seq) AS s FROM spans").get() as { s: number | null };
@@ -513,6 +517,7 @@ export class Store {
           if (runFlags.created) u.runCreated = true;
           if (runFlags.rootEnded) u.rootEnded = true;
           if (runFlags.completed) u.completed = true;
+          if (runFlags.idleRecovered) u.idleRecovered = true;
         }
       }
     });
@@ -598,8 +603,8 @@ export class Store {
     resAttrs: Record<string, Plain>,
     now: number,
     previous: AggregateSpan | undefined,
-  ): { created: boolean; rootEnded: boolean; completed: boolean } {
-    const flags = { created: false, rootEnded: false, completed: false };
+  ): { created: boolean; rootEnded: boolean; completed: boolean; idleRecovered?: boolean } {
+    const flags: { created: boolean; rootEnded: boolean; completed: boolean; idleRecovered?: boolean } = { created: false, rootEnded: false, completed: false };
     let run = this.getRun(span.traceId);
     if (!run) {
       const project = String(resAttrs["service.name"] ?? view.workflow ?? "unknown");
@@ -621,11 +626,22 @@ export class Store {
       flags.created = true;
       run = this.getRun(span.traceId)!;
     }
+    this.liveness.touch(span.traceId, now);
     const sets: string[] = ["updated_ms = @now", "last_span_ms = MAX(COALESCE(last_span_ms, 0), @end)"];
     const p: Record<string, unknown> = { now, end: row.end_ms, trace: span.traceId };
     if (!run.started_ms || row.start_ms < run.started_ms) {
       sets.push("started_ms = @start");
       p.start = row.start_ms;
+    }
+    const actualEnd = view.isMarker || (!span.parentSpanId && nsToMs(span.endTimeUnixNano) > 0);
+    if (this.liveness.inferred(span.traceId) && (actualEnd || view.interrupted)) {
+      flags.idleRecovered = true;
+      this.liveness.recover(span.traceId);
+      if (view.interrupted && !view.terminationReason) sets.push("termination_reason=NULL");
+      if (!view.interrupted) {
+        sets.push("interrupted=0", "termination_reason=NULL", "status=@recoveredStatus", "ended_ms=@end");
+        p.recoveredStatus = view.isMarker ? (run.error_count ? "error" : "ok") : (span.status.code === 2 ? "error" : "ok");
+      }
     }
     if (view.isMarker) {
       if (!run.complete) {
@@ -671,7 +687,7 @@ export class Store {
       // A root sent before it ended (end time 0) names the run but doesn't finish it.
       if (nsToMs(span.endTimeUnixNano) > 0) {
         sets.push("root_ended = 1", "ended_ms = @end");
-        if (!view.interrupted && run.status !== "interrupted") {
+        if (!view.interrupted && (run.status !== "interrupted" || flags.idleRecovered)) {
           sets.push("status = @status");
           p.status = span.status.code === 2 ? "error" : "ok";
         }

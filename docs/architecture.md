@@ -79,6 +79,11 @@ A run ends when its root span arrives or the SDK's `neatlogs.trace.complete` mar
 runs end-only questions and any live question with unseen evidence, triages failed runs, works off
 queued investigations, and writes the summary.
 
+A running run with no received spans for ten minutes is conservatively inferred interrupted.
+A bounded startup/minute sweep uses server receipt time, never exporter timestamps. It keeps
+producer completion flags and raw spans unchanged, then runs the existing end pass when possible.
+See [idle-run policy](idle-runs.md) for configuration, migration and late-completion behavior.
+
 ## Security
 
 neatroots binds to 127.0.0.1. A Host allowlist blocks DNS rebinding; state-changing API calls from other

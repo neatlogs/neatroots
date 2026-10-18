@@ -1,3 +1,4 @@
+import { IdleRuns } from "./engine/idle-runs.js";
 import path from "node:path";
 import { rootsHome, loadConfig, saveConfig, type RootsConfig } from "./config.js";
 import { Bus } from "./bus.js";
@@ -40,6 +41,9 @@ export class Roots {
   readonly imports: ImportJobs;
   readonly replays: Replays;
   readonly chats: AgentChats;
+  readonly idle: IdleRuns;
+  private closed = false;
+  private resumeTimer?: NodeJS.Timeout;
   private sweeper?: NodeJS.Timeout;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
@@ -73,13 +77,26 @@ export class Roots {
       const engine = new Engine(this, this.llm, this.decisions, this.checks, this.steering);
       this.engine = engine;
       // Finish check work a previous process accepted but didn't complete (a restart or a crash).
-      setTimeout(() => void resumeUnfinished(engine, this).catch((e: Error) => log.warn(`couldn't resume checks: ${e.message}`)), 1500).unref();
+      this.resumeTimer = setTimeout(() => void resumeUnfinished(engine, this).catch((e: Error) => log.warn(`couldn't resume checks: ${e.message}`)), 1500).unref();
     }
+    this.idle = new IdleRuns(this);
   }
 
   ingest(batches: ResourceSpansBatch[]): TraceUpdate[] {
     const updates = this.store.ingest(batches);
-    for (const u of updates) this.bus.emit("trace", u);
+    for (const u of updates) {
+      if (u.idleRecovered) {
+        for (const f of this.store.findingsForTrace(u.traceId)) {
+          if (f.detail.idle_inferred === true && ["raised", "active", "quiet"].includes(f.status)) {
+            this.steering.withdraw(f.id, { keepHalts: false });
+            const resolved = this.store.updateFinding(f.id, { status: "resolved" });
+            if (resolved) this.bus.emit("finding", resolved);
+          }
+        }
+        this.store.liveness.clearSummary(u.traceId);
+      }
+      this.bus.emit("trace", u);
+    }
     return updates;
   }
 
@@ -111,7 +128,12 @@ export class Roots {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     clearInterval(this.sweeper);
+    clearTimeout(this.resumeTimer);
+    this.idle.close();
+    this.engine?.close();
     this.laya.stop();
     this.store.close();
   }

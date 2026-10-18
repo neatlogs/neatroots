@@ -92,6 +92,7 @@ interface LiveRun {
   answered?: { traceChecks: Set<string>; toolSpans: Set<string> };
   /** Checks re-run on a stored run: steering never had a chance, so nothing counts as missed. */
   rechecked?: boolean;
+  idleInferred?: boolean;
 }
 
 export interface EngineStatus {
@@ -153,6 +154,9 @@ function pickSpans<S extends { id: string }>(spans: S[], ids: string[], traceId:
 }
 
 export class Engine {
+  private closed = false;
+  private readonly endJobs = new Map<string, Promise<boolean>>();
+  private readonly cleanupTimers = new Set<NodeJS.Timeout>();
   private live = new Map<string, LiveRun>();
   private workflowPlanning = new Map<string, Promise<PlanRow | undefined>>();
   private jobs = new Map<string, number>();
@@ -175,6 +179,7 @@ export class Engine {
   // ----------------------------------------------------------- job tracking
 
   private track<T>(traceId: string, p: Promise<T>): Promise<T | undefined> {
+    if (this.closed) return Promise.resolve(undefined);
     this.jobs.set(traceId, (this.jobs.get(traceId) ?? 0) + 1);
     this.progress.checking(traceId);
     return p
@@ -186,11 +191,13 @@ export class Engine {
         const n = (this.jobs.get(traceId) ?? 1) - 1;
         if (n <= 0) {
           this.jobs.delete(traceId);
-          if (this.live.get(traceId)?.endHandled) this.progress.done(traceId);
+          if (!this.closed && this.live.get(traceId)?.endHandled) this.progress.done(traceId);
           // A debounced trace question still counts as pending; its flush wakes the waiters.
           if (this.pending(traceId)) return;
           for (const fn of this.idleWaiters.get(traceId) ?? []) fn();
           this.idleWaiters.delete(traceId);
+          const live = this.live.get(traceId);
+          if (live?.idleInferred && live.endHandled) this.live.delete(traceId);
         } else this.jobs.set(traceId, n);
       });
   }
@@ -271,19 +278,28 @@ export class Engine {
   }
 
   private onTrace(u: TraceUpdate): void {
+    if (this.closed) return;
     const run = this.liveRun(u.traceId);
     if (!run) return;
     if (run.doctor) {
       this.live.delete(u.traceId);
       return;
     }
+    // Late children do not undo a settled inactivity inference. Process their
+    // evidence as ended work, then release the temporary live state again.
+    if (this.roots.store.liveness.inferred(u.traceId)) {
+      run.ended = true;
+      run.idleInferred = true;
+      if (!this.roots.store.liveness.needsEnd(u.traceId)) run.endHandled = true;
+    }
     const fresh = u.spans.filter((s) => s.isNew && !s.view.isMarker);
     if (fresh.length) this.track(u.traceId, this.handleSpans(run, fresh.map((s) => s.row.span_id)));
-    if (u.rootEnded || u.completed) {
+    else if (run.idleInferred && run.endHandled && !this.pending(u.traceId)) this.live.delete(u.traceId);
+    if (u.rootEnded || u.completed || u.idleRecovered) {
       run.ended = true;
       // Trailing spans can arrive in the next batch; give them a moment.
       clearTimeout(run.endTimer);
-      run.endTimer = setTimeout(() => void this.track(u.traceId, this.handleEnd(run)), 400);
+      run.endTimer = setTimeout(() => void this.queueEnd(run, !!u.idleRecovered), 400);
     }
   }
 
@@ -320,6 +336,7 @@ export class Engine {
   }
 
   private async handleSpans(run: LiveRun, spanIds: string[]): Promise<void> {
+    if (this.closed) return;
     const snap = loadTrace(this.roots.store, run.traceId);
     const fresh = snap.spans.filter((s) => spanIds.includes(s.id));
     this.applyRules(run, snap, false, new Set(spanIds));
@@ -330,6 +347,7 @@ export class Engine {
 
   private scheduleQuestions(run: LiveRun, snap: TraceSnapshot, fresh: SpanInfo[]): void {
     for (const { check, params } of this.questionsFor(run)) {
+      if (this.closed) return;
       if (check.when === "end") continue;
       const sel = check.evidence?.spans;
       if (check.scope === "span") {
@@ -361,10 +379,12 @@ export class Engine {
    * asked; when the LLM stands in, only the newest waiting span is asked, up to a per-run cap.
    */
   private async drainSpanQueue(run: LiveRun, check: QuestionCheck, params: Record<string, string>): Promise<void> {
+    if (this.closed) return;
     if (run.spanBusy.has(check.id)) return;
     run.spanBusy.add(check.id);
     try {
       for (;;) {
+        if (this.closed) return;
         const queue = run.spanQueue.get(check.id) ?? [];
         if (!queue.length) break;
         const slow = await this.decisions.isSlow([toQuestion(check, params)]);
@@ -387,11 +407,13 @@ export class Engine {
 
   /** One more try for spans whose model call failed live, still within the slow-mode cap on attempts. */
   private async retryFailedSpans(run: LiveRun, check: QuestionCheck, params: Record<string, string>): Promise<void> {
+    if (this.closed) return;
     const retry = run.retrySpans.get(check.id);
     if (!retry?.size) return;
     run.retrySpans.delete(check.id);
     const slow = await this.decisions.isSlow([toQuestion(check, params)]);
     for (const spanId of retry) {
+      if (this.closed) return;
       if (slow) {
         const asked = run.spanAsked.get(check.id) ?? 0;
         if (asked >= SLOW_SPAN_CHECKS_PER_RUN) break;
@@ -402,10 +424,12 @@ export class Engine {
   }
 
   private async flushDirty(run: LiveRun): Promise<void> {
+    if (this.closed) return;
     const ids = [...run.dirty];
     run.dirty.clear();
     const snap = loadTrace(this.roots.store, run.traceId);
     for (const { check, params } of this.questionsFor(run)) {
+      if (this.closed) return;
       if (!ids.includes(check.id)) continue;
       await this.askTrace(run, check, params, snap);
     }
@@ -418,9 +442,14 @@ export class Engine {
       const rule = lc.check as RuleCheck;
       if (!this.appliesTo(rule, run)) continue;
       if (rule.rule.type === "run_end" && !atEnd) continue;
+      // An idle timeout is a local interrupted end, not an exporter error. Keep the
+      // configured run-failed rule's scope/quieting/actions and ordinary insertion path.
+      const idleFailure = atEnd && rule.id === "run-failed" && rule.rule.type === "run_end"
+        && rule.rule.when === "error" && this.roots.store.liveness.inferred(run.traceId);
+      const evaluated: RuleCheck = idleFailure ? { ...rule, rule: { type: "run_end", when: "interrupted" } } : rule;
       let hit: RuleHit | null;
       try {
-        hit = evaluateRule(rule, snap, atEnd, fresh, lc.source !== "library");
+        hit = evaluateRule(evaluated, snap, atEnd, fresh, lc.source !== "library");
       } catch (err) {
         log.warn(`rule ${rule.id} failed: ${(err as Error).message}`);
         continue;
@@ -445,7 +474,7 @@ export class Engine {
             probability: null,
             status,
             evidence_span_ids: hit.evidenceSpanIds,
-            detail: { params: hit.params, source: lc.source, ...(rule.group ? { group: rule.group } : {}) },
+            detail: { params: hit.params, source: lc.source, ...(idleFailure ? { idle_inferred: true } : {}), ...(rule.group ? { group: rule.group } : {}) },
             model: null,
             triage_score: null,
             explanation_id: null,
@@ -477,7 +506,7 @@ export class Engine {
         if (!run.ruleGrace.has(ruleId)) return;
         run.ruleGrace.set(ruleId, true);
         // At run end the rules are applied without waiting, so there is nothing left to do.
-        if (!run.endHandled) this.applyRules(run, loadTrace(this.roots.store, run.traceId), false);
+        if (!this.closed && !run.endHandled) this.applyRules(run, loadTrace(this.roots.store, run.traceId), false);
       });
       void this.track(run.traceId, recheck);
     }
@@ -528,11 +557,13 @@ export class Engine {
     snap: TraceSnapshot,
     spanId: string | null,
   ): Promise<"unavailable" | void> {
+    if (this.closed) return "unavailable";
     let result: DecisionResult;
     try {
       result = await this.decisions.decide(evidence, [toQuestion(check, params)]);
       this.decisionDown = false;
     } catch (err) {
+      if (this.closed) return "unavailable";
       if (err instanceof DecisionUnavailableError || err instanceof LlmUnavailableError) {
         if (!this.decisionDown) log.warn(`questions skipped: ${(err as Error).message}`);
         this.decisionDown = true;
@@ -558,6 +589,7 @@ export class Engine {
       }
       return;
     }
+    if (this.closed) return "unavailable";
     const answer = result.answers[check.id];
     const verdict = flagged(check, result);
     this.roots.store.insertDecision({
@@ -587,6 +619,7 @@ export class Engine {
       // A second look, with a quote that must be in the run, before anything is raised.
       if ((run.rejected.get(check.id) ?? 0) >= 3) return;
       const check2 = check.kind === "yes_no" ? await verifyFlag(this.llm, fillTemplate(check.ask, params) || check.ask, evidence) : undefined;
+      if (this.closed) return "unavailable";
       if (check2 && !check2.verified) {
         run.rejected.set(check.id, (run.rejected.get(check.id) ?? 0) + 1);
         log.debug(`${check.id}: flag not confirmed on a second look${check2.quote ? ` (quote: ${clip(check2.quote, 80)})` : ""}`);
@@ -666,6 +699,7 @@ export class Engine {
         return;
       }
     }
+    if (this.closed) return;
     this.roots.store.insertDecision({
       trace_id: run.traceId,
       check_id: "neatroots.tool-result",
@@ -752,6 +786,7 @@ export class Engine {
     } catch {
       return;
     }
+    if (this.closed) return;
     const updated = this.roots.store.updateFinding(f.id, { triage_score: Math.round(score * 10) / 10 });
     if (updated) this.roots.bus.emit("finding", updated);
     if (score < INVESTIGATE_AT) return;
@@ -793,6 +828,7 @@ export class Engine {
     if (!out?.cause) return undefined;
     const spanIds = resolveRefs(snap, out.evidence).length ? resolveRefs(snap, out.evidence) : f.evidence_span_ids;
     const grounding = await this.grounding(ev, `${out.cause}\nFix: ${out.fix ?? ""}`);
+    if (this.closed) return undefined;
     const exp = this.roots.store.insertExplanation({
       target_type: "finding",
       target_id: f.id,
@@ -870,6 +906,7 @@ export class Engine {
   // ------------------------------------------------------------- planning
 
   private ensurePlan(run: LiveRun, snap: TraceSnapshot): void {
+    if (this.closed) return;
     if (run.planning) return;
     const tools = toolsOffered(snap);
     // A provisional default plan (no goal seen yet) is replaced as soon as there is a goal.
@@ -908,6 +945,7 @@ export class Engine {
       run.traceId,
       shared.then((plan) => {
         run.planning = undefined;
+        if (this.closed) return;
         if (plan && run.plan !== plan) {
           run.plan = plan;
           this.roots.store.setRunPlan(run.traceId, plan.id);
@@ -921,7 +959,7 @@ export class Engine {
 
   private defaultPlan(run: LiveRun, tools: string[], persist: boolean): PlanRow {
     const ids = DEFAULT_PLAN.filter((id) => this.registry.get(id));
-    if (persist) {
+    if (persist && !this.closed) {
       const p = this.roots.store.insertPlan({ workflow: run.workflow, created_by: "default", model: null, rationale: "Default checks (no local LLM to plan with).", check_ids: ids, params: {}, tools });
       this.roots.store.setRunPlan(run.traceId, p.id);
       this.roots.bus.emit("plan", { workflow: run.workflow, plan_id: p.id, trace_id: run.traceId });
@@ -968,6 +1006,7 @@ ${library}`;
     } catch (err) {
       log.warn(`planner failed, using default checks: ${(err as Error).message}`);
     }
+    if (this.closed) return;
     const valid = (out?.checks ?? []).filter((c) => this.registry.get(c.id) && isQuestion(this.registry.get(c.id)!.check));
     const ids = [...new Set(valid.map((c) => c.id))].slice(0, 8);
     const params: Record<string, Record<string, string>> = {};
@@ -996,6 +1035,7 @@ ${library}`;
       }
     }
     if (ids.length < 3) for (const id of DEFAULT_PLAN) if (!ids.includes(id) && this.registry.get(id)) ids.push(id);
+    if (this.closed) return;
     const p = this.roots.store.insertPlan({
       workflow: run.workflow,
       created_by: out ? "planner" : "default",
@@ -1012,8 +1052,75 @@ ${library}`;
 
   // --------------------------------------------------------------- run end
 
+  /** Called only for locally inferred ends; no OTLP end marker is fabricated. */
+  async endIdle(traceId: string): Promise<void> {
+    if (this.closed || !this.roots.store.liveness.inferred(traceId)) return;
+    const hadLive = this.live.has(traceId);
+    const run = this.liveRun(traceId);
+    if (!run) return;
+    if (!hadLive) {
+      const done = this.roots.store.decisionsForTrace(traceId);
+      for (const d of done) if (d.span_id) run.spanDone.add(`${d.check_id}:${d.span_id}`);
+      run.answered = {
+        traceChecks: new Set(done.filter(d => !d.span_id).map(d => d.check_id)),
+        toolSpans: new Set(done.filter(d => d.check_id === "neatroots.tool-result" && d.span_id).map(d => d.span_id!)),
+      };
+    }
+    run.ended = true; run.idleInferred = true;
+    clearTimeout(run.endTimer);
+    await this.queueEnd(run, false);
+  }
+
+  private queueEnd(run: LiveRun, recovered: boolean): Promise<boolean> {
+    const prior = this.endJobs.get(run.traceId);
+    if (prior && !recovered) return prior;
+    const job = (prior ?? Promise.resolve(true)).then(async () => {
+      if (this.closed) return false;
+      if (!recovered && run.idleInferred && !this.roots.store.liveness.inferred(run.traceId)) return true;
+      if (recovered) {
+        run.idleInferred = false;
+        run.answered = undefined;
+        for (const f of this.roots.store.findingsForTrace(run.traceId)) {
+          if (f.detail.idle_inferred === true && ["raised", "active", "quiet"].includes(f.status)) this.resolve(f, { keepHalts: false });
+        }
+        this.roots.store.liveness.clearSummary(run.traceId);
+        run.endHandled = false; run.used.summaries = 0;
+      }
+      const priorSummary = this.roots.store.getSummary(run.traceId);
+      let failed = false;
+      await this.track(run.traceId, this.handleEnd(run).catch(e => { failed = true; throw e; }));
+      if (this.closed) return false;
+      if (failed) this.progress.interrupted(run.traceId);
+      if (run.idleInferred) {
+        const summary = this.roots.store.getSummary(run.traceId);
+        if (!priorSummary && summary) this.roots.store.liveness.rememberSummary(run.traceId, summary.text);
+        if (!this.pending(run.traceId) && this.live.get(run.traceId) === run) this.live.delete(run.traceId);
+      }
+      return !failed;
+    }).catch(error => {
+      if (!this.closed) this.progress.interrupted(run.traceId);
+      log.warn(`end processing failed: ${(error as Error).message}`);
+      return false;
+    });
+    this.endJobs.set(run.traceId, job);
+    void job.finally(() => { if (this.endJobs.get(run.traceId) === job) this.endJobs.delete(run.traceId); });
+    return job;
+  }
+
+  close(): void {
+    this.closed = true;
+    for (const id of this.endJobs.keys()) {
+      if (this.roots.store.liveness.needsEnd(id)) this.progress.interrupted(id);
+    }
+    for (const run of this.live.values()) { clearTimeout(run.endTimer); clearTimeout(run.debounce); }
+    for (const timer of this.cleanupTimers) clearTimeout(timer);
+    this.cleanupTimers.clear();
+    for (const callbacks of this.idleWaiters.values()) for (const done of callbacks) done();
+    this.idleWaiters.clear(); this.live.clear();
+  }
+
   private async handleEnd(run: LiveRun): Promise<void> {
-    if (run.endHandled) return;
+    if (this.closed || run.endHandled) return;
     run.endHandled = true;
     // Notes the agent never picked up can no longer help this run.
     for (const n of this.roots.store.notesForTrace(run.traceId, "pending")) {
@@ -1021,13 +1128,16 @@ ${library}`;
       this.roots.bus.emit("note", { ...n, status: "expired" });
     }
     if (run.planning) await run.planning;
+    if (this.closed) return;
     let snap = loadTrace(this.roots.store, run.traceId);
     if (!run.plan) this.ensurePlan(run, snap);
     if (run.planning) await run.planning;
+    if (this.closed) return;
     snap = loadTrace(this.roots.store, run.traceId);
     this.applyRules(run, snap, true);
     // Final pass: end-only questions, and live questions with evidence they have not seen.
     for (const { check, params } of this.questionsFor(run)) {
+      if (this.closed) return;
       if (check.scope === "span") {
         const queue = run.spanQueue.get(check.id) ?? [];
         for (const s of selectSpans(snap.spans, check.evidence?.spans)) {
@@ -1043,17 +1153,22 @@ ${library}`;
         await this.askTrace(run, check, params, snap);
       }
     }
+    if (this.closed) return;
     snap = loadTrace(this.roots.store, run.traceId);
     const findings = this.roots.store.findingsForTrace(run.traceId).filter((f) => f.status !== "failed" && f.status !== "dismissed");
     // A failed run with no finding still gets triaged as a whole.
     if (snap.run && (snap.run.status === "error" || snap.run.interrupted) && !findings.some((f) => f.check_id === "run-failed")) {
       await this.triageRun(run, snap);
     }
-    for (const work of run.deferred.splice(0)) await work();
+    for (const work of run.deferred.splice(0)) { if (this.closed) return; await work(); }
+    if (this.closed) return;
     await this.summarize(run, snap);
-    setTimeout(() => {
-      if (!this.pending(run.traceId)) this.live.delete(run.traceId);
+    if (this.closed) return;
+    const timer = setTimeout(() => {
+      this.cleanupTimers.delete(timer);
+      if (!this.pending(run.traceId) && this.live.get(run.traceId) === run) this.live.delete(run.traceId);
     }, 60_000);
+    this.cleanupTimers.add(timer);
   }
 
   private async triageRun(run: LiveRun, snap: TraceSnapshot): Promise<void> {
@@ -1096,6 +1211,7 @@ ${library}`;
     if (!out?.cause) return undefined;
     const spanIds = resolveRefs(snap, out.evidence);
     const grounding = await this.grounding(ev.text, `${out.cause}\nFix: ${out.fix ?? ""}`);
+    if (this.closed) return undefined;
     const exp = this.roots.store.insertExplanation({
       target_type: "run",
       target_id: traceId,
@@ -1129,6 +1245,7 @@ ${library}`;
       const lines = (r.json as { lines?: string[] } | undefined)?.lines?.filter((l) => typeof l === "string" && l.trim());
       if (!lines?.length) return;
       const text = lines.slice(0, 3).map((l) => clip(l.trim().replace(/^\d+[.)]\s*/, ""), 200)).join("\n");
+      if (this.closed) return;
       this.roots.store.setSummary(run.traceId, text, r.model);
       this.roots.bus.emit("summary", { trace_id: run.traceId, text });
     } catch (err) {
@@ -1235,7 +1352,7 @@ export async function resumeUnfinished(engine: Engine, roots: Roots): Promise<nu
   const ended = ids.filter((id) => {
     const r = roots.store.getRun(id);
     if (!r) engine.progress.done(id);
-    return !!r && r.status !== "running";
+    return !!r && r.status !== "running" && !roots.store.liveness.needsEnd(id);
   });
   for (const id of ended.slice(RESUME_LIMIT)) engine.progress.interrupted(id);
   const todo = ended.slice(0, RESUME_LIMIT);

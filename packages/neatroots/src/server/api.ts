@@ -9,7 +9,7 @@ import { hardwareTier, llmErrorMessage } from "../models/llm.js";
 import { regexProblem } from "../util/regex.js";
 import { allowedEndpoint } from "../relay/endpoint.js";
 import { RedactionPatternError } from "../relay/redact.js";
-import { projectSettings, type SteeringMode } from "../config.js";
+import { projectSettings, validRunIdleMinutes, type SteeringMode } from "../config.js";
 import { getCloudKey, setCloudKey, deleteCloudKey, getCloudToken, getSecret } from "../relay/keychain.js";
 import { mountModelsApi } from "./api-models.js";
 import { mountChecksApi } from "./api-checks.js";
@@ -144,6 +144,7 @@ export function mountApi(app: Hono, roots: Roots): void {
       config: {
         llm: { baseUrl: roots.config.llm.baseUrl, model: roots.config.llm.model, enabled: roots.config.llm.enabled, external: roots.config.llm.external },
         classifier: { backend: roots.config.classifier.backend, baseUrl: roots.config.classifier.baseUrl, model: roots.config.classifier.model },
+        run_idle_minutes: roots.config.runIdleMinutes ?? 10,
         budgets: roots.config.budgets,
         retention: roots.config.retention,
         grpc_port: roots.config.grpcPort,
@@ -264,12 +265,14 @@ export function mountApi(app: Hono, roots: Roots): void {
       cloud_endpoint?: string;
       redact_patterns?: string[];
       check_dir?: string;
+      run_idle_minutes?: number;
       retention_days?: number;
       retention_max_gb?: number;
     }>(c);
     // Check every value first, before anything changes: a refused request applies nothing, not
     // even its valid parts (an out-of-range retention used to be skipped while the reply said ok).
     const inRange = (v: unknown, min: number, max: number, minOpen = false) => typeof v === "number" && Number.isFinite(v) && (minOpen ? v > min : v >= min) && v <= max;
+    if (b.run_idle_minutes !== undefined && !validRunIdleMinutes(b.run_idle_minutes)) return err(c, 400, "run_idle_minutes must be 0 (disabled) or between 1 and 10080");
     if (b.retention_days !== undefined && !inRange(b.retention_days, 1, 3650)) return err(c, 400, "Keep runs for must be between 1 and 3650 days");
     if (b.retention_max_gb !== undefined && !inRange(b.retention_max_gb, 0, 10_000, true)) return err(c, 400, "Size cap must be more than 0 GB and at most 10000 GB");
     for (const field of ["forward", "steering_enabled", "jev_cloud_enabled", "laya_enabled"] as const) {
@@ -303,6 +306,7 @@ export function mountApi(app: Hono, roots: Roots): void {
       if (b.steering !== undefined) roots.steering.setMode(b.project, b.steering);
       if (b.forward !== undefined) roots.config.projects[b.project] = { ...cur, ...roots.config.projects[b.project], forward: b.forward };
     }
+    if (b.run_idle_minutes !== undefined) roots.config.runIdleMinutes = b.run_idle_minutes;
     if (b.retention_days !== undefined) roots.config.retention.days = Math.round(b.retention_days);
     if (b.retention_max_gb !== undefined) roots.config.retention.maxGb = b.retention_max_gb;
     if (b.steering_enabled !== undefined) roots.config.steering.enabled = b.steering_enabled;
