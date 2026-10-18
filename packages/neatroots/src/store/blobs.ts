@@ -44,7 +44,7 @@ export class BlobStore {
       if (fd !== undefined) {
         try { fs.closeSync(fd); } catch { /* preserve original error */ }
       }
-      try { fs.rmSync(tmp, { force: true }); } catch { /* recovered at owner startup */ }
+      try { fs.rmSync(tmp, { force: true }); } catch { /* leave an orphan for separate recovery */ }
       throw err;
     }
     return sha;
