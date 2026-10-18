@@ -1,0 +1,55 @@
+# Security
+
+## Scope
+
+This policy covers neatroots: its local server and CLI, web app, ingestion, storage,
+checks, MCP tools, replay, and the steering packages in this repository. Separate
+Neatlogs SDK repositories and hosted products are outside this policy's scope.
+For those projects, consult their published guidance or ask their maintainers for
+a private reporting channel without disclosing vulnerability details publicly.
+
+Local-first does not mean risk-free. Traces can contain sensitive inputs, outputs,
+and tool data. Review [what leaves your machine](README.md#what-leaves-your-machine)
+and the [security boundaries](docs/architecture.md#security), including opt-in hosted
+models and cloud features, before sharing data or changing deployment settings.
+
+## Reporting a vulnerability
+
+Do not publish vulnerability details, affected components, exploits, proof-of-concept
+code, or sensitive data in public issues, pull requests, or discussions.
+
+1. Open the repository's [security advisories page](https://github.com/neatlogs/neatroots/security/advisories).
+   If **Report a vulnerability** is available, use it to submit a private report.
+   See [GitHub's private reporting instructions](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately).
+2. If that option is unavailable, open an [issue](https://github.com/neatlogs/neatroots/issues)
+   asking only for the maintainers' preferred private security contact. Include no
+   vulnerability details, affected component, exploit, or data. Wait for a private
+   channel before sharing the report; do not post a public proof of concept.
+
+Adding this file does not enable GitHub private vulnerability reporting. Until a
+private channel is available, the public contact request is only a way to ask for
+one, not a place to submit the vulnerability.
+
+Once a private channel is established, include:
+
+- The affected release or commit and, if safe to check, whether the issue reproduces
+  on the current release.
+- Your operating system and relevant deployment configuration, including enabled
+  integrations and any changes to network exposure.
+- Safe reproduction steps using synthetic data, with expected and observed behavior.
+- The potential impact and affected surface, such as ingestion, storage, MCP, replay,
+  steering, or an opt-in cloud path.
+
+Do not include API keys, credentials, customer traces, or other personal or confidential
+data. Use a minimal synthetic example instead.
+
+## Triage, fixes, and disclosure
+
+The [maintainers](MAINTAINERS.md) coordinate assessment, fixes, and disclosure with
+reporters through the agreed private channel. Coordinate public disclosure there
+so a report can be assessed and a fix prepared before details are published.
+
+There is no published versioned security-maintenance or backport schedule. Identify
+the affected version in your report so maintainers can assess its scope and discuss
+an appropriate fix; this policy does not promise support for a particular release
+or a response or remediation deadline.
