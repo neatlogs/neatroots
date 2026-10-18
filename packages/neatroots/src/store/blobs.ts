@@ -75,14 +75,33 @@ export class BlobStore {
     }
   }
 
-  /** Total bytes on disk, for retention. */
+  /** Blob payload bytes for retention, excluding atomic writers' temporary files. */
   size(): number {
     let total = 0;
-    if (!fs.existsSync(this.dir)) return 0;
-    for (const sub of fs.readdirSync(this.dir)) {
+    let shards: string[];
+    try {
+      shards = fs.readdirSync(this.dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      return 0;
+    }
+    for (const sub of shards) {
       const p = path.join(this.dir, sub);
-      if (!fs.statSync(p).isDirectory()) continue;
-      for (const f of fs.readdirSync(p)) total += fs.statSync(path.join(p, f)).size;
+      try {
+        if (!fs.statSync(p).isDirectory()) continue;
+        for (const f of fs.readdirSync(p)) {
+          // Recognize current and legacy atomic writers, not arbitrary orphan .tmp files.
+          if (/^[a-f0-9]{62}\.[1-9]\d*\.(?:[a-f0-9]{8}|[a-f0-9]{32})\.tmp$/.test(f)) continue;
+          try {
+            total += fs.statSync(path.join(p, f)).size;
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+          }
+        }
+      } catch (err) {
+        // Retention/deletion can remove a shard between enumeration, stat and readdir.
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      }
     }
     return total;
   }
