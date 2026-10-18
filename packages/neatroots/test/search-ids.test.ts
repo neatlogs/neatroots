@@ -230,9 +230,28 @@ describe("search index run ids", () => {
 
   it("keep ingest, search and deletes from reading every index row", async () => {
     // Filtering span_fts on trace_id or span_id (unindexed columns) loads every row's text.
-    const scan = /FROM span_fts WHERE trace_id|SELECT trace_id(, span_id)? FROM span_fts |MATCH \? AND trace_id/;
-    const scans = (st: Store) =>
-      prepared(st, () => {
+    const scan = /FROM span_fts WHERE trace_id|MATCH \? AND trace_id/;
+    const projection = /SELECT trace_id(, span_id)? FROM span_fts /g;
+    const explanations: { phase: string; sql: string; bindings: unknown[]; bytecode: unknown[] }[] = [];
+    const scans = (st: Store, phase: string) => {
+      let reads = 0;
+      // Observe only projected values. Predicates, parameters and fallback branch truth stay intact.
+      st.db.function("fts_projection_read", (value: string) => { reads++; return value; });
+      const prepare = st.db.prepare.bind(st.db);
+      st.db.prepare = ((sql: string) => {
+        const observed = sql.replace(projection, (_match, rest: string | undefined) => `SELECT fts_projection_read(trace_id) AS trace_id${rest ?? ""} FROM span_fts `);
+        const statement = prepare(observed);
+        if (observed !== sql) {
+          const all = statement.all.bind(statement);
+          statement.all = ((...bindings: unknown[]) => {
+            explanations.push({ phase, sql, bindings, bytecode: prepare(`EXPLAIN ${sql}`).all(...bindings) });
+            return all(...bindings);
+          }) as typeof statement.all;
+        }
+        return statement;
+      }) as typeof st.db.prepare;
+      let queries: string[];
+      try { queries = prepared(st, () => {
         const t = run(st, "invoice again", "billing");
         resend(st, t, "invoice paid", "billing");
         st.listRuns({ text: "invoice" });
@@ -240,20 +259,25 @@ describe("search index run ids", () => {
         st.listRuns({ text: "invoice", tool: "billing" });
         st.searchSpans("invoice", 10, [t]);
         st.deleteRun(t);
-      }).filter((q) => scan.test(q));
+      }); } finally { st.db.prepare = prepare; }
+      return { filters: queries.filter((q) => scan.test(q)), projected: reads };
+    };
     const dir = dataDir();
     let st = trackedStore(dir);
     run(st, "invoice");
-    expect(scans(st)).toEqual([]);
+    expect(scans(st, "ready")).toEqual({ filters: [], projected: 0 });
 
     // The same calls scan on a store whose run ids aren't filled in yet, so the check above can fail.
     st.db.exec("DROP TABLE span_fts_ids");
     st.close();
     st = trackedStore(dir);
-    expect(scans(st).length).toBeGreaterThan(0);
+    const fallback = scans(st, "fallback");
+    expect(fallback.filters.length).toBeGreaterThan(0);
+    expect(fallback.projected).toBeGreaterThan(0);
     // A span stored for the first time has no index rows to delete, filled in or not.
     expect(prepared(st, () => run(st, "invoice new")).filter((q) => q.includes("DELETE FROM span_fts"))).toEqual([]);
     expect(await rebuilt(st)).toBe(true);
-    expect(scans(st)).toEqual([]);
+    expect(scans(st, "rebuilt")).toEqual({ filters: [], projected: 0 });
+    if (process.env.NEATROOTS_FTS_EXPLAIN) fs.writeFileSync(process.env.NEATROOTS_FTS_EXPLAIN, JSON.stringify(explanations, null, 2));
   });
 });

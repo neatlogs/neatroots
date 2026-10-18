@@ -1,3 +1,4 @@
+import { Retention } from "./retention.js";
 import path from "node:path";
 import { rootsHome, loadConfig, saveConfig, type RootsConfig } from "./config.js";
 import { Bus } from "./bus.js";
@@ -41,6 +42,8 @@ export class Roots {
   readonly replays: Replays;
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
+  private readonly retention: Retention;
+  private closing = false;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
   /** The run and span the app has in focus, for the MCP get_current_run tool. */
@@ -52,6 +55,7 @@ export class Roots {
     this.home = opts.home ?? rootsHome();
     this.config = opts.config ?? loadConfig();
     this.store = new Store(path.join(this.home, "data"));
+    this.retention = new Retention(this.store);
     this.llm = new LlmClient(this.config.llm, { secret: (n) => getSecret(n), redactPatterns: () => this.config.cloud.redactPatterns });
     this.laya = new LayaManager(this.home, this.config.classifier);
     this.decisions = new DecisionModel(
@@ -88,15 +92,18 @@ export class Roots {
     saveConfig(this.config, path.join(this.home, "config.yaml"));
   }
 
-  /** Applies retention now and every hour. */
+  /** Scheduled sweeps keep final deletion and policy checks with this owner. */
+  sweepRetention(): Promise<number> {
+    return this.retention.run(this.config.retention.days, this.config.retention.maxGb * 1024 ** 3);
+  }
+
+  /** Applies retention now and every hour, with one in-flight sweep through cleanup. */
   startRetention(): void {
+    if (this.closing || this.sweeper) return;
     const run = () => {
-      try {
-        const removed = this.store.sweep(this.config.retention.days, this.config.retention.maxGb * 1024 ** 3);
-        if (removed) log.info(`retention removed ${removed} old runs`);
-      } catch (err) {
-        log.warn(`retention failed: ${(err as Error).message}`);
-      }
+      void this.sweepRetention().then((removed) => {
+        if (removed && !this.closing) log.info(`retention removed ${removed} old runs`);
+      }).catch((err: Error) => { if (!this.closing) log.warn(`retention failed: ${err.message}`); });
     };
     run();
     this.sweeper = setInterval(run, 3_600_000);
@@ -111,6 +118,8 @@ export class Roots {
   }
 
   close(): void {
+    this.closing = true;
+    void this.retention.close();
     clearInterval(this.sweeper);
     this.laya.stop();
     this.store.close();

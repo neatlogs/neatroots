@@ -60,7 +60,11 @@ export function runDatabaseWeights(db: Database.Database): Map<string, number> |
     const table = owner.get(row.name) ?? row.name;
     bytes.set(table, (bytes.get(table) ?? 0) + Math.max(0, row.bytes - pageSize));
   }
-  for (const table of ["runs", "spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations", "span_fts_ids", "span_fts"]) {
+  const tables = ["runs", "spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations", "span_fts_ids", "span_fts"];
+  // Reference rows disappear with their owning spans. Include their non-root table/index pages,
+  // while retaining compatibility with stores which predate the optional retention schema.
+  for (const table of ["retention_blob_refs", "retention_ref_errors"]) if (owner.has(table)) tables.push(table);
+  for (const table of tables) {
     const columns = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
     // Column names come from our own schema. Include a small record/header allowance per column.
     const content = columns.map((c) => `COALESCE(octet_length(CAST("${c}" AS BLOB)), 0) + 2`).join(" + ");

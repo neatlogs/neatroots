@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { BlobStore } from "./blobs.js";
+import { installRetentionState, enqueueBlobReclamation, type RetentionCandidate } from "./retention-state.js";
 import { SearchIds } from "./search-ids.js";
 import { runDatabaseWeights, trimOrphanLogs } from "./retention.js";
 import { log } from "../util/log.js";
@@ -423,20 +424,27 @@ export class Store {
     return !fs.existsSync(current) && fs.existsSync(legacy) ? legacy : current;
   }
 
-  constructor(dir: string) {
+  constructor(dir: string, options: { busyTimeout?: number } = {}) {
     this.dir = dir;
     fs.mkdirSync(dir, { recursive: true });
     this.file = Store.dbFile(dir);
     this.db = new Database(this.file);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
-    this.db.pragma("busy_timeout = 5000");
-    this.db.exec(SCHEMA);
-    this.migrate();
-    this.searchIds = new SearchIds(this.db);
-    this.blobs = new BlobStore(path.join(dir, "blobs"));
-    const row = this.db.prepare("SELECT MAX(seq) AS s FROM spans").get() as { s: number | null };
-    this.seq = row.s ?? 0;
+    try {
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("synchronous = NORMAL");
+      const busyTimeout = Number.isInteger(options.busyTimeout) ? Math.max(0, Math.min(5000, options.busyTimeout!)) : 5000;
+      this.db.pragma(`busy_timeout = ${busyTimeout}`);
+      this.db.exec(SCHEMA);
+      this.migrate();
+      installRetentionState(this.db);
+      this.searchIds = new SearchIds(this.db);
+      this.blobs = new BlobStore(path.join(dir, "blobs"));
+      const row = this.db.prepare("SELECT MAX(seq) AS s FROM spans").get() as { s: number | null };
+      this.seq = row.s ?? 0;
+    } catch (error) {
+      try { this.db.close(); } catch { /* preserve the initialization failure */ }
+      throw error;
+    }
   }
 
   close(): void {
@@ -901,12 +909,12 @@ export class Store {
     const q = ftsQuery(text);
     if (!q) return [];
     try {
-      return this.db
+      return this.db.transaction(() => this.db
         .prepare(
           `SELECT trace_id, span_id, name, snippet(span_fts, 4, '[', ']', '…', 12) AS snippet
-           FROM span_fts WHERE span_fts MATCH ? ${traceIds ? `AND ${this.searchIds.inRuns(traceIds.length)}` : "ORDER BY rank"} LIMIT ?`,
+           FROM span_fts WHERE span_fts MATCH ? AND ${this.searchIds.visible()} ${traceIds ? `AND ${this.searchIds.inRuns(traceIds.length)}` : "ORDER BY rank"} LIMIT ?`,
         )
-        .all(q, ...(traceIds ?? []), limit) as { trace_id: string; span_id: string; name: string; snippet: string }[];
+        .all(q, ...(traceIds ?? []), limit) as { trace_id: string; span_id: string; name: string; snippet: string }[]).deferred();
     } catch {
       return [];
     }
@@ -1296,6 +1304,38 @@ export class Store {
 
   // --------------------------------------------------------------- retention
 
+  /** Owner policy hooks shared with archive-before-delete; never installed on a worker. */
+  deletionGuard?: (traceId: string) => void;
+  afterDelete?: (traceIds: string[]) => void;
+  sweepScope?: (work: () => number) => number;
+  private retentionExpected?: RetentionCandidate;
+
+  /** Non-authoritative worker planning. Protected IDs include rejected/changed candidates. */
+  planRetentionRuns(maxBytes: number, protectedIds: string[], targetBytes?: number): RetentionCandidate[] {
+    return this.db.transaction(() => this.oldestRunsCovering(maxBytes, protectedIds, targetBytes).slice(0, 32).map((id) =>
+      this.db.prepare("SELECT trace_id, retention_revision FROM runs WHERE trace_id = ?").get(id) as RetentionCandidate,
+    ))();
+  }
+
+  /** Final authority remains with this owner, including a fresh guard and revision check. */
+  deleteRetentionCandidate(candidate: RetentionCandidate): "removed" | "changed" | "held" {
+    let result: "removed" | "changed" | "held" = "changed";
+    const work = () => this.db.transaction(() => {
+      const row = this.db.prepare("SELECT pinned, retention_revision FROM runs WHERE trace_id = ?").get(candidate.trace_id) as { pinned: number; retention_revision: number } | undefined;
+      if (!row || row.pinned || row.retention_revision !== candidate.retention_revision) return 0;
+      try { this.deletionGuard?.(candidate.trace_id); } catch { result = "held"; return 0; }
+      this.retentionExpected = candidate;
+      try {
+        this.deleteRun(candidate.trace_id);
+        if (!this.getRun(candidate.trace_id)) { result = "removed"; return 1; }
+        return 0;
+      } finally { this.retentionExpected = undefined; }
+    }).immediate();
+    const removed = this.sweepScope ? this.sweepScope(work) : work();
+    if (removed) this.afterDelete?.([candidate.trace_id]);
+    return result;
+  }
+
   /** Deletes the oldest unpinned runs past the age or size limit. Returns how many runs were removed. */
   sweep(maxAgeDays: number, maxBytes: number): number {
     let removed = 0;
@@ -1346,7 +1386,7 @@ export class Store {
   }
 
   /** Evict only when run-owned data exceeds its budget; unrelated pages never inflate weights. */
-  private oldestRunsCovering(maxBytes: number): string[] {
+  private oldestRunsCovering(maxBytes: number, protectedIds: string[] = [], targetBytes?: number): string[] {
     const weights = runDatabaseWeights(this.db);
     if (!weights) return [];
     // Root pages are an unavoidable database floor, not payload attributed to a run.
@@ -1354,10 +1394,10 @@ export class Store {
     const fixed = fixedPages * (this.db.pragma("page_size", { simple: true }) as number);
     const budget = Math.max(0, maxBytes - fixed);
     const rows = this.db.prepare(
-      `SELECT r.trace_id AS t, r.pinned, group_concat(s.blobs, '') AS b
+      `SELECT r.trace_id AS t, (r.pinned OR r.trace_id IN (SELECT value FROM json_each(?))) AS pinned, group_concat(s.blobs, '') AS b
        FROM runs r LEFT JOIN spans s ON s.trace_id = r.trace_id
        GROUP BY r.trace_id ORDER BY COALESCE(r.ended_ms, r.received_ms) ASC`,
-    ).all() as { t: string; pinned: number; b: string | null }[];
+    ).all(JSON.stringify(protectedIds)) as { t: string; pinned: number; b: string | null }[];
     const lastRef = new Map<string, number>();
     rows.forEach((row, i) => {
       for (const sha of new Set(row.b?.match(/[0-9a-f]{64}/g) ?? [])) {
@@ -1372,8 +1412,8 @@ export class Store {
     // If protected data alone exceeds the cap, deleting unrelated runs cannot meet it.
     if (protectedBytes >= budget) return [];
     const total = protectedBytes + rows.reduce((n, row) => n + (!row.pinned ? weights.get(row.t) ?? 0 : 0), 0);
-    if (total <= budget) return [];
-    const excess = total - Math.max(0, maxBytes * RETENTION_LOW_WATER - fixed);
+    if (total <= (targetBytes === undefined ? budget : Math.max(0, targetBytes - fixed))) return [];
+    const excess = total - Math.max(0, (targetBytes ?? maxBytes * RETENTION_LOW_WATER) - fixed);
     const picked: string[] = [];
     let freed = 0;
     for (const row of rows) {
@@ -1425,18 +1465,28 @@ export class Store {
    */
   deleteRuns(traceIds: string[]): void {
     if (!traceIds.length) return;
+    // Scheduled candidates just passed this owner's guard inside the same immediate transaction,
+    // with no yield. Repeating it can observe guard-induced work before the revision recheck.
+    if (!this.retentionExpected) for (const id of traceIds) this.deletionGuard?.(id);
+    if (this.retentionExpected) {
+      const row = this.db.prepare("SELECT pinned, retention_revision FROM runs WHERE trace_id = ?").get(this.retentionExpected.trace_id) as { pinned: number; retention_revision: number } | undefined;
+      if (!row || row.pinned || row.retention_revision !== this.retentionExpected.retention_revision) return;
+    }
     const ids = JSON.stringify(traceIds);
     const inIds = "trace_id IN (SELECT value FROM json_each(?))";
     const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
     const tx = this.db.transaction(() => {
-      this.searchIds.deleteRuns(ids);
+      if (this.retentionExpected) this.searchIds.queueRuns(ids);
+      else this.searchIds.deleteRuns(ids);
       for (const t of ["spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
         this.db.prepare(`DELETE FROM ${t} WHERE ${inIds}`).run(ids);
       }
       this.db.prepare(`DELETE FROM runs WHERE ${inIds}`).run(ids);
+      if (this.retentionExpected) enqueueBlobReclamation(this.db, shas);
     });
     tx();
-    this.reclaimUnreferencedBlobs(shas);
+    if (!this.retentionExpected) this.reclaimUnreferencedBlobs(shas);
+    if (!this.retentionExpected) this.afterDelete?.(traceIds);
   }
 
   /** Deletes candidate payloads only after checking every remaining span reference. */
@@ -1492,6 +1542,9 @@ export class Store {
   rebuildSearchIds(onDone?: (rows: number, ready: boolean) => void): void {
     this.searchIds.rebuild(onDone);
   }
+
+  refreshRetentionSearch(): void { this.searchIds.refresh(); }
+  collectRetentionIndex(limit = 64): number { return this.searchIds.collectPending(limit); }
 
   /**
    * Re-indexes spans stored before the index covered whole values (it kept 4,000 characters of

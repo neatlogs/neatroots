@@ -18,7 +18,11 @@ export class SearchIds {
   private rebuilding = false;
 
   constructor(private readonly db: Database.Database) {
-    this.ready = this.inSync();
+    this.ready = this.mappingAvailable() && this.inSync();
+  }
+
+  private mappingAvailable(): boolean {
+    return !(this.db.prepare("SELECT rebuilding FROM retention_search_state WHERE id = 1").get() as { rebuilding: number }).rebuilding;
   }
 
   /**
@@ -43,35 +47,74 @@ export class SearchIds {
   /** A query for `cols` (trace_id, span_id) of the span_fts rows matching @match. */
   matching(cols: string): string {
     return this.ready
-      ? `SELECT ${cols} FROM span_fts_ids WHERE id IN (SELECT rowid FROM span_fts WHERE span_fts MATCH @match)`
-      : `SELECT ${cols} FROM span_fts WHERE span_fts MATCH @match`;
+      ? `SELECT ${cols} FROM span_fts_ids WHERE (SELECT rebuilding FROM retention_search_state WHERE id = 1) = 0
+          AND id NOT IN (SELECT id FROM retention_pending_fts) AND id IN (SELECT rowid FROM span_fts WHERE span_fts MATCH @match)
+        UNION ALL SELECT ${cols} FROM span_fts WHERE span_fts MATCH @match
+          AND (SELECT rebuilding FROM retention_search_state WHERE id = 1) = 1 AND ${this.visible()}`
+      : `SELECT ${cols} FROM span_fts WHERE span_fts MATCH @match AND ${this.visible()}`;
   }
+
+  /** Tombstones hide derived rows at the canonical deletion commit, before physical GC. */
+  visible(): string { return "+rowid NOT IN (SELECT id FROM retention_pending_fts)"; }
+
+  refresh(): void { this.ready = this.mappingAvailable() && this.inSync(); }
 
   /** A condition on span_fts rows: they belong to one of `n` runs, given as parameters. */
   inRuns(n: number): string {
     const list = Array(n).fill("?").join(",");
     // +rowid keeps the list out of FTS5, which would otherwise run the MATCH once per listed row
     // (slow for long runs); as a plain filter it is checked against each match's rowid instead.
-    return this.ready ? `+rowid IN (SELECT id FROM span_fts_ids WHERE trace_id IN (${list}))` : `trace_id IN (${list})`;
+    return `(${this.visible()}) AND (${this.ready && this.mappingAvailable() ? `+rowid IN (SELECT id FROM span_fts_ids WHERE trace_id IN (${list}))` : `trace_id IN (${list})`})`;
   }
 
   /** Records the run and span of a span_fts row just inserted. A rowid can be reused after a delete. */
   add(rowid: number | bigint, traceId: string, spanId: string): void {
+    // An INSERT may reuse the highest deleted rowid, including for the same span identity.
+    this.db.prepare("DELETE FROM retention_pending_fts WHERE id = ?").run(rowid);
     this.db.prepare("INSERT OR REPLACE INTO span_fts_ids (id, trace_id, span_id) VALUES (?, ?, ?)").run(rowid, traceId, spanId);
   }
 
   deleteSpan(traceId: string, spanId: string): void {
-    if (this.ready) this.db.prepare("DELETE FROM span_fts WHERE rowid IN (SELECT id FROM span_fts_ids WHERE trace_id = ? AND span_id = ?)").run(traceId, spanId);
+    if (this.ready && this.mappingAvailable()) this.db.prepare("DELETE FROM span_fts WHERE rowid IN (SELECT id FROM span_fts_ids WHERE trace_id = ? AND span_id = ?)").run(traceId, spanId);
     else this.db.prepare("DELETE FROM span_fts WHERE trace_id = ? AND span_id = ?").run(traceId, spanId);
+    this.db.prepare("DELETE FROM retention_pending_fts WHERE trace_id = ? AND span_id = ?").run(traceId, spanId);
     this.db.prepare("DELETE FROM span_fts_ids WHERE trace_id = ? AND span_id = ?").run(traceId, spanId);
   }
 
   /** Deletes the span_fts rows of runs, given as a JSON array of trace ids. */
   deleteRuns(traceIdsJson: string): void {
     const inIds = "trace_id IN (SELECT value FROM json_each(?))";
-    if (this.ready) this.db.prepare(`DELETE FROM span_fts WHERE rowid IN (SELECT id FROM span_fts_ids WHERE ${inIds})`).run(traceIdsJson);
+    if (this.ready && this.mappingAvailable()) this.db.prepare(`DELETE FROM span_fts WHERE rowid IN (SELECT id FROM span_fts_ids WHERE ${inIds})`).run(traceIdsJson);
     else this.db.prepare(`DELETE FROM span_fts WHERE ${inIds}`).run(traceIdsJson);
+    this.db.prepare(`DELETE FROM retention_pending_fts WHERE ${inIds}`).run(traceIdsJson);
     this.db.prepare(`DELETE FROM span_fts_ids WHERE ${inIds}`).run(traceIdsJson);
+  }
+
+  /** Called inside the owner's canonical deletion transaction; mappings remain until GC. */
+  queueRuns(traceIdsJson: string): void {
+    if (!this.ready) throw new Error("retention search mappings unavailable");
+    const state = this.db.prepare("SELECT rebuilding FROM retention_search_state WHERE id = 1").get() as { rebuilding: number };
+    if (state.rebuilding) throw new Error("retention search mappings rebuilding");
+    this.db.prepare(`INSERT OR IGNORE INTO retention_pending_fts(id, trace_id, span_id)
+      SELECT id, trace_id, span_id FROM span_fts_ids WHERE trace_id IN (SELECT value FROM json_each(?))`).run(traceIdsJson);
+  }
+
+  /** Derived-index maintenance only. Snapshot, identity check and delete share a writer lock. */
+  collectPending(limit = 64): number {
+    return this.db.transaction(() => {
+      const rows = this.db.prepare("SELECT id, trace_id, span_id FROM retention_pending_fts ORDER BY id LIMIT ?").all(limit) as Row[];
+      for (const row of rows) {
+        const current = this.db.prepare("SELECT trace_id, span_id FROM span_fts WHERE rowid = ?").get(BigInt(row.id)) as Omit<Row, "id"> | undefined;
+        if (current?.trace_id === row.trace_id && current.span_id === row.span_id) {
+          this.db.prepare("DELETE FROM span_fts WHERE rowid = ?").run(BigInt(row.id));
+          this.db.prepare("DELETE FROM span_fts_ids WHERE id = ?").run(row.id);
+        } else if (!current) {
+          this.db.prepare("DELETE FROM span_fts_ids WHERE id = ?").run(row.id);
+        }
+        this.db.prepare("DELETE FROM retention_pending_fts WHERE id = ?").run(row.id);
+      }
+      return rows.length;
+    }).immediate();
   }
 
   /**
@@ -85,7 +128,10 @@ export class SearchIds {
     }
     if (this.rebuilding) return;
     try {
-      this.db.prepare("DELETE FROM span_fts_ids").run();
+      this.db.transaction(() => {
+        this.db.prepare("UPDATE retention_search_state SET rebuilding = 1 WHERE id = 1").run();
+        this.db.prepare("DELETE FROM span_fts_ids").run();
+      }).immediate();
     } catch {
       setImmediate(() => onDone?.(0, false));
       return;
@@ -93,8 +139,10 @@ export class SearchIds {
     this.rebuilding = true;
     const read = this.db.prepare("SELECT rowid AS id, trace_id, span_id FROM span_fts WHERE rowid > ? ORDER BY rowid LIMIT ?");
     const insert = this.db.prepare("INSERT OR IGNORE INTO span_fts_ids (id, trace_id, span_id) VALUES (@id, @trace_id, @span_id)");
-    const fill = this.db.transaction((rows: Row[]) => {
+    const fill = this.db.transaction((after: number) => {
+      const rows = read.all(BigInt(after), CHUNK) as Row[];
       for (const r of rows) insert.run(r);
+      return rows;
     });
     let after = 0;
     let n = 0;
@@ -104,8 +152,8 @@ export class SearchIds {
       try {
         // A BigInt binds as an integer. FTS5 ignores a rowid bound given as a real (which a JS
         // number binds as) and scans from the first row, so each chunk would read all before it.
-        rows = read.all(BigInt(after), CHUNK) as Row[];
-        fill(rows);
+        // Read and map under one writer lock: GC cannot delete a row between the snapshot and fill.
+        rows = fill.immediate(after);
       } catch {
         // The database is busy or failing: keep the scans (always correct) and try at the next start.
         this.rebuilding = false;
@@ -119,7 +167,13 @@ export class SearchIds {
         return;
       }
       this.rebuilding = false;
-      this.ready = this.inSync();
+      try {
+        this.ready = this.db.transaction(() => {
+          const ready = this.inSync();
+          if (ready) this.db.prepare("UPDATE retention_search_state SET rebuilding = 0 WHERE id = 1").run();
+          return ready;
+        }).immediate();
+      } catch { this.ready = false; }
       onDone?.(n, this.ready);
     };
     setImmediate(step);
