@@ -41,6 +41,8 @@ for (const theme of ["light", "dark"] as const) {
         if (requests.length === 1) await held;
         alpha.dismissed++;
         alpha.newest_finding_id = requests.length === 1 ? "alpha-older" : null;
+        // Real aggregation removes the project after its last qualifying finding.
+        if (requests.length === 2) data.problems[0].dismissal_projects = data.problems[0].dismissal_projects!.filter(p => p.project !== "alpha");
         await route.fulfill({ json: { ok: true, finding_id: target.finding_id, dismissed: alpha.dismissed } });
       });
       // The generic open helper waits for a desktop-only sidebar link.
@@ -63,11 +65,8 @@ for (const theme of ["light", "dark"] as const) {
       await expect(row(page, "alpha")).toContainText("2 of 3 dismissals");
       await expect(button).toBeEnabled();
       await button.click();
-      await expect(row(page, "alpha")).toContainText("3 of 3 dismissals · new findings go quiet here");
-      await expect(button).toBeDisabled();
-      await expect(button).not.toHaveAttribute("aria-busy", "true");
-      await expect(row(page, "alpha").getByRole("status")).toContainText("Dismissed finding in alpha.");
-      await expect(row(page, "alpha")).toContainText("No open finding");
+      await expect(row(page, "alpha")).toHaveCount(0);
+      await expect(page.locator("[data-sonner-toast]").filter({ hasText: "Dismissed finding for Repeated warning in alpha." }).first()).toBeVisible();
       await expect(row(page, "beta")).toContainText("0 of 3 dismissals");
       expect(requests).toEqual([
         { finding_id: "alpha-newest", check_id: "noise", project: "alpha" },
@@ -125,4 +124,23 @@ test("keeps failures actionable and handles no open findings and empty problem l
   await page.reload();
   await expect(page.getByTestId("home-problem")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Dismiss finding for/ })).toHaveCount(0);
+});
+
+
+test("preserves actionable error feedback when the target disappears during refresh", async ({ page }) => {
+  const data = await fixture(page);
+  let requests = 0;
+  await page.route("**/api/insights/dismiss", async route => {
+    requests++;
+    data.problems = [];
+    await route.fulfill({ status: 409, json: { error: "PRIVATE server detail must not appear in persistent feedback" } });
+  });
+  await open(page, "home");
+  await row(page, "alpha").getByRole("button").click();
+  await expect(page.getByTestId("home-problem")).toHaveCount(0);
+  const feedback = page.locator("[data-sonner-toast]").filter({ hasText: "Could not dismiss finding for Repeated warning in alpha." });
+  await expect(feedback).toBeVisible();
+  await expect(feedback).toContainText("Review the refreshed Home row and try again.");
+  await expect(feedback).not.toContainText("PRIVATE");
+  expect(requests).toBe(1);
 });

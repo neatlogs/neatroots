@@ -19,8 +19,7 @@ export function ProblemRow({ problem, project, threshold }: { problem: Problem; 
     busy.current = true;
     setMessage(undefined);
     try {
-      await dismiss.mutateAsync({ finding_id: id!, check_id: problem.check_id, project: project.project! });
-      setMessage({ error: false, text: `Dismissed finding in ${project.name}.` });
+      await dismiss.mutateAsync({ finding_id: id!, check_id: problem.check_id, project: project.project!, check_title: problem.title, project_name: project.name });
     } catch (error) {
       setMessage({ error: true, text: (error as Error).message });
     } finally {
