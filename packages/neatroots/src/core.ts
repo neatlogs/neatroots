@@ -113,6 +113,7 @@ export class Roots {
   close(): void {
     clearInterval(this.sweeper);
     this.laya.stop();
+    this.chats.cancelPreflights();
     this.store.close();
   }
 }

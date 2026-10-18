@@ -6,11 +6,10 @@ import path from "node:path";
 import type { Roots } from "../core.js";
 import { findClient, clientStatus, listClients } from "../mcp/clients.js";
 import { log } from "../util/log.js";
+import { codexPermissionArgs, codexServerNames, validateChatPermissions } from "./codex-permissions.js";
 
-// Claude Code and Codex inside the app. Each turn runs the agent's own CLI headless in the
-// user's project folder (claude -p --output-format stream-json; codex exec --json), resuming
-// the same agent session, with neatroots' MCP server attached. Events are normalised, stored and
-// streamed to the app. Read-only unless the user allows edits or commands for the session.
+// In-app agent CLIs resume sessions in the project folder with neatroots MCP attached.
+// Events are stored and streamed; filesystem and command permissions are opt-in.
 
 export type ChatAgent = "claude" | "codex";
 
@@ -115,10 +114,7 @@ export function signInHelp(agent: ChatAgent, message: string): string | null {
   return `${name} couldn't sign in, so it never reached neatroots. ${how}\n\n${message.trim().slice(0, 600)}`;
 }
 
-/**
- * Signals an agent CLI and everything it started (tools, MCP servers): each turn runs in its own
- * process group, so its children don't outlive a Stop.
- */
+/** Signal the agent's process group, including its tools and MCP servers. */
 function signalGroup(p: ChildProcess, signal: NodeJS.Signals): void {
   try {
     if (p.pid) process.kill(-p.pid, signal);
@@ -142,10 +138,7 @@ function groupAlive(p: ChildProcess): boolean {
   }
 }
 
-/**
- * Asks the agent's group to stop, then kills whatever is left 3 s later. The deadline doesn't depend
- * on the turn still running: a tool that ignores SIGTERM can outlive the CLI that started it.
- */
+/** Stop the group, then kill survivors after 3 s even if the agent has already exited. */
 function endGroup(p: ChildProcess): void {
   signalGroup(p, "SIGTERM");
   setTimeout(() => {
@@ -156,6 +149,13 @@ function endGroup(p: ChildProcess): void {
 export class AgentChats {
   private readonly running = new Map<string, ChildProcess>();
   private readonly stopping = new Set<string>();
+  private readonly preflights = new Map<string, AbortController>();
+
+  /** Abort only configuration discovery before Roots closes its store. */
+  cancelPreflights(): void {
+    for (const controller of this.preflights.values()) controller.abort();
+    this.preflights.clear();
+  }
 
   constructor(private readonly roots: Roots) {
     roots.store.db.exec(SCHEMA);
@@ -201,6 +201,7 @@ export class AgentChats {
   private row = (r: Record<string, unknown>): ChatSession => ({ ...(r as unknown as ChatSession), allow_edits: !!r.allow_edits, allow_commands: !!r.allow_commands });
 
   create(opts: { agent: ChatAgent; cwd?: string; trace_id?: string | null; allow_edits?: boolean; allow_commands?: boolean; title?: string }): ChatSession {
+    validateChatPermissions(opts);
     const cwd = opts.cwd?.trim() || (opts.trace_id ? this.roots.config.rerun[this.roots.store.getRun(opts.trace_id)?.project ?? ""]?.cwd : undefined) || os.homedir();
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error(`no such folder: ${cwd}`);
     const now = Date.now();
@@ -226,6 +227,8 @@ export class AgentChats {
   update(id: string, patch: Partial<Pick<ChatSession, "allow_edits" | "allow_commands" | "title" | "agent_session_id" | "state">>): ChatSession {
     const s = this.get(id);
     if (!s) throw new Error("no such chat");
+    validateChatPermissions(patch);
+    if (s.state === "running" && (patch.allow_edits !== undefined || patch.allow_commands !== undefined)) throw new Error("Stop the current message before changing permissions.");
     const next = { ...s, ...patch, updated_ms: Date.now() };
     this.roots.store.db
       .prepare("UPDATE chat_sessions SET title = ?, allow_edits = ?, allow_commands = ?, agent_session_id = ?, state = ?, updated_ms = ? WHERE id = ?")
@@ -240,6 +243,14 @@ export class AgentChats {
   }
 
   stop(id: string): boolean {
+    const preflight = this.preflights.get(id);
+    if (preflight) {
+      preflight.abort();
+      this.preflights.delete(id);
+      this.emit(id, { kind: "status", text: "Stopped" });
+      this.ended(id, "idle");
+      return true;
+    }
     const p = this.running.get(id);
     if (!p) return false;
     this.stopping.add(id);
@@ -247,10 +258,7 @@ export class AgentChats {
     return true;
   }
 
-  /**
-   * The turn is over (the agent process closed). Its result event arrives a moment earlier, so an
-   * open chat that refetched on the result can still have read "running"; this tells it to look again.
-   */
+  /** Notify chats to refetch state after the agent closes, later than its result event. */
   private ended(id: string, state: "idle" | "error"): void {
     if (!this.get(id)) return;
     this.update(id, { state });
@@ -270,15 +278,31 @@ export class AgentChats {
   async send(id: string, text: string): Promise<void> {
     const s = this.get(id);
     if (!s) throw new Error("no such chat");
-    if (this.running.has(id)) throw new Error("the agent is still answering; stop it or wait");
+    if (this.running.has(id) || this.preflights.has(id)) throw new Error("the agent is still answering; stop it or wait");
     const bin = agentBin(s.agent);
     if (!bin) throw new Error(`${s.agent === "claude" ? "Claude Code (claude)" : "Codex (codex)"} isn't installed, or neatroots can't find it. Set NEATROOTS_${s.agent.toUpperCase()}_BIN to its path.`);
+    let codexNames: string[] = [];
+    if (s.agent === "codex") {
+      const controller = new AbortController();
+      this.preflights.set(id, controller);
+      this.update(id, { state: "running" });
+      try {
+        codexNames = await codexServerNames(bin, s.cwd, controller.signal);
+        if (controller.signal.aborted || !this.roots.store.db.open || !this.get(id)) return;
+      } catch (error) {
+        if (controller.signal.aborted || !this.roots.store.db.open || !this.get(id)) return;
+        this.ended(id, "error");
+        throw error;
+      } finally {
+        if (this.preflights.get(id) === controller) this.preflights.delete(id);
+      }
+    }
     this.emit(id, { kind: "user", text });
     const first = !s.agent_session_id;
     if (first && s.title === "New chat") this.update(id, { title: text.slice(0, 60) });
     const prompt = first ? this.preamble(s) + text : text;
     this.update(id, { state: "running" });
-    const { args } = s.agent === "claude" ? this.claudeArgs(s, prompt) : this.codexArgs(s, prompt);
+    const { args } = s.agent === "claude" ? this.claudeArgs(s, prompt) : this.codexArgs(s, prompt, codexNames);
     log.debug(`chat ${id}: ${bin} ${args.slice(0, -1).join(" ")}`);
     const child = spawn(bin, args, { cwd: s.cwd, env: { ...process.env, NEATLOGS_ENDPOINT: `http://localhost:${this.roots.config.port}` }, stdio: ["ignore", "pipe", "pipe"], detached: true });
     this.running.set(id, child);
@@ -368,15 +392,11 @@ export class AgentChats {
     return { cmd: "claude", args };
   }
 
-  private codexArgs(s: ChatSession, prompt: string): { cmd: string; args: string[] } {
-    const mode = s.allow_edits || s.allow_commands ? "workspace-write" : "read-only";
+  private codexArgs(s: ChatSession, prompt: string, serverNames: string[]): { cmd: string; args: string[] } {
     const args = ["exec"];
-    // `codex exec resume` rejects --sandbox; every codex takes the same setting as a -c override.
-    if (s.agent_session_id) args.push("resume", s.agent_session_id, "--json", "--skip-git-repo-check", "-c", `sandbox_mode="${mode}"`);
-    else args.push("--json", "--skip-git-repo-check", "--sandbox", mode);
-    const client = findClient("codex");
-    if (!client || !clientStatus(client).connected) args.push("-c", `mcp_servers.neatroots.url="${this.mcpUrl()}"`);
-    // A message can start with "-" (a pasted list, a diff line); without `--` codex reads it as a flag.
+    if (s.agent_session_id) args.push("resume", s.agent_session_id);
+    args.push("--json", "--skip-git-repo-check", "--strict-config", ...codexPermissionArgs(s, serverNames, this.mcpUrl()));
+    // A pasted diff or list can start with a dash.
     args.push("--", prompt);
     return { cmd: "codex", args };
   }
