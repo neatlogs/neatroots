@@ -509,6 +509,7 @@ export function mountApi(app: Hono, roots: Roots): void {
 
   // Small helper for the UI: which spans changed since a sequence number.
   app.get("/api/runs/:traceId/snapshot", (c) => {
+    if (!roots.store.getRun(c.req.param("traceId"))) return err(c, 404, "run not found");
     const snap = loadTrace(roots.store, c.req.param("traceId"));
     return c.json({ spans: snap.spans.map((s) => ({ id: s.id, kind: s.kind, name: s.name, status: s.status })) });
   });
