@@ -26,6 +26,8 @@ import { log } from "./util/log.js";
 
 const program = new Command();
 program.name("neatroots").description("neatroots: local, private checks for AI agents while they run").version(VERSION);
+// Root options only before the command, so `neatroots update --version <tag>` reaches update.
+program.enablePositionalOptions();
 
 // ------------------------------------------------------------------- start
 

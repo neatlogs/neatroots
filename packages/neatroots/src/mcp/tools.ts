@@ -3,7 +3,7 @@ import { checkWarnings } from "../checks/lint.js";
 import type { Roots } from "../core.js";
 import { runDetail, runSummary, spanDetail, checkFromInput } from "../server/api.js";
 import { draftCheckFromConcern, askRuns } from "../engine/assist.js";
-import { checkToYaml } from "../checks/registry.js";
+import { checkToYaml, checkDirState } from "../checks/registry.js";
 import { newId } from "../util/ids.js";
 import type { Plain } from "../otlp/types.js";
 
@@ -356,7 +356,7 @@ export const TOOLS = [
     name: "create_check",
     title: "Create check",
     description:
-      "Add a check. Give either `concern` (plain language; the local LLM writes the question) or `check` (YAML or JSON in neatroots check format). Set save=false to only draft it. Saved checks go to ~/.neatroots/checks or a registered project directory.",
+      "Add a check. Give either `concern` (plain language; the local LLM writes the question) or `check` (YAML or JSON in neatroots check format). Set save=false to only draft it. Saved checks go to ~/.neatroots/checks or a registered project directory. Halt rules can't be saved or changed here: save a rule with action: flag, and the user can switch it to halt in the app or CLI.",
     input: {
       concern: z.string().optional(),
       check: z.string().optional().describe("YAML or JSON check definition"),
@@ -376,6 +376,12 @@ export const TOOLS = [
       } else throw new Error("give concern or check");
       if (a.save === false) return { saved: false, id: check.id, yaml: checkToYaml(check), warnings: checkWarnings(check) };
       if (a.dir && !roots.config.checkDirs.includes(a.dir)) throw new Error("dir must be a registered project checks directory (neatroots init registers one)");
+      if (a.dir) {
+        // Save creates a registered directory that isn't there yet; only a path a save can't make is
+        // an error here.
+        const state = checkDirState(a.dir);
+        if (!state.ok && !state.creatable) throw new Error(`that checks directory ${state.reason}`);
+      }
       const saved = roots.checks.save(check, a.dir ? { dir: a.dir } : "user", "mcp");
       return { saved: true, id: saved.check.id, path: saved.path, yaml: checkToYaml(saved.check), warnings: checkWarnings(saved.check) };
     },

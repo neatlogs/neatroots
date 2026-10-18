@@ -6,10 +6,11 @@ import { loadTrace } from "../src/engine/trace.js";
 import { evaluateRule } from "../src/checks/rules.js";
 import { parseChecks } from "../src/checks/registry.js";
 import type { RuleCheck } from "../src/checks/types.js";
-import { batch, hex, tmpHome, toolSpan } from "./helpers.js";
+import { batch, closeTrackedStores, hex, tmpHome, toolSpan, trackedStore } from "./helpers.js";
 
 const homes: string[] = [];
 afterEach(() => {
+  closeTrackedStores();
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 const rule = parseChecks(fs.readFileSync(new URL("../library/rules.yaml", import.meta.url), "utf8")).checks.find((c) => c.id === "soft-tool-failure") as RuleCheck;
@@ -63,9 +64,13 @@ function fires(output: string): boolean {
   const h = tmpHome();
   homes.push(h);
   const st = new Store(path.join(h, "data"));
-  const t = hex(16);
-  st.ingest([batch([toolSpan(t, hex(8), "lookup", '{"q":"x"}', output)])]);
-  return evaluateRule(rule, loadTrace(st, t), false)?.firing === true;
+  try {
+    const t = hex(16);
+    st.ingest([batch([toolSpan(t, hex(8), "lookup", '{"q":"x"}', output)])]);
+    return evaluateRule(rule, loadTrace(st, t), false)?.firing === true;
+  } finally {
+    st.close();
+  }
 }
 
 describe("soft-tool-failure", () => {
@@ -92,7 +97,7 @@ describe("soft-tool-failure", () => {
   it("ignores spans that failed, which tool-error-streak already covers", () => {
     const h = tmpHome();
     homes.push(h);
-    const st = new Store(path.join(h, "data"));
+    const st = trackedStore(path.join(h, "data"));
     const t = hex(16);
     st.ingest([batch([toolSpan(t, hex(8), "lookup", "{}", '{"error":"boom"}', "boom")])]);
     expect(evaluateRule(rule, loadTrace(st, t), false)).toBeNull();
@@ -101,7 +106,7 @@ describe("soft-tool-failure", () => {
   it("fires on failure-looking output when span status is unset (code 0)", () => {
     const h = tmpHome();
     homes.push(h);
-    const st = new Store(path.join(h, "data"));
+    const st = trackedStore(path.join(h, "data"));
     const t = hex(16);
     const sp = toolSpan(t, hex(8), "lookup", "{}", '{"error":"rate limit exceeded"}');
     sp.status = { code: 0 };

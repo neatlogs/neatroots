@@ -6,17 +6,20 @@ import { clientStatus, connectClient, disconnectClient, findClient } from "../sr
 
 const cmd = { command: "/opt/neatroots/bin/neatroots", args: ["mcp"] };
 let home: string;
-const saved = { HOME: process.env.HOME, PATH: process.env.PATH };
+const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, PATH: process.env.PATH };
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-clients-"));
   process.env.HOME = home;
+  if (process.platform === "win32") process.env.USERPROFILE = home;
   process.env.PATH = "";
 });
 
 afterEach(() => {
-  process.env.HOME = saved.HOME;
-  process.env.PATH = saved.PATH;
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   fs.rmSync(home, { recursive: true, force: true });
 });
 

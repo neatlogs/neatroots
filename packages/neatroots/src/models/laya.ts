@@ -174,6 +174,8 @@ export class LayaManager {
   }
 
   private async start(): Promise<void> {
+    // Two callers can both get here after one install (Download clicked twice): start one server.
+    if (this.child) return;
     this.stopping = false;
     this.set({ state: "starting", message: "Loading the typed-decisions checkpoint", progress: null, url: null });
     const out = fs.openSync(path.join(this.dir, "serve.log"), "a");

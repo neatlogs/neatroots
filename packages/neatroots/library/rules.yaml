@@ -69,7 +69,7 @@
 
 - id: unrecovered-tool-failure
   kind: rule
-  group: loop
+  group: tool-result
   title: A tool call failed and the run still ended with an answer
   rule:
     type: unrecovered_error

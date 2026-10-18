@@ -220,6 +220,13 @@ def test_halt_note_raises(stub):
         neatroots_steer.apply([{"role": "user", "content": "q"}])
 
 
+def test_note_ignored_when_steering_off(stub):
+    stub.mode = "off"
+    stub.notes[:] = [{"id": "h", "kind": "halt", "text": "Your rule says stop.", "finding_id": None}]
+    msgs = [{"role": "user", "content": "q"}]
+    assert neatroots_steer.apply(msgs) == msgs
+
+
 def test_one_slow_reply_does_not_hold_back_a_halt(stub):
     stub.notes[:] = []
     stub.slow[:] = [1.2]  # longer than the hook waits

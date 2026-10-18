@@ -4,6 +4,7 @@ import { getCloudToken } from "../../relay/keychain.js";
 import { log } from "../../util/log.js";
 import { cloudApiBase, neatlogsCloudSource, type CloudAuth } from "./neatlogs-cloud.js";
 import { ImportError, type ImportSource } from "./types.js";
+import { endpointProblem } from "../../relay/endpoint.js";
 
 export { parseTraceFile } from "./file.js";
 
@@ -14,7 +15,11 @@ export async function cloudImportAuth(roots: Roots): Promise<CloudAuth | undefin
 }
 
 export function cloudImportBase(roots: Roots): string {
-  return cloudApiBase(roots.relay.endpoint(), roots.config.cloud.apiBase);
+  const base = cloudApiBase(roots.relay.endpoint(), roots.config.cloud.apiBase);
+  // The service-account token goes to this base: same rule as forwarding a key.
+  const problem = endpointProblem(base, !!roots.config.cloud.trustEndpoint);
+  if (problem) throw new ImportError(problem);
+  return base;
 }
 export { ImportError } from "./types.js";
 export type { ImportSource, ImportField } from "./types.js";

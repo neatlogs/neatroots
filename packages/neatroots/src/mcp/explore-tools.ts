@@ -1,4 +1,3 @@
-import Database from "better-sqlite3";
 import { z } from "zod";
 import type { Roots } from "../core.js";
 import { loadTrace, type SpanInfo } from "../engine/trace.js";
@@ -6,6 +5,7 @@ import { listCloudTraces, NO_CLOUD_TOKEN } from "../ingest/importers/neatlogs-cl
 import { cloudImportAuth, cloudImportBase } from "../ingest/importers/index.js";
 import { preview } from "../semantics/view.js";
 import { runSummary } from "../server/api.js";
+import { runReadonlySql } from "./sql-runner.js";
 import { clip, def, fallbackNote, resolveSpan, resolveTrace, resolveTraceNoting, type ToolDef } from "./tools.js";
 
 // Tools for exploring runs: where a span sits, finding things inside one run, conversations
@@ -23,15 +23,6 @@ const brief = (s: SpanInfo) => ({
 });
 
 const SQL_TABLES = "runs, spans, sessions, findings, decisions, explanations, notes, summaries, annotations, logs, checks, plans, replays";
-
-let readonlyDb: { file: string; db: Database.Database } | undefined;
-function readonly(roots: Roots): Database.Database {
-  if (readonlyDb?.file !== roots.store.file) {
-    readonlyDb?.db.close();
-    readonlyDb = { file: roots.store.file, db: new Database(roots.store.file, { readonly: true, fileMustExist: true }) };
-  }
-  return readonlyDb.db;
-}
 
 export const EXPLORE_TOOLS = [
   def({
@@ -67,7 +58,11 @@ export const EXPLORE_TOOLS = [
       const byId = new Map(t.spans.map((s) => [s.id, s]));
       const span = byId.get(id)!;
       const ancestors: SpanInfo[] = [];
-      for (let p = span.parentId ? byId.get(span.parentId) : undefined; p; p = p.parentId ? byId.get(p.parentId) : undefined) ancestors.unshift(p);
+      const seen = new Set<string>([id]);
+      for (let p = span.parentId ? byId.get(span.parentId) : undefined; p && !seen.has(p.id); p = p.parentId ? byId.get(p.parentId) : undefined) {
+        seen.add(p.id);
+        ancestors.unshift(p);
+      }
       const siblings = t.spans.filter((s) => s.parentId === span.parentId).sort((x, y) => x.startMs - y.startMs);
       const children = t.spans.filter((s) => s.parentId === id).sort((x, y) => x.startMs - y.startMs);
       const withIo = (s: SpanInfo) => ({ ...brief(s), input: clip(preview(s.input, 300), 300), output: clip(preview(s.output, 300), 300) });
@@ -186,22 +181,15 @@ export const EXPLORE_TOOLS = [
   def({
     name: "query_sql",
     title: "Read-only SQL",
-    description: `Run one read-only SQLite SELECT over the local store (tables: ${SQL_TABLES}). Times are ms since the epoch. Use it for questions the other tools don't answer, e.g. "which tool failed most this week". At most 200 rows come back; truncated is true when there were more.`,
+    description: `Run one read-only SQLite SELECT over the local store (tables: ${SQL_TABLES}). Times are ms since the epoch. Use it for questions the other tools don't answer, e.g. "which tool failed most this week". At most 200 rows come back; truncated is true when there were more. A query that runs longer than 5 s is stopped with an error.`,
     readOnly: true,
     input: { sql: z.string().min(1) },
     run: async (roots, a) => {
       const sql = a.sql.trim().replace(/;+\s*$/, "");
       if (!/^(select|with)\b/i.test(sql) || /;/.test(sql)) throw new Error("only a single SELECT (or WITH … SELECT) statement is allowed");
-      const stmt = readonly(roots).prepare(sql);
-      if (!stmt.reader) throw new Error("only queries that return rows are allowed");
-      // Step through rows and stop one past the cap: all() would run the whole query first, so a
-      // huge or unbounded one (e.g. a recursive CTE) blocks the event loop or never returns.
-      const rows: Record<string, unknown>[] = [];
-      for (const r of stmt.iterate() as IterableIterator<Record<string, unknown>>) {
-        rows.push(r);
-        if (rows.length > 200) break;
-      }
-      return { rows: rows.slice(0, 200).map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, typeof v === "string" ? clip(v, 2000) : v]))), truncated: rows.length > 200 };
+      // Runs in a child process with a time limit: an aggregate or ORDER BY over an unbounded
+      // recursive CTE computes everything before its first row, so a row cap alone can't stop it.
+      return runReadonlySql(roots.store.file, sql);
     },
   }),
   def({
