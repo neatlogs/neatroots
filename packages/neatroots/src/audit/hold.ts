@@ -5,7 +5,7 @@ import type { RunRow } from "../types.js";
 import { buildView } from "../semantics/view.js";
 import { kvToPlain } from "../otlp/types.js";
 import { projectSettings } from "../config.js";
-import { AuditArchive, snapshot } from "./archive.js";
+import { ArchiveUnavailableError, AuditArchive, snapshot } from "./archive.js";
 import { readFile, sha256 } from "./files.js";
 import { verifyArchive } from "./manifest.js";
 import { log } from "../util/log.js";
@@ -18,6 +18,7 @@ export class AuditHold {
   private timer?: NodeJS.Timeout;
   private cursor = "";
   private readonly failures = new Map<string, string>();
+  private sweep?: { archiveFailed: boolean };
   private readonly unsubscribe: (() => void)[] = [];
   private readonly interval: NodeJS.Timeout;
 
@@ -52,16 +53,28 @@ export class AuditHold {
     return undefined;
   }
 
+  /** A negative archive result is shared only within this synchronous retention sweep. */
+  withinSweep(work: () => number): number {
+    const previous = this.sweep;
+    this.sweep = { archiveFailed: false };
+    try { return work(); } finally { this.sweep = previous; }
+  }
+
   /** Synchronous: no ingest or check callback can interleave verification and deletion. */
   beforeDelete(traceId: string): void {
     const run = this.roots.store.getRun(traceId);
     if (!run || !this.covered(run)) return;
     const reason = this.reason(run);
     if (reason) throw new Error(`audit hold: ${reason}`);
+    if (this.sweep?.archiveFailed) {
+      this.failed(traceId);
+      throw new Error(`audit hold: ${this.failures.get(traceId)}`);
+    }
     try {
       this.archive.ensure(traceId, this.directory());
       this.failures.delete(traceId);
     } catch (e) {
+      if (this.sweep && e instanceof ArchiveUnavailableError) this.sweep.archiveFailed = true;
       // Paths/hashes are useful; never echo a parser's potentially private payload text.
       this.failures.set(traceId, "archive could not be written or verified; inspect the local archive directory and permissions");
       log.warn(`audit archive failed for ${traceId}: local write or verification failed`);

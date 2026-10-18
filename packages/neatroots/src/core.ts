@@ -79,6 +79,7 @@ export class Roots {
     }
     this.audit = new AuditHold(this);
     this.store.deletionGuard = (id) => this.audit.beforeDelete(id);
+    this.store.sweepScope = (work) => this.audit.withinSweep(work);
     this.store.afterDelete = (ids) => {
       this.audit.forgotten(ids);
       for (const id of ids) {
