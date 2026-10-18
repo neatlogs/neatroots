@@ -97,3 +97,40 @@ test("connection refreshes active run evidence and document teardown stops pendi
   await page.waitForTimeout(400);
   expect(details).toBe(afterTeardown);
 });
+
+for (const kind of ["list", "detail"] as const) {
+  test(`${kind} connection replaces an in-flight pre-subscription snapshot`, async ({ page }) => {
+    await transport(page);
+    const updated = `after subscription gap ${kind} ${Date.now()}`;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let captured!: () => void;
+    const snapshotCaptured = new Promise<void>(resolve => { captured = resolve; });
+    let requests = 0;
+    let changed = false;
+    const pathname = kind === "list" ? "/api/runs" : `/api/runs/${state().supportRun}`;
+    await page.route(url => url.pathname === pathname, async route => {
+      const first = ++requests === 1;
+      const response = await route.fetch();
+      const json = await response.json();
+      // Keep the real detail schema, but control the server-side version of its title.
+      if (kind === "detail") json.run.input_preview = changed ? updated : "before subscription gap";
+      if (first) {
+        captured();
+        await held;
+      }
+      await route.fulfill({ response, json });
+    });
+    await open(page, kind === "list" ? "runs" : `runs/${state().supportRun}`);
+    await snapshotCaptured;
+    if (kind === "list") await ingest(updated);
+    changed = true;
+    await signal(page, "open");
+    release();
+    const result = kind === "list"
+      ? page.getByRole("cell", { name: updated })
+      : page.getByRole("heading", { name: updated });
+    await expect(result).toBeVisible();
+    expect(requests).toBeGreaterThanOrEqual(2);
+  });
+}

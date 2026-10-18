@@ -33,13 +33,21 @@ export function useLiveEvents(): { connected: boolean; spanTick: number } {
       // Keep a fixed window so a busy stream cannot postpone refresh indefinitely.
       timer ??= setTimeout(flush, 300);
     };
+    const reconcile = async () => {
+      const filters = [runKeys.lists(), runKeys.details()].map((queryKey) => ({ queryKey, type: "active" as const }));
+      // Invalidation alone reuses an initial request without cached data. Cancel it
+      // first so the replacement reads state from after the subscription opened.
+      await Promise.all(filters.map((filter) => qc.cancelQueries(filter)));
+      if (closed) return;
+      await Promise.all(filters.map((filter) => qc.invalidateQueries(filter)));
+    };
     const open = () => {
       es = new EventSource("/api/events");
       es.onopen = () => {
+        if (closed) return;
         setConnected(true);
         // Events have no replay cursor: reconcile the subscription gap on every open.
-        void qc.invalidateQueries({ queryKey: runKeys.lists() });
-        void qc.invalidateQueries({ queryKey: runKeys.details(), type: "active" });
+        void reconcile();
       };
       es.onerror = () => {
         setConnected(false);
