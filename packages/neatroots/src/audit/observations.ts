@@ -18,11 +18,11 @@ function stamp(directory: string): string | null {
 
 /** Local observations are hints for status, never deletion receipts. Cold starts are unknown. */
 class ArchiveObservations {
-  private last?: { directory: string; at: number; ok: boolean; stamp: string | null;
-    seq: number; head: string | null; entries: number; runs: number; bytes: number; totalsKnown: boolean };
+  private readonly observed = new Map<string, { directory: string; at: number; ok: boolean; stamp: string | null;
+    seq: number; head: string | null; entries: number; runs: number; bytes: number; totalsKnown: boolean }>();
   constructor(private readonly store: Store) {
     store.db.exec(`CREATE TEMP TABLE audit_status_versions(trace_id TEXT PRIMARY KEY, version INTEGER NOT NULL);
-      CREATE TEMP TABLE audit_status_snapshots(trace_id TEXT PRIMARY KEY, version INTEGER NOT NULL, directory TEXT NOT NULL, bytes INTEGER NOT NULL);
+      CREATE TEMP TABLE audit_status_snapshots(trace_id TEXT NOT NULL, version INTEGER NOT NULL, directory TEXT NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY(trace_id,directory));
       CREATE TEMP TABLE audit_status_errors(trace_id TEXT PRIMARY KEY);`);
     // Revisions catch direct local SQL edits too, without serializing evidence on status reads.
     for (const table of ["runs", "spans", "findings", "decisions", "explanations", "summaries", "annotations", "check_progress"]) {
@@ -52,19 +52,27 @@ class ArchiveObservations {
 
   verified(directory: string, report: Verification): void {
     const normalized = path.resolve(directory);
-    const prior = this.last?.directory === normalized ? this.last : undefined;
-    this.last = { directory: normalized, at: Date.now(), ok: report.ok, stamp: stamp(normalized),
+    const prior = this.observed.get(normalized);
+    this.observed.delete(normalized);
+    this.observed.set(normalized, { directory: normalized, at: Date.now(), ok: report.ok, stamp: stamp(normalized),
       seq: report.ok ? report.seq : prior?.seq ?? 0, head: report.ok ? report.head : prior?.head ?? null,
       entries: report.ok ? report.entries.length : prior?.entries ?? 0,
       runs: report.ok ? new Set(report.entries.map(e => e.trace_id)).size : prior?.runs ?? 0,
-      bytes: report.ok ? report.archive_bytes : prior?.bytes ?? 0, totalsKnown: report.ok || !!prior?.totalsKnown };
+      bytes: report.ok ? report.archive_bytes : prior?.bytes ?? 0, totalsKnown: report.ok || !!prior?.totalsKnown });
+    // Arbitrary local export destinations must not grow status memory indefinitely.
+    // Eviction only forgets an observation; it never grants deletion permission.
+    if (this.observed.size > 16) {
+      const oldest = this.observed.keys().next().value!;
+      this.observed.delete(oldest);
+      this.store.db.prepare("DELETE FROM audit_status_snapshots WHERE directory=?").run(oldest);
+    }
   }
   failed(directory: string): void {
     this.verified(directory, { ok: false, entries: [], seq: 0, head: "", errors: [], archive_bytes: 0 });
   }
   snapshot(id: string, directory: string, bytes: number): void {
     this.store.db.prepare(`INSERT INTO audit_status_snapshots VALUES (?,COALESCE((SELECT version FROM audit_status_versions WHERE trace_id=?),0),?,?)
-      ON CONFLICT(trace_id) DO UPDATE SET version=excluded.version,directory=excluded.directory,bytes=excluded.bytes`).run(id, id, path.resolve(directory), bytes);
+      ON CONFLICT(trace_id,directory) DO UPDATE SET version=excluded.version,bytes=excluded.bytes`).run(id, id, path.resolve(directory), bytes);
     this.store.db.prepare("DELETE FROM audit_status_errors WHERE trace_id=?").run(id);
   }
   clearError(id: string): void { this.store.db.prepare("DELETE FROM audit_status_errors WHERE trace_id=?").run(id); }
@@ -72,7 +80,7 @@ class ArchiveObservations {
 
   status(directory: string, projects: string[], namedUnknown: string[], engine: boolean, pending: string[]) {
     const normalized = path.resolve(directory);
-    const last = this.last?.directory === normalized ? this.last : undefined;
+    const last = this.observed.get(normalized);
     const sameFiles = !!last?.ok && last.stamp !== null && stamp(normalized) === last.stamp;
     const progress = this.store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='check_progress'").get()
       ? "EXISTS (SELECT 1 FROM check_progress p WHERE p.trace_id=r.trace_id)" : "0";

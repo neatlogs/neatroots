@@ -105,15 +105,19 @@ retention/delete policy. Plan archive disk capacity separately.
 `neatroots audit status` (or `GET /api/audit/status`) reports covered live runs,
 held runs, current archived live runs, historical archived runs/version entries,
 failures and hold reasons, and `seq`/`head`. `held_bytes` and `archived_live_bytes`
-are the current serialized OTLP plus sidecar bytes, excluding SQLite/index overhead
-and shared-blob attribution. If a corrupt/missing payload cannot be serialized, its
-run is counted as held but its unknown snapshot bytes are not included.
-`live_store_bytes` is the store's existing database-plus-blob accounting used for
-retention. `archive_bytes` counts all verified bundle and manifest file bytes,
-including historical versions, excluding filesystem metadata. Status is read-only
-and reports no span/sidecar content. It re-verifies the archive, so large histories
-can make status and deletion slow. Local permissions and the threat model below
+use the last observed serialized snapshot size while local revisions match, otherwise
+an inline metadata estimate that excludes offloaded payloads and shared-blob attribution.
+Retention uses database-plus-blob accounting; status `live_store_bytes` reports allocated
+SQLite pages only. `archive_bytes` is the last successfully observed bundle and manifest
+size, including historical versions and excluding filesystem metadata; totals remain
+unknown until a successful observation. Status is read-only and reports no span/sidecar
+content. It does not re-verify archive contents. Explicit verification and archive operations
+inspect contents, so large histories can still make deletion slow. Local permissions and the threat model below
 still apply; the hold cannot prevent another same-user program deleting files.
+
+Observations and snapshot measurements are scoped to their archive directory. The process
+retains the 16 most recently observed directories; older entries become unknown rather
+than verified. None of these cached observations authorizes deletion.
 
 The existing Settings API accepts `audit_enabled` (boolean), `audit_directory`
 (absolute path or empty for default), and `project` plus `audit` (boolean, or null to
