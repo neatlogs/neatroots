@@ -1,4 +1,11 @@
-# Code of conduct
+# Proposed community code of conduct
+
+Status: proposal for maintainer review; not an adopted project policy.
+
+Adoption requires verified private reporting contacts: a primary contact and an
+alternate for conflicts of interest. Maintainers must establish those contacts,
+update the reporting instructions, and approve promotion of this document to the
+root `CODE_OF_CONDUCT.md` before it becomes the project code of conduct.
 
 neatroots welcomes people with different backgrounds, identities, abilities, and
 levels of experience. Everyone taking part should be able to ask questions,
@@ -47,7 +54,7 @@ GitHub's rules; contacting it does not initiate a neatroots enforcement review.
 
 ## Project response
 
-Project stewardship follows [MAINTAINERS.md](MAINTAINERS.md). Under this proposal,
+Project stewardship follows [MAINTAINERS.md](../../MAINTAINERS.md). Under this proposal,
 maintainers and the core team are responsible for addressing conduct in spaces
 they manage, using the moderation tools available to them.
 
