@@ -90,7 +90,9 @@ export class ReplayBatches {
 
   private associate(id: string): void {
     const trace = this.evidence.uniqueTrace(id);
-    if (trace) this.roots.replays.associateBatch(id, trace);
+    // Keep legacy fallback navigation when no explicit claim arrived. Once claims
+    // exist, ambiguity must invalidate navigation as well as the batch summary.
+    if (trace || this.evidence.hasEvidence(id)) this.roots.replays.associateBatch(id, trace);
   }
 
   start(traceId: string, times: unknown, overrides: ReplayOverrides = {}): { batch: BatchSummary; done: Promise<BatchSummary> } {
@@ -140,7 +142,13 @@ export class ReplayBatches {
       // Existing replay timeout plus the telemetry flush window. Stop dispatch if it fails to settle;
       // this watchdog does not assert that the child process has terminated.
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const result = await Promise.race([done, this.stopped, new Promise<null>((resolve) => {
+      const completed = done.then((result) => {
+        // Completion can arrive after the watchdog returned. Reconcile its saved
+        // navigation then too; a late finish must not revive contested evidence.
+        if (!this.closed && this.roots.store.db.open) this.associate(replay.id);
+        return result;
+      });
+      const result = await Promise.race([completed, this.stopped, new Promise<null>((resolve) => {
         timer = setTimeout(() => resolve(null), 15 * 60_000 + 11_000);
       })]);
       clearTimeout(timer);

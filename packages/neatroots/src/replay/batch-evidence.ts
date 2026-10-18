@@ -89,6 +89,10 @@ export class BatchEvidence {
     return attempts;
   }
 
+  hasEvidence(id: string): boolean {
+    return !!this.store.db.prepare("SELECT 1 FROM replay_evidence WHERE replay_id=? LIMIT 1").get(id);
+  }
+
   uniqueTrace(id: string): string | null {
     const db = this.store.db;
     if (!db.prepare("SELECT 1 FROM replay_batch_members WHERE replay_id=? AND deleted=0").get(id)) return null;
