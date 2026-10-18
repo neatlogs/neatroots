@@ -59,10 +59,11 @@ function useDebounced<T>(v: T, ms: number): T {
 export function SearchPage({ query }: { query: URLSearchParams }) {
   const [q, setQ] = useState(query.get("q") ?? "");
   const routeQuery = query.get("q") ?? "";
-  const [previousRoute, setPreviousRoute] = useState(routeQuery);
+  const [previousQuery, setPreviousQuery] = useState(query);
   const [syncing, setSyncing] = useState(false);
-  if (previousRoute !== routeQuery) {
-    setPreviousRoute(routeQuery);
+  // A navigation is authoritative even when its text matches the last route.
+  if (previousQuery !== query) {
+    setPreviousQuery(query);
     setQ(routeQuery);
     setSyncing(true);
   }
@@ -75,7 +76,7 @@ export function SearchPage({ query }: { query: URLSearchParams }) {
     if (syncing) { if (dq === q) setSyncing(false); return; }
     const next = dq ? `search?q=${encodeURIComponent(dq)}` : "search";
     if (window.location.hash !== `#/${next}`) window.history.replaceState(null, "", `#/${next}`);
-  }, [dq, q, routeQuery, syncing]);
+  }, [dq, q, query, syncing]);
   const { data, isFetching, error } = useQuery({
     queryKey: ["search", dq],
     queryFn: () => api<{ total: number; runs: SearchRun[]; query: { text: string; filters: Record<string, string> } }>(`/api/search/runs?q=${encodeURIComponent(dq)}&limit=60`),
