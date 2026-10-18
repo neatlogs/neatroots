@@ -412,7 +412,6 @@ export class Store {
   private readonly searchIds: SearchIds;
   private seq = 0;
   private sharedTrust?: TrustStore;
-  private flushTrust?: () => void;
   readonly dir: string;
   readonly file: string;
 
@@ -440,7 +439,6 @@ export class Store {
   }
 
   close(): void {
-    this.flushTrust?.();
     this.db.close();
   }
 
@@ -1447,25 +1445,35 @@ export class Store {
   /** Laya-vs-LLM agreement per question definition, persisted so trust survives restarts. */
   trustStore(): TrustStore {
     if (this.sharedTrust) return this.sharedTrust;
-    const initial = json<Record<string, unknown>>(this.getMeta("laya_trust"), {});
-    let timer: NodeJS.Timeout | undefined;
-    let pending: Record<string, StoredTrustRecord> | undefined;
-    const writeNow = () => {
-      clearTimeout(timer);
-      timer = undefined;
-      if (pending && this.db.open) {
-        this.setMeta("laya_trust", JSON.stringify(pending));
-        pending = undefined;
+    const current = () => json<Record<string, unknown>>(this.getMeta("laya_trust"), {});
+    let readRaw: string | undefined;
+    let readView: TrustStore | undefined;
+    const read = () => {
+      // Always check SQLite, but validate an unchanged snapshot only once. This view is never
+      // used for mutations: a rollback or another connection's reset must remain authoritative.
+      const raw = this.getMeta("laya_trust");
+      if (!readView || raw !== readRaw) {
+        readView = createTrustStore(json<Record<string, unknown>>(raw, {}));
+        readRaw = raw;
       }
+      return readView;
     };
-    this.flushTrust = writeNow;
-    this.sharedTrust = createTrustStore(initial, data => {
-      if (!this.db.open) return;
-      pending = data;
-      clearTimeout(timer);
-      timer = setTimeout(writeNow, 1000);
-      timer.unref();
+    // Read and update under one writer transaction: another Store's observations must not
+    // be replaced by a snapshot captured when this handle was first opened.
+    const update = this.db.transaction((operation: (trust: TrustStore) => void) => {
+      let changed: Record<string, StoredTrustRecord> | undefined;
+      const trust = createTrustStore(current(), data => { changed = data; });
+      operation(trust);
+      if (changed) this.setMeta("laya_trust", JSON.stringify(changed));
     });
+    this.sharedTrust = {
+      get: q => this.db.open ? read().get(q) : { n: 0, agree: 0 },
+      all: () => this.db.open ? read().all() : {},
+      record: (q, agreed) => {
+        if (this.db.open && typeof q !== "string") update.immediate(trust => trust.record(q, agreed));
+      },
+      activate: q => { if (this.db.open) update.immediate(trust => trust.activate?.(q)); },
+    };
     return this.sharedTrust;
   }
 
