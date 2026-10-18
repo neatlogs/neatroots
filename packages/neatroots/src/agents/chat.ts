@@ -52,11 +52,11 @@ const EDIT_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
 const RERUN_TOOLS = ["mcp__neatroots__rerun", "mcp__neatroots_app__rerun"];
 
 /** Where agent CLIs get installed when they aren't on the PATH neatroots was started with. */
-function candidateDirs(): string[] {
+function candidateDirs(systemDirs = ["/opt/homebrew/bin", "/usr/local/bin"]): string[] {
   const h = os.homedir();
   const nvm = path.join(h, ".nvm", "versions", "node");
   const nvmBins = fs.existsSync(nvm) ? fs.readdirSync(nvm).sort().reverse().map((v) => path.join(nvm, v, "bin")) : [];
-  return [path.join(h, ".local", "bin"), path.join(h, ".claude", "local"), "/opt/homebrew/bin", "/usr/local/bin", path.join(h, ".bun", "bin"), path.join(h, ".volta", "bin"), path.join(h, ".npm-global", "bin"), ...nvmBins];
+  return [path.join(h, ".local", "bin"), path.join(h, ".claude", "local"), ...systemDirs, path.join(h, ".bun", "bin"), path.join(h, ".volta", "bin"), path.join(h, ".npm-global", "bin"), ...nvmBins];
 }
 
 /** CLIs that ship inside a desktop app: ChatGPT's Codex. */
@@ -75,13 +75,13 @@ const isExec = (f: string) => {
 };
 
 /** The agent's CLI: NEATROOTS_<AGENT>_BIN, the PATH, the usual install folders, then a desktop app's copy. */
-export function agentBin(agent: ChatAgent): string | null {
+export function agentBin(agent: ChatAgent, systemDirs?: string[]): string | null {
   const override = process.env[`NEATROOTS_${agent.toUpperCase()}_BIN`];
   if (override) return isExec(override) ? override : null;
   const r = spawnSync("sh", ["-c", `command -v ${agent}`], { encoding: "utf8" });
   const found = r.status === 0 ? r.stdout.trim() : "";
   if (found && isExec(found)) return found;
-  for (const d of candidateDirs()) if (isExec(path.join(d, agent))) return path.join(d, agent);
+  for (const d of candidateDirs(systemDirs)) if (isExec(path.join(d, agent))) return path.join(d, agent);
   return APP_BINS[agent].find(isExec) ?? null;
 }
 
