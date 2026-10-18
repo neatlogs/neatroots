@@ -46,9 +46,7 @@ export function buildChat(t: TraceSnapshot, rootSpanId?: string): { root: string
 
   // Walk the subtree in time order, stopping at nested agents. Parent links come from outside and
   // can loop (A's parent is B, B's is A), so each span is visited once.
-  // An LLM call can be the entire run, without a workflow wrapper. Read its
-  // messages and tool calls through the same path as nested LLM calls.
-  const inScope: SpanInfo[] = root.kind === "LLM" ? [root] : [];
+  const inScope: SpanInfo[] = [];
   const visited = new Set<string>([root.id]);
   const walk = (s: SpanInfo) => {
     for (const c of children.get(s.id) ?? []) {
@@ -60,6 +58,9 @@ export function buildChat(t: TraceSnapshot, rootSpanId?: string): { root: string
     }
   };
   walk(root);
+  // An LLM root may wrap a child call recording the same conversation. Use the
+  // root's messages only when no child LLM in this scope supplies them.
+  if (root.kind === "LLM" && !inScope.some((s) => s.kind === "LLM")) inScope.push(root);
   inScope.sort((a, b) => a.startMs - b.startMs || a.seq - b.seq);
   const hasTools = inScope.some((s) => s.kind === "TOOL" || s.kind === "MCP_TOOL");
   const count = (s: SpanInfo, kind: string, seen = new Set<string>([s.id])): number =>

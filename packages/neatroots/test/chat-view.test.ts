@@ -74,6 +74,55 @@ describe("an agent step whose tool call the SDK didn't record", () => {
 });
 
 describe("a run whose root span is the LLM call", () => {
+  it.each(["", "0123456789abcdef"])("uses the child conversation without duplicating its wrapper reply with parent %j", async (parent) => {
+    t = await makeRoots({ serve: true, noEngine: true });
+    const tid = hex(16);
+    const root = hex(8);
+    const child = hex(8);
+    const attrs = [
+      s("neatlogs.llm.model_name", "mock"),
+      ...msgAttrs("input_messages", [{ role: "system", content: "Be concise." }, { role: "user", content: "Hello" }]),
+      ...msgAttrs("output_messages", [{ role: "assistant", content: "Hello back." }]),
+    ];
+    t.roots.ingest([batch([
+      span({ traceId: tid, spanId: root, parent, name: "llm-wrapper", kind: "llm", attrs }),
+      span({ traceId: tid, spanId: child, parent: root, name: "llm-child", kind: "llm", attrs }),
+    ])]);
+    for (const selection of ["", `?agent=${root}`, `?agent=${child}`]) {
+      const response = await fetch(`${t.url}/api/runs/${tid}/chat${selection}`);
+      expect(response.status).toBe(200);
+      const chat = await response.json();
+      expect(chat.items).toMatchObject([
+        { type: "system", text: "Be concise.", span_id: child },
+        { type: "user", text: "Hello", span_id: child },
+        { type: "assistant", text: "Hello back.", span_id: child },
+      ]);
+      expect(chat.items).toHaveLength(3);
+    }
+  });
+
+  it("keeps the root conversation when the only child LLM belongs to a nested agent", async () => {
+    t = await makeRoots({ noEngine: true });
+    const tid = hex(16);
+    const root = hex(8);
+    const agent = hex(8);
+    t.roots.ingest([batch([
+      span({ traceId: tid, spanId: root, name: "root-llm", kind: "llm", attrs: [
+        ...msgAttrs("input_messages", [{ role: "user", content: "Root request" }]),
+        ...msgAttrs("output_messages", [{ role: "assistant", content: "Root reply" }]),
+      ] }),
+      span({ traceId: tid, spanId: agent, parent: root, name: "nested-agent", kind: "agent" }),
+      span({ traceId: tid, parent: agent, name: "nested-llm", kind: "llm", attrs: [
+        ...msgAttrs("output_messages", [{ role: "assistant", content: "Nested reply" }]),
+      ] }),
+    ])]);
+    expect(buildChat(loadTrace(t.roots.store, tid)).items).toMatchObject([
+      { type: "user", text: "Root request", span_id: root },
+      { type: "assistant", text: "Root reply", span_id: root },
+      { type: "agent", span_id: agent },
+    ]);
+  });
+
   it.each(["", "0123456789abcdef"])("keeps message roles and tool calls with parent %j", async (parent) => {
     t = await makeRoots({ noEngine: true });
     const tid = hex(16);
