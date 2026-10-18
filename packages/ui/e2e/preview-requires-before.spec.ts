@@ -25,7 +25,8 @@ test("rule preview shows a satisfied prerequisite as evaluated with no hit", asy
       "rule:", "  type: requires_before", "  span: { tool: refund }", "  requires: { tool: lookup }", "",
     ].join("\n"));
     await sheet.getByRole("button", { name: "Preview on recent runs" }).click();
-    await expect(sheet.getByText("Fires on 1 of 2 evaluated runs · hit rate 50%")).toBeVisible();
+    await expect(sheet.getByText("Fires on 1 of 2 runs with a verdict · hit rate 50%")).toBeVisible();
+    await expect(sheet.getByText("Deterministic rule preview; a question second look does not apply.")).toBeVisible();
     await expect(sheet.getByRole("button", { name: "prerequisite-satisfied: Evaluated; no hit", exact: true })).toBeVisible();
     await expect(sheet.getByRole("button", { name: "prerequisite-missing: Fired", exact: true })).toBeVisible();
     await expect(sheet.getByText(/runs were not evaluated/)).toHaveCount(0);

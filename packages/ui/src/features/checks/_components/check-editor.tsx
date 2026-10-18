@@ -8,7 +8,6 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Textarea } from "@/components/ui/textarea";
 import { api, type Status } from "@/lib/api";
 import { pct } from "@/lib/format";
-import { go } from "@/lib/router";
 import { appKeys } from "../../runs/_services/run-keys";
 import { useCheckActions, type PreviewResult } from "../_services/check-queries";
 
@@ -17,6 +16,11 @@ const aborted = (e: unknown) => (e as Error)?.name === "AbortError";
 function reasonLabel(reason?: string): string {
   switch (reason) {
     case "no_hit": return "Evaluated; no hit";
+    case "target_limit": return "Only the latest five matching targets were considered";
+    case "hit": return "Stopped after the first hit";
+    case "running": return "Filtered: run still running";
+    case "applies_to": return "Filtered: outside check scope";
+    case "limit": return "Filtered: selected-run limit";
     case "no_evidence": return "No evidence for this check";
     case "model_error": return "Judge error";
     case "aborted": return "Preview canceled";
@@ -44,6 +48,7 @@ export function CheckEditor({ open, initialYaml, userDir, onClose }: { open: boo
   const [concern, setConcern] = useState("");
   const [yaml, setYaml] = useState(initialYaml);
   const [preview, setPreview] = useState<PreviewResult>();
+  const [selectedResult, setSelectedResult] = useState<{ trace_id: string; label: string }>();
   const [warnings, setWarnings] = useState<string[]>([]);
   const ctrl = useRef<AbortController | null>(null);
   const waiting = a.draft.isPending || a.preview.isPending;
@@ -134,39 +139,57 @@ export function CheckEditor({ open, initialYaml, userDir, onClose }: { open: boo
           {preview && (
             <div className="flex flex-col gap-1.5 rounded-lg bg-surface-subtle px-3 py-2.5">
               <span className="text-sm text-foreground tabular-nums">
-                Fires on {preview.hits.length} of {preview.checked} evaluated runs · hit rate {pct(preview.hit_rate)}
-                {preview.truncated ? ` (stopped early; ${preview.total} available)` : ""}
+                Fires on {preview.hits.length} of {preview.checked} runs with a verdict · hit rate {pct(preview.hit_rate)}
+                {preview.truncated ? ` (stopped early; ${preview.total} selected)` : ""}
               </span>
+              {preview.evaluation_mode && <span className="text-xs text-muted-foreground">
+                {preview.evaluation_mode === "deterministic_rule"
+                  ? "Deterministic rule preview; a question second look does not apply."
+                  : "Question preview skips the live second look. A preview hit may not become a live finding."}
+              </span>}
+              {preview.selection && <span className="text-xs text-muted-foreground">
+                Selected {preview.selection.selected_count} of {preview.selection.candidate_count} candidates from a window of at most {preview.selection.candidate_limit} recent runs within the requested project/workflow.
+                {preview.selection.window_full ? " More runs may exist outside this window." : ""}
+              </span>}
               {notEvaluated > 0 && (
                 <span className="text-xs text-muted-foreground">
                   {notEvaluated} of {preview.total} runs were not evaluated: {notEvaluatedSummary(preview.skipped, preview.errors)}.
                 </span>
               )}
               {preview.checked > 0 && preview.hits.length === 0 && (
-                <span className="text-xs text-muted-foreground">It did not fire on the evaluated runs. If you expected a hit, check that the evidence includes what the question asks about.</span>
+                <span className="text-xs text-muted-foreground">It did not fire on the sampled targets. If you expected a hit, check that the evidence includes what the question asks about.</span>
               )}
-              <div className="flex max-h-40 flex-col overflow-y-auto">
-                {preview.results.map((result) => {
+              <div className="flex h-40 flex-col overflow-y-auto" aria-label="Preview run results">
+                {[...preview.results, ...(preview.filtered_results ?? [])].map((result) => {
                   const hit = hitsByRun.get(result.trace_id);
-                  const label = result.status === "hit"
-                    ? "Fired"
-                    : reasonLabel(result.reason);
+                  const verdict = result.status === "hit" ? "Fired" : reasonLabel(result.reason);
+                  const evaluation = result.evaluation;
+                  const label = evaluation && !evaluation.complete
+                    ? `${verdict}; partial: ${evaluation.targets_evaluated}/${evaluation.targets_available} targets judged (${reasonLabel(evaluation.stop_reason)})`
+                    : verdict;
                   return (
                   <button
                     key={result.trace_id}
                     type="button"
                     aria-label={`${result.root_name ?? result.trace_id}: ${label}`}
-                    onClick={() => go(`runs/${result.trace_id}`)}
-                    className="flex h-7 shrink-0 cursor-pointer items-center gap-2 text-left text-xs text-muted-foreground hover:text-foreground"
+                    aria-expanded={selectedResult?.trace_id === result.trace_id}
+                    onClick={() => setSelectedResult({ trace_id: result.trace_id, label })}
+                    className="flex h-16 shrink-0 cursor-pointer flex-col justify-center gap-1 text-left text-xs text-muted-foreground hover:text-foreground"
                   >
-                    <span className="font-mono">{result.trace_id.slice(0, 8)}</span>
-                    <span className="truncate">{result.root_name ?? "Run"}</span>
-                    <span className="ml-auto max-w-[48%] truncate" title={label}>{label}</span>
-                    {hit?.probability !== null && hit?.probability !== undefined && <span className="tabular-nums">{pct(hit.probability)}</span>}
+                    <span className="flex w-full min-w-0 items-center gap-2">
+                      <span className="font-mono">{result.trace_id.slice(0, 8)}</span>
+                      <span className="truncate">{result.root_name ?? "Run"}</span>
+                      {hit?.probability !== null && hit?.probability !== undefined && <span className="ml-auto tabular-nums">{pct(hit.probability)}</span>}
+                    </span>
+                    <span className="line-clamp-2 leading-4" title={label}>{label}</span>
                   </button>
                   );
                 })}
               </div>
+              {selectedResult && <div role="region" aria-label="Preview result detail" className="h-28 overflow-y-auto border-t border-border pt-2 text-xs">
+                <p className="whitespace-normal break-words text-foreground">{selectedResult.label}</p>
+                <a className="mt-2 inline-block underline underline-offset-4" href={`#/runs/${selectedResult.trace_id}`}>Open run</a>
+              </div>}
             </div>
           )}
         </div>
@@ -187,6 +210,7 @@ export function CheckEditor({ open, initialYaml, userDir, onClose }: { open: boo
                 {
                   onSuccess: (r) => {
                     setPreview(r);
+                    setSelectedResult(undefined);
                     setWarnings(r.warnings ?? []);
                   },
                   onError: (e) => !aborted(e) && toast.error(`Couldn't preview the check: ${(e as Error).message}`),

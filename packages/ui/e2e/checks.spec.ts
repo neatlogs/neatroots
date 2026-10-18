@@ -69,7 +69,7 @@ test.describe("checks", () => {
     const sheet = page.getByRole("dialog");
     await sheet.getByRole("textbox", { name: "Check (YAML)" }).fill("id: preview-example\nkind: yes_no\nscope: span\nask: Did the agent do something risky?\nflag_at: 0.8\n");
     await sheet.getByRole("button", { name: "Preview on recent runs" }).click();
-    await expect(sheet.getByText("Fires on 1 of 2 evaluated runs · hit rate 50%")).toBeVisible();
+    await expect(sheet.getByText("Fires on 1 of 2 runs with a verdict · hit rate 50%")).toBeVisible();
     await expect(sheet.getByText("2 of 4 runs were not evaluated: 1 had no evidence, 1 had a judge error.")).toBeVisible();
     await expect(sheet.getByRole("button", { name: /skipped-run: No evidence for this check/ })).toBeVisible();
     await expect(sheet.getByRole("button", { name: /error-run: Judge error$/ })).toBeVisible();

@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { DecisionUnavailableError } from "../src/models/decision.js";
+import { previewCheck } from "../src/engine/preview.js";
+import { flagged } from "../src/engine/engine.js";
+import { DecisionUnavailableError, parseJevAnswer } from "../src/models/decision.js";
 import type { QuestionCheck, RuleCheck } from "../src/checks/types.js";
 import { batch, hex, llmSpan, makeRoots, markerSpan, span, toolSpan, type TestRoots } from "./helpers.js";
 
@@ -57,6 +59,8 @@ function expectFullyAccounted(result: { checked: number; skipped: Record<string,
 
 function expectMixed(result: any): void {
   expect(result).toMatchObject({
+    second_look: false,
+    evaluation_mode: "question_without_second_look",
     checked: 2,
     total: 4,
     hit_rate: 0.5,
@@ -182,7 +186,9 @@ describe("preview verdict accounting", () => {
     expect(calls).toBe(2);
     expect(result).toMatchObject({ checked: 1, total: 1, skipped: {}, errors: {} });
     expect(result.hits).toHaveLength(1);
-    expect(result.results[0]).toMatchObject({ status: "hit" });
+    expect(result.results[0]).toMatchObject({ status: "hit", evaluation: {
+      targets_available: 3, targets_attempted: 2, targets_evaluated: 1, complete: false, stop_reason: "hit",
+    } });
     expectFullyAccounted(result);
   });
 
@@ -246,9 +252,135 @@ describe("preview verdict accounting", () => {
     };
 
     const result = await tb.roots.engine!.previewCheck(check);
-    expect(result).toMatchObject({ checked: 1, total: 1, skipped: {}, errors: {}, truncated: false });
+    expect(result).toMatchObject({ checked: 1, total: 1, skipped: {}, errors: {}, truncated: false, second_look: false, evaluation_mode: "deterministic_rule" });
     expect(result.hits).toHaveLength(1);
     expect(result.results[0]).toMatchObject({ status: "hit" });
     expectFullyAccounted(result);
+  });
+});
+
+describe("preview transparency", () => {
+  it("reports capped targets without extra decisions or claiming complete evaluation", async () => {
+    const tb = await makeRoots(); cleanup.push(() => tb.close());
+    addRunWithQuestionTargets(tb, "capped", 7);
+    const decide = vi.fn(async () => ({ answers: { [question.id]: { probability: 0.1 } }, backend: "fixture", model: "fixture" }));
+    stubDecide(tb, decide);
+    const result = await tb.roots.engine!.previewCheck(question);
+    expect(decide).toHaveBeenCalledTimes(5);
+    expect(result).toMatchObject({ checked: 1, second_look: false, evaluation_mode: "question_without_second_look" });
+    expect(result.results[0]).toMatchObject({ status: "clear", evaluation: {
+      targets_available: 7, targets_considered: 5, targets_attempted: 5, targets_evaluated: 5, complete: false, stop_reason: "target_limit",
+    } });
+  });
+
+  it("reports a short-circuit hit as partial without a second look", async () => {
+    const tb = await makeRoots(); cleanup.push(() => tb.close());
+    addRunWithQuestionTargets(tb, "early-hit", 3);
+    const decide = vi.fn(async () => ({ answers: { [question.id]: { probability: 0.95 } }, backend: "fixture", model: "fixture" }));
+    stubDecide(tb, decide);
+    const result = await tb.roots.engine!.previewCheck(question);
+    expect(decide).toHaveBeenCalledTimes(1);
+    expect(result.results[0]).toMatchObject({ status: "hit", evaluation: { targets_available: 3, targets_attempted: 1, complete: false, stop_reason: "hit" } });
+  });
+
+  it("records bounded status, scope and limit filtering without leaking request-excluded runs", async () => {
+    const tb = await makeRoots(); cleanup.push(() => tb.close());
+    const names = ["chosen", "over-limit", "running", "wrong-scope", "private"];
+    names.forEach((name, index) => {
+      const id = addRun(tb, name);
+      tb.roots.store.db.prepare("UPDATE runs SET project = ?, workflow = ?, status = ?, started_ms = ? WHERE trace_id = ?")
+        .run(name === "private" ? "private" : "public", name === "wrong-scope" ? "other" : "eligible", name === "running" ? "running" : "ok", 500 - index, id);
+    });
+    const list = vi.spyOn(tb.roots.store, "listRuns");
+    const result = await tb.roots.engine!.previewCheck({ ...question, applies_to: { workflow: "eligible" } }, { project: "public", limit: 1, signal: AbortSignal.abort() });
+    expect(list).toHaveBeenCalledWith({ project: "public", workflow: undefined, limit: 500 });
+    expect(result.selection).toEqual({ candidate_limit: 500, candidate_count: 4, selected_count: 1, window_full: false });
+    expect(result.filtered_results.map((r) => r.reason).sort()).toEqual(["applies_to", "limit", "running"]);
+    expect(result.filtered_results).toHaveLength(3);
+    expect(JSON.stringify(result)).not.toContain("private-agent");
+    expect(result).toMatchObject({ total: 1, checked: 0, skipped: { aborted: 1 } });
+    const capped = await tb.roots.engine!.previewCheck(question, { project: "public", limit: 1000000, signal: AbortSignal.abort() });
+    expect(capped.selection.candidate_limit).toBe(200);
+  });
+});
+
+describe("usable preview verdicts", () => {
+  const choice: QuestionCheck = { ...question, kind: "choice", options: { good: "Good", bad: "Bad" }, flag_on: ["bad"], flag_at: 0.8 };
+  const score: QuestionCheck = { ...question, kind: "score", levels: ["Low", "Medium", "High"], flag_at_level: 1.5 };
+  it.each([
+    ["missing answer", question, undefined],
+    ["null answer", question, null],
+    ["missing probability", question, {}],
+    ["NaN probability", question, { probability: NaN }],
+    ["infinite probability", question, { probability: Infinity }],
+    ["negative probability", question, { probability: -0.1 }],
+    ["out of range probability", question, { probability: 1.1 }],
+    ["missing choice distribution", choice, { probability: 0.5 }],
+    ["incomplete choice distribution", choice, { probability: 0.5, distribution: { bad: 0.5 } }],
+    ["invalid choice distribution", choice, { probability: 0.5, distribution: { bad: NaN, good: 0.5 } }],
+    ["unnormalized choice distribution", choice, { probability: 0.5, distribution: { bad: 0.1, good: 0.1 } }],
+    ["missing score", score, { probability: 0.5 }],
+    ["invalid score", score, { probability: 0.5, score: NaN }],
+    ["out of range score", score, { probability: 0.5, score: 3 }],
+  ] as const)("does not call %s a checked negative", async (_name, check, answer) => {
+    const tb = await makeRoots(); cleanup.push(() => tb.close());
+    addRun(tb, "invalid");
+    const decide = vi.fn(async () => ({ answers: { [check.id]: answer }, backend: "fixture", model: "fixture" }));
+    stubDecide(tb, decide);
+    const result = await tb.roots.engine!.previewCheck(check);
+    expect(decide).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ checked: 0, errors: { model_error: 1 } });
+    expect(result.results[0]).toMatchObject({ status: "error", reason: "model_error", evaluation: { targets_attempted: 1, targets_evaluated: 0, complete: false } });
+    expect(JSON.stringify(result)).not.toContain("unusable preview verdict");
+  });
+  it.each([
+    [choice, { probability: 0.7, distribution: { good: 0.7, bad: 0.3 } }],
+    [score, { probability: 0.25, score: 0.5 }],
+  ] as const)("accepts a valid $0.kind verdict", async (check, answer) => {
+    const tb = await makeRoots(); cleanup.push(() => tb.close()); addRun(tb, "valid");
+    stubDecide(tb, async () => ({ answers: { [check.id]: answer }, backend: "fixture", model: "fixture" }));
+    const result = await tb.roots.engine!.previewCheck(check);
+    expect(result).toMatchObject({ checked: 1, errors: {} });
+    expect(result.results[0]).toMatchObject({ status: "clear", evaluation: { targets_evaluated: 1, complete: true } });
+  });
+  it("accepts and clamps the real parser's nine-option sum roundoff", async () => {
+    const tb = await makeRoots(); cleanup.push(() => tb.close()); addRun(tb, "nine-options");
+    const options = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [String(i), String(i)]));
+    const check: QuestionCheck = { ...choice, options, flag_on: Object.keys(options) };
+    const answer = parseJevAnswer({ name: check.id, type: "choice", ask: check.ask, options },
+      { probabilities: Object.fromEntries(Object.keys(options).map((key) => [key, 1])) });
+    const verdict = { answers: { [check.id]: answer }, backend: "fixture", model: "fixture", latencyMs: 0 };
+    expect(flagged(check, verdict).probability).toBeGreaterThan(1);
+    stubDecide(tb, async () => verdict);
+    const result = await tb.roots.engine!.previewCheck(check);
+    expect(result).toMatchObject({ checked: 1, errors: {} });
+    expect(result.hits[0].probability).toBe(1);
+    expect(result.results[0].evaluation).toMatchObject({ targets_evaluated: 1, complete: true });
+  });
+  it.each([-1e-13, 2 + 1e-13])("clamps score endpoint roundoff %s before flagging", async (value) => {
+    const tb = await makeRoots(); cleanup.push(() => tb.close()); addRun(tb, "score-endpoint");
+    const decide = vi.fn(async () => ({ answers: { [score.id]: { probability: 1, score: value } }, backend: "fixture", model: "fixture" }));
+    const callback = vi.fn((check, result) => flagged(check, result));
+    const result = await previewCheck(tb.roots, { decide } as any, score, {}, () => true,
+      () => ({ name: score.id, type: "score", ask: score.ask, levels: score.levels }), callback);
+    expect(result).toMatchObject({ checked: 1, errors: {} });
+    expect(callback.mock.calls[0][1].answers[score.id].score).toBe(value < 0 ? 0 : 2);
+  });
+  it.each([-0.001, 1.001, NaN, Infinity])("rejects invalid callback probability %s", async (value) => {
+    const tb = await makeRoots(); cleanup.push(() => tb.close()); addRun(tb, "bad-callback");
+    const decide = vi.fn(async () => ({ answers: { [question.id]: { probability: 0.5 } }, backend: "fixture", model: "fixture" }));
+    const result = await previewCheck(tb.roots, { decide } as any, question, {}, () => true,
+      () => ({ name: question.id, type: "yes_no", ask: question.ask }), () => ({ flagged: true, probability: value }));
+    expect(result).toMatchObject({ checked: 0, errors: { model_error: 1 } });
+    expect(result.results[0].evaluation?.targets_evaluated).toBe(0);
+  });
+  it("does not increment successful targets when the verdict callback throws", async () => {
+    const tb = await makeRoots(); cleanup.push(() => tb.close()); addRun(tb, "callback-error");
+    const decisions = { decide: vi.fn(async () => ({ answers: { [question.id]: { probability: 0.1 } }, backend: "fixture", model: "fixture" })) };
+    const result = await previewCheck(tb.roots, decisions as any, question, {}, () => true,
+      () => ({ name: question.id, type: "yes_no", ask: question.ask }), () => { throw new Error("private callback detail"); });
+    expect(result).toMatchObject({ checked: 0, errors: { model_error: 1 } });
+    expect(result.results[0].evaluation).toMatchObject({ targets_evaluated: 0, complete: false });
+    expect(JSON.stringify(result)).not.toContain("private callback detail");
   });
 });
