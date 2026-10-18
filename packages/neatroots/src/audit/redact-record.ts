@@ -2,11 +2,11 @@ import { CREDENTIAL_KINDS, redactString, type RedactionHit, type RedactionRule }
 
 /** Keep each JSON field's key available to the existing context-sensitive credential rules. */
 export function redactRecord(value: unknown, rules: RedactionRule[], hits: RedactionHit[], key?: string): unknown {
-  if (typeof value === "string") {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
     if (key !== undefined) {
       const contextual: RedactionHit[] = [];
       const credentialRules = rules.filter((rule) => CREDENTIAL_KINDS.includes(rule.kind) || rule.kind === "custom");
-      redactString(JSON.stringify({ [key]: value }), credentialRules, "audit sidecar field", contextual);
+      redactString(JSON.stringify({ [key]: typeof value === "bigint" ? value.toString() : value }), credentialRules, "audit sidecar field", contextual);
       // Named credentials may contain quotes/newlines or be shorter than the regex's minimum.
       // Classify the key with the same prefix-aware rules, without exposing the value in a label.
       if (!contextual.length) {
@@ -21,7 +21,7 @@ export function redactRecord(value: unknown, rules: RedactionRule[], hits: Redac
         return `[redacted:${contextual[0].kind}]`;
       }
     }
-    return redactString(value, rules, "audit sidecar string", hits);
+    return typeof value === "string" ? redactString(value, rules, "audit sidecar string", hits) : value;
   }
   if (Array.isArray(value)) return value.map((item) => redactRecord(item, rules, hits, key));
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([field, item]) => [

@@ -29,9 +29,12 @@ as ACL evidence. An existing Windows destination is inspected, never automatical
 repermissioned: inherited access, other allowed principals, or missing inheritable access
 for the current account produces an actionable error before any archive data is written.
 Choose a new destination or review the selected folder's Advanced Security settings;
-the command never changes permissions on unrelated existing contents. Symlinks in any
-directory component, traversal components, hard-linked archive files, filesystem roots,
-and unrelated directory contents are refused. Do not use a symlink alias for an archive.
+the command never changes permissions on unrelated existing contents. The selected archive
+directory cannot itself be a symlink. POSIX ancestors may use root-owned system aliases,
+such as macOS `/var` and `/tmp`, only when the link's parents and target path are also
+root-controlled (root-owned sticky temporary directories are supported). User-controlled
+aliases, unsafe target components, all native Windows directory links, traversal components,
+hard-linked archive files, filesystem roots, and unrelated directory contents are refused.
 File handles are fsynced on Windows as well as POSIX. POSIX directory fsync is also used;
 Node does not establish an equivalent native Windows directory-flush guarantee, so no
 equivalent power-loss guarantee for directory entries is claimed on Windows. Nothing here
@@ -72,7 +75,11 @@ engine enabled, findings are re-derived by the checks currently installed. Origi
 finding IDs and decisions are not restored. An imported run is never automatically
 forwarded to Neatlogs Cloud, even in a project with forwarding enabled; an explicit
 cloud-forward command remains available. Import provenance is stored beside the run,
-without modifying the imported spans or resources, and persists across restart. If a
+without modifying the imported spans or resources, and persists across restart. Only that
+local metadata establishes import provenance: a sender's `neatroots.import.source` field
+is preserved as data and cannot suppress configured forwarding. Older records with only
+that field have unknown provenance. Import metadata and span replacements commit together
+before replaced payloads are reclaimed or trace events are emitted. If a
 deleted run's old checks are still active, reimport fails with a retry message rather
 than mixing old check state with the new run. `--project` on import deliberately changes
 the project resource attributes, as it does for any other file import.
@@ -100,7 +107,8 @@ Span redaction uses the same configured rules, field coverage, and masked-hit pr
 as cloud forwarding. Every sidecar string value and key, including nested decision
 answers and explanation text, is passed through those rules too. JSON field names stay
 available to context-sensitive credential rules: a `password` or `client_secret` leaf is
-masked as a whole, including short values and escaped suffixes. Invalid rules fail
+masked as a whole, including short strings, numeric and boolean values, and escaped suffixes.
+Other primitive values retain their types. Invalid rules fail
 closed. Changed content/rules invalidate a preview token when the resulting bytes
 change. Redaction is pattern-based, not a guarantee that a file contains no confidential
 information: review the share files before sending them. In particular, the existing

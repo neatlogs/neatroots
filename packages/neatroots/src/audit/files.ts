@@ -2,10 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { windowsDirectoryAcl } from "./windows-acl.js";
+import { protectedSystemAlias } from "./system-alias.js";
 
 export const sha256 = (bytes: string | Buffer): string => crypto.createHash("sha256").update(bytes).digest("hex");
 
-/** Reject ambiguous paths and every existing symlink component, including the selected root. */
+/** Reject ambiguous paths and user-controlled links; only protected system ancestors may be aliases. */
 export function archiveDirectory(input: string, create = false): string {
   if (!input || input.includes("\0") || input.split(/[\\/]/).includes("..")) throw new Error("invalid archive directory");
   const dir = path.resolve(input);
@@ -15,7 +16,9 @@ export function archiveDirectory(input: string, create = false): string {
     current = path.join(current, part);
     try {
       const st = fs.lstatSync(current);
-      if (!st.isDirectory() || st.isSymbolicLink()) throw new Error(`unsafe archive directory component: ${current}`);
+      if (st.isSymbolicLink() ? current === dir || !protectedSystemAlias(current) : !st.isDirectory()) {
+        throw new Error(`unsafe archive directory component: ${current}`);
+      }
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT" || !create) throw e;
       fs.mkdirSync(current, { mode: 0o700 });
