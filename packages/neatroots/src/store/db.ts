@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS runs (
   updated_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS runs_started ON runs (started_ms DESC);
+-- The run list and Insights sort and filter by this expression; an index on started_ms alone can't serve them.
+CREATE INDEX IF NOT EXISTS runs_sort ON runs (COALESCE(started_ms, received_ms) DESC);
 CREATE INDEX IF NOT EXISTS runs_session ON runs (session_id);
 CREATE INDEX IF NOT EXISTS runs_workflow ON runs (workflow);
 CREATE INDEX IF NOT EXISTS runs_project ON runs (project);
