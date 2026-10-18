@@ -65,6 +65,30 @@ describe("engine", () => {
     ]);
   });
 
+  it("does not raise after a finding is dismissed during asynchronous verification", async () => {
+    const llm = await mockLlm({ delayMs: 100, yesWhen: ["carry on as if a tool call had succeeded"] });
+    const tb = await makeRoots({ llmUrl: llm.url });
+    cleanup.push(async () => {
+      await tb.close();
+      await llm.close();
+    });
+    const { t, root } = startRun(tb);
+    tb.roots.ingest([batch([toolSpan(t, root, "lookup_order", '{"order_id":"4512"}', undefined, "404")])]);
+    tb.roots.ingest([batch([llmSpan(t, root, { user: "continue", out: "Refunded order 4512." })])]);
+    const old = tb.roots.store.insertFinding({
+      trace_id: t, check_id: "ignored-tool-error", check_kind: "question", title: "Carried on", probability: 0.9,
+      status: "resolved", evidence_span_ids: [], detail: {}, model: "mock", triage_score: null, explanation_id: null,
+    });
+    tb.roots.ingest([batch([span({ traceId: t, spanId: root, name: "refund", kind: "workflow" }), markerSpan(t, root)])]);
+    await until(() => llm.requests.some((r) => r.response_format?.json_schema?.name === "verification"), 15_000);
+    tb.roots.store.updateFinding(old.id, { status: "dismissed" });
+    await tb.roots.engine!.waitIdle(t, 15_000);
+
+    expect(tb.roots.store.findingsForTrace(t).filter((item) => item.check_id === "ignored-tool-error")).toEqual([
+      expect.objectContaining({ id: old.id, status: "dismissed" }),
+    ]);
+  });
+
   it("delivers nothing once steering is turned off, a halt included", async () => {
     const { tb } = await setup();
     tb.roots.steering.setMode("test-agent", "advisory");

@@ -529,7 +529,8 @@ export class Engine {
     snap: TraceSnapshot,
     spanId: string | null,
   ): Promise<"unavailable" | void> {
-    if (this.roots.store.latestFindingFor(run.traceId, check.id)?.status === "dismissed") return;
+    const dismissed = () => this.roots.store.latestFindingFor(run.traceId, check.id)?.status === "dismissed";
+    if (dismissed()) return;
     let result: DecisionResult;
     try {
       result = await this.decisions.decide(evidence, [toQuestion(check, params)]);
@@ -540,6 +541,7 @@ export class Engine {
         this.decisionDown = true;
         return "unavailable";
       }
+      if (dismissed()) return;
       // A model error or timeout is a failed check, never a "no".
       const existing = this.roots.store.latestFindingFor(run.traceId, check.id);
       if (!existing || existing.status !== "failed") {
@@ -560,6 +562,7 @@ export class Engine {
       }
       return;
     }
+    if (dismissed()) return;
     const answer = result.answers[check.id];
     const verdict = flagged(check, result);
     this.roots.store.insertDecision({
@@ -589,6 +592,7 @@ export class Engine {
       // A second look, with a quote that must be in the run, before anything is raised.
       if ((run.rejected.get(check.id) ?? 0) >= 3) return;
       const check2 = check.kind === "yes_no" ? await verifyFlag(this.llm, fillTemplate(check.ask, params) || check.ask, evidence) : undefined;
+      if (dismissed()) return;
       if (check2 && !check2.verified) {
         run.rejected.set(check.id, (run.rejected.get(check.id) ?? 0) + 1);
         log.debug(`${check.id}: flag not confirmed on a second look${check2.quote ? ` (quote: ${clip(check2.quote, 80)})` : ""}`);
