@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { ResourceSpansBatch } from "../otlp/types.js";
-import { toBatches, toNs, type SpanNode } from "./build.js";
+import { hexId, toBatches, toNs, type SpanNode } from "./build.js";
 
 // The Neatlogs HTTP trace API (POST /v1/trace): one JSON tree per trace, no ids, nesting in
 // `children`. The Neatlogs Browser SDK sends the same shape. Field names follow the public docs.
@@ -101,12 +101,18 @@ function inferKind(n: HttpTraceNode, isRoot: boolean): string {
 }
 
 /** Converts one HTTP trace into OTLP spans. Throws HttpTraceError with field details when it's malformed. */
-export function httpTraceToBatches(body: unknown, fallbackProject = "http"): { batches: ResourceSpansBatch[]; traceId: string; spans: number } {
+/**
+ * stableIds: ids derived from the record itself (file imports), so importing the same file again
+ * updates its runs instead of adding copies. Live traffic gets random ids.
+ */
+export function httpTraceToBatches(body: unknown, fallbackProject = "http", opts: { stableIds?: boolean } = {}): { batches: ResourceSpansBatch[]; traceId: string; spans: number } {
   const errors: Record<string, string> = {};
   validate(body, "", errors);
   if (Object.keys(errors).length) throw new HttpTraceError("Validation error", errors);
   const root = body as HttpTraceNode;
-  const traceId = crypto.randomBytes(16).toString("hex");
+  const seed = opts.stableIds ? JSON.stringify(body) : undefined;
+  const traceId = seed ? hexId(seed, 16) : crypto.randomBytes(16).toString("hex");
+  let spanNo = 0;
   const nodes: SpanNode[] = [];
   const sessionId = root.session_id ?? root.sessionId;
   const userId = root.end_user_id ?? root.endUserId ?? root.user_id;
@@ -120,7 +126,7 @@ export function httpTraceToBatches(body: unknown, fallbackProject = "http"): { b
     startFallback: bigint,
     fallbackFromTrace: boolean,
   ): { start: bigint; end: bigint; fromTrace: boolean } => {
-    const spanId = crypto.randomBytes(8).toString("hex");
+    const spanId = seed ? hexId(`${seed}#${spanNo++}`, 8) : crypto.randomBytes(8).toString("hex");
     const ownStart = toNs(n.start);
     let start = ownStart ?? startFallback;
     let cursor = start;

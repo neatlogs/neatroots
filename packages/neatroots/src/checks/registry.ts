@@ -253,6 +253,7 @@ export class CheckRegistry {
    */
   save(check: Check, target: "user" | "db" | { dir: string }, source: CheckSource = "user"): LoadedCheck {
     const parsed = AnyCheck.parse(check) as Check;
+    if (source === "mcp") assertNoHaltFromAgent(parsed, this.checks.get(parsed.id)?.check);
     let p: string | null = null;
     if (target === "db") {
       this.store.upsertCheckRow({ id: parsed.id, kind: parsed.kind === "rule" ? "rule" : "question", source, path: null, body: checkToYaml(parsed) });
@@ -306,4 +307,14 @@ export class CheckRegistry {
     const precision = 1 - s.dismissed / s.hits;
     return { hits: s.hits, dismissed: s.dismissed, precision, noisy: s.hits >= 5 && precision < 0.4 };
   }
+}
+
+/**
+ * A halt rule stops the user's agent with the user's authority, so a coding agent (MCP) may not
+ * create one, turn a check into one, or change one the user made (#256).
+ */
+function assertNoHaltFromAgent(next: Check, current: Check | undefined): void {
+  const halts = (c: Check | undefined) => !!c && isRule(c) && c.action === "halt";
+  if (halts(next)) throw new Error("halt rules must be created or enabled by you in the app or CLI; save it with action: flag, and the user can switch it to halt in the app");
+  if (halts(current)) throw new Error(`"${next.id}" is a halt rule; halt rules must be created or changed by you in the app or CLI`);
 }

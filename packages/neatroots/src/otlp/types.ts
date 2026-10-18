@@ -94,8 +94,17 @@ export function anyToPlain(v: AnyValue | undefined): Plain {
 
 export function kvToPlain(kvs: KeyValue[] | undefined): Record<string, Plain> {
   const out: Record<string, Plain> = {};
-  for (const kv of kvs ?? []) out[kv.key] = anyToPlain(kv.value);
+  for (const kv of kvs ?? []) setOwn(out, kv.key, anyToPlain(kv.value));
   return out;
+}
+
+/**
+ * Sets a key that came from a trace as a plain own property. `obj[key] = value` with a key such
+ * as `__proto__` would replace the object's prototype instead (or, through a chain, the global
+ * one); defining it keeps the key and its value exactly as sent.
+ */
+export function setOwn(obj: Record<string, Plain>, key: string, value: Plain): void {
+  Object.defineProperty(obj, key, { value, writable: true, enumerable: true, configurable: true });
 }
 
 export function plainToAny(v: unknown): AnyValue {

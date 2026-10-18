@@ -99,6 +99,9 @@ describe("local finding reviews", () => {
     expect(reviewItem(st, b.finding.id)).toBeUndefined();
     expect(reviewItem(st, c.finding.id)!.state).toBe("correct");
     expect(st.db.prepare("SELECT COUNT(*) AS n FROM finding_reviews").get()).toEqual({ n: 1 });
+    expect(st.listRuns({ text: "lookup" }).map((r) => r.trace_id)).toEqual([c.trace]);
+    expect(st.db.prepare("SELECT trace_id, span_id FROM span_fts_ids").all()).toEqual([{ trace_id: c.trace, span_id: c.sp.spanId }]);
+    expect(st.db.prepare("SELECT trace_id, span_id FROM span_fts").all()).toEqual([{ trace_id: c.trace, span_id: c.sp.spanId }]);
     expect(st.db.pragma("foreign_key_check")).toEqual([]);
   });
 

@@ -83,8 +83,24 @@ function securityMiddleware(roots: Roots) {
   };
 }
 
+/**
+ * No other site may frame the app: a hidden frame could click through actions such as starting
+ * a coding-agent chat with shell commands. Set on every response, refusals included.
+ */
+async function frameHeaders(c: import("hono").Context, next: () => Promise<void>) {
+  await next();
+  try {
+    c.res.headers.set("content-security-policy", "frame-ancestors 'none'");
+    c.res.headers.set("x-frame-options", "DENY");
+    c.res.headers.set("x-content-type-options", "nosniff");
+  } catch {
+    /* a response with immutable headers (none today) keeps its own */
+  }
+}
+
 export function createApp(roots: Roots): Hono {
   const app = new Hono();
+  app.use("*", frameHeaders);
   app.use("*", securityMiddleware(roots));
   // Errors answer as JSON like every other API error: a bad request with its message, anything
   // unexpected as a 500 (logged, never with a stack in the response).
@@ -130,10 +146,18 @@ export function createApp(roots: Roots): Hono {
   return app;
 }
 
+function isLoopback(host: string): boolean {
+  return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(host.toLowerCase()) || host.startsWith("127.");
+}
+
 export function startServer(roots: Roots, app: Hono): Promise<ServerType> {
   return new Promise((resolve, reject) => {
     const server = serve({ fetch: app.fetch, port: roots.config.port, hostname: roots.config.host }, (info) => {
       log.info(`listening on http://localhost:${info.port}`);
+      if (!isLoopback(roots.config.host)) {
+        // The API has no login: anyone who can reach this address can read runs and start agent chats.
+        log.warn(`host is ${roots.config.host}, so neatroots is reachable from other machines on ${roots.config.host}:${info.port} with no login. Set host: 127.0.0.1 in config.yaml unless you mean this.`);
+      }
       resolve(server);
     });
     server.on("error", reject);

@@ -79,10 +79,11 @@ const headers = (a: CloudAuth): Record<string, string> => ({
 /** A refused credential gets a sentence about what to fix instead of the raw problem+json. */
 async function cloudJson<T>(url: string, init: RequestInit & { signal: AbortSignal }): Promise<T> {
   try {
-    return await getJson<T>(url, init);
+    return await getJson<T>(url, { ...init, redirect: "manual" });
   } catch (e) {
     const m = (e as Error).message;
     if (/ answered 401\b/.test(m)) throw new ImportError(`Neatlogs Cloud didn't accept the service-account token (401). Check it in Settings → Neatlogs Cloud; the project API key that sends runs can't read them.`);
+    if (/ answered 3\d\d\b/.test(m)) throw new ImportError(`${new URL(url).host} redirected; neatroots doesn't follow redirects with the service-account token, so set the API base to the final URL`);
     if (/ answered 403\b/.test(m)) throw new ImportError(`The service-account token can't read that Neatlogs Cloud project (403). Pick a project it has access to in Settings → Neatlogs Cloud.`);
     throw e;
   }
@@ -141,7 +142,7 @@ export async function fetchCloudTrace(base: string, auth: CloudAuth, traceId: st
   const spans = exp.data.spans;
   if (!trace || !Array.isArray(spans)) throw new ImportError("Neatlogs Cloud did not return the trace's spans");
   const payloads = await pool(spans, 4, (s) =>
-    getJson<{ data: { fields: { input?: Field; output?: Field; error?: Field } } }>(`${base}/traces/${id}/spans/${encodeURIComponent(s.spanId)}/payload?fields=input,output,error`, {
+    cloudJson<{ data: { fields: { input?: Field; output?: Field; error?: Field } } }>(`${base}/traces/${id}/spans/${encodeURIComponent(s.spanId)}/payload?fields=input,output,error`, {
       headers: headers(auth),
       signal,
     })

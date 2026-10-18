@@ -222,7 +222,8 @@ client = neatroots_steer.wrap(OpenAI())      # or Anthropic(); sync or async
 ```
 
 Modes: `advisory` (a note on the next LLM call), `gate` (each call waits up to 300 ms for pending
-checks), `self-check` (the agent gets `check_my_work`), and `halt` from rules you write. At most one
+checks), and `self-check` (the agent gets `check_my_work`). In any of them, rules you write with
+`action: halt` stop the run; with steering `off`, nothing is sent, halts included. At most one
 note per call and three per run. See [docs/steering.md](docs/steering.md).
 
 ## What leaves your machine
@@ -231,7 +232,7 @@ note per call and three per run. See [docs/steering.md](docs/steering.md).
 | --- | --- | --- |
 | Collector, checks, Laya, local LLM, store, app, MCP | On | Nothing |
 | Hosted LLM | Off | The run content each LLM task needs, minus secrets, to the provider you pick |
-| Jev cloud | Off | Span content a question needs, to api.typesafe.ai |
+| Jev cloud | Off | Span content a question needs, credentials removed, to api.typesafe.ai |
 | Neatlogs Cloud forward | Off | Runs you send, redacted first, to ingest.neatlogs.com |
 | Neatlogs Cloud import | Off | Requests to app.neatlogs.com with your service-account token |
 | Coding agents in the app | Off | Whatever Claude Code or Codex sends to their own providers |
