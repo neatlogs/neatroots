@@ -105,8 +105,8 @@ export class Roots {
   }
 
   /** Saves to this instance's own home (the one it was opened with), never another one. */
-  saveConfig(): void {
-    saveConfig(this.config, path.join(this.home, "config.yaml"));
+  saveConfig(candidate: RootsConfig = this.config): void {
+    saveConfig(candidate, path.join(this.home, "config.yaml"));
   }
 
   /** Applies retention now and every hour. */
