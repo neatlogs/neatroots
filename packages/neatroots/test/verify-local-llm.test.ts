@@ -1,9 +1,12 @@
 import http from "node:http";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { LlmClient } from "../src/models/llm.js";
 import { localEndpoint, verifyLocalLlm } from "../scripts/verify-local-llm.js";
 
 const cleanup: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const close of cleanup.splice(0)) await close(); });
+afterEach(async () => { vi.restoreAllMocks(); for (const close of cleanup.splice(0)) await close(); });
 
 async function server(mode = "ok") {
   const seen: any[] = [];
@@ -41,6 +44,7 @@ it("observes models, auto selection, explicit model, schema and token logprobs t
   const s = await server();
   const report = await verifyLocalLlm({ endpoint: s.endpoint, model: "mock-model", runtime: "mock fixture" });
   expect(report.passed).toBe(true);
+  expect(report.timeoutMs).toBe(45_000);
   expect(report.checks.auto.detail).toEqual({ resolvedModel: "mock-model" });
   expect(report.requests.filter(r => r.method === "POST")).toHaveLength(3);
   expect(s.seen.every(r => !r.headers.authorization)).toBe(true);
@@ -78,4 +82,41 @@ it.each(["missing", "redirect", "slow"] as const)("fails boundedly on %s without
   expect(report.passed).toBe(false);
   expect(s.seen.every(r => r.url === "/v1/models")).toBe(true);
   expect(report.requests.length).toBeLessThanOrEqual(1);
+});
+
+it("uses the selected budget for every chat instead of a hidden ten-second cap", async () => {
+  const s = await server();
+  const chat = vi.spyOn(LlmClient.prototype, "chat");
+  const report = await verifyLocalLlm({ endpoint: s.endpoint, model: "mock-model", runtime: "mock", timeoutMs: 12_000 });
+  expect(report.passed).toBe(true);
+  expect(chat).toHaveBeenCalledTimes(3);
+  for (const [, options] of chat.mock.calls) expect(options?.timeoutSec).toBe(12);
+  expect(report.timeoutMs).toBe(12_000);
+});
+
+it("keeps the shared deadline across chat phases", async () => {
+  const s = await server();
+  vi.spyOn(LlmClient.prototype, "chat").mockImplementation(async (_messages, options) => {
+    await new Promise<void>(resolve => {
+      if (options?.signal?.aborted) return resolve();
+      options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+    });
+    throw new Error("deadline");
+  });
+  const start = Date.now();
+  const report = await verifyLocalLlm({ endpoint: s.endpoint, model: "mock-model", runtime: "mock", timeoutMs: 150 });
+  expect(report.passed).toBe(false);
+  expect(Date.now() - start).toBeLessThan(1500);
+  expect(report.checks.logprobs.passed).toBe(false);
+});
+
+it.each([99, 45001, 600000, Infinity, NaN, 100.5])("rejects invalid API timeout %s", async timeoutMs => {
+  await expect(verifyLocalLlm({ endpoint: "http://127.0.0.1:1/v1", model: "mock", runtime: "mock", timeoutMs })).rejects.toThrow("100..45000");
+});
+
+it.each(["99", "45001", "600000", "NaN", "Infinity", "100.5", "invalid"])("rejects invalid CLI timeout %s", timeout => {
+  const script = fileURLToPath(new URL("../scripts/verify-local-llm.ts", import.meta.url));
+  const child = spawnSync(process.execPath, ["--import", "tsx", script, "--endpoint", "http://127.0.0.1:1/v1", "--model", "mock", "--runtime", "mock", "--timeout-ms", timeout], { encoding: "utf8", timeout: 5000 });
+  expect(child.status).toBe(2);
+  expect(child.stdout).toBe("");
 });

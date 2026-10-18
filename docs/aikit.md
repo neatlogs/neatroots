@@ -17,6 +17,11 @@ Docker, NVIDIA GPU access and a model cache. Its container example uses a mutabl
 Choose a model that fits your available GPU memory and follow its license/access terms.
 No other platform or GPU compatibility is established here.
 
+The linked guide includes a blanket WSL inbound-firewall allow command. Local
+loopback use does not require that blanket permission. If your network setup needs
+an inbound rule, restrict it to the required port and trusted source addresses;
+do not allow all inbound connections merely to follow this local setup.
+
 In your AIKit environment, the documented serving command is:
 
 ```sh
@@ -58,7 +63,11 @@ request recorder. It prints JSON containing the supplied runtime label, model li
 auto selection, basic chat, JSON-schema validation, token logprobs and each attempted
 request's parameters/status. This includes actual retries/downgrades made by the
 existing transport. It does not record headers or response text. The overall limit
-is 45 seconds, with bounded request count and body sizes.
+defaults to 45 seconds, with bounded request count and body sizes. Optional
+`--timeout-ms` selects an integer from 100 through 45000 milliseconds. Each chat
+request uses that budget, and a shared abort still limits the entire observation
+to the selected deadline; retries do not reset it. Lower values may reject a cold
+model before it answers.
 
 The verifier uses exit 0 when these observations pass, 1 when a probe fails, and 2
 for an invalid invocation; a package runner may wrap nonzero codes (pnpm reports 1

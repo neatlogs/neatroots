@@ -54,7 +54,7 @@ export async function verifyLocalLlm(options: VerificationOptions) {
     throw new Error("Supply a named --model and --runtime (version/image and model revision); auto is tested separately.");
   }
   const timeoutMs = options.timeoutMs ?? 45_000;
-  if (!Number.isFinite(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) throw new Error("timeoutMs must be 100..60000");
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 45_000) throw new Error("timeoutMs must be an integer in 100..45000");
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), timeoutMs);
   const requests: Observation[] = [];
@@ -99,7 +99,7 @@ export async function verifyLocalLlm(options: VerificationOptions) {
     const cfg = defaultConfig().llm;
     cfg.baseUrl = `http://127.0.0.1:${address.port}/v1`;
     cfg.model = "auto";
-    cfg.timeoutSec = Math.min(10, timeoutMs / 1000);
+    cfg.timeoutSec = timeoutMs / 1000;
     cfg.external.enabled = false;
     const auto = new LlmClient(cfg);
     const probe = await auto.probe(true);
@@ -114,7 +114,7 @@ export async function verifyLocalLlm(options: VerificationOptions) {
         try {
           const result = await client.chat([{ role: "user", content: name === "jsonSchema"
             ? 'Return only a JSON object with the single field "answer" set to "yes".' : "Reply with the single word yes." }], {
-            maxTokens: 64, temperature: 0, signal: abort.signal,
+            maxTokens: 64, temperature: 0, timeoutSec: timeoutMs / 1000, signal: abort.signal,
             ...(name === "jsonSchema" ? { schema: { name: "local_probe", schema: {
               type: "object", properties: { answer: { type: "string", enum: ["yes"] } }, required: ["answer"], additionalProperties: false,
             } } } : {}),
@@ -131,7 +131,7 @@ export async function verifyLocalLlm(options: VerificationOptions) {
     }
     return {
       kind: "local-endpoint-observation", runtimeDeclared: options.runtime, modelDeclared: options.model,
-      endpoint: endpoint.href, observedAt: new Date().toISOString(),
+      endpoint: endpoint.href, timeoutMs, observedAt: new Date().toISOString(),
       passed: ["models", "auto", "chat", "jsonSchema", "logprobs"].every(k => checks[k]?.passed),
       checks, requests,
       limitations: "Runtime/version labels are operator supplied. This does not verify installation identity, decision-model compatibility or calibration accuracy.",
@@ -144,7 +144,7 @@ export async function verifyLocalLlm(options: VerificationOptions) {
   }
 }
 
-const usage = "Usage: pnpm --filter @neatlogs/neatroots exec tsx scripts/verify-local-llm.ts --endpoint http://localhost:8000/v1 --model MODEL --runtime VERSION-AND-MODEL-REVISION";
+const usage = "Usage: pnpm --filter @neatlogs/neatroots exec tsx scripts/verify-local-llm.ts --endpoint http://localhost:8000/v1 --model MODEL --runtime VERSION-AND-MODEL-REVISION [--timeout-ms 100..45000]";
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const args = process.argv.slice(2);
   if (args.length === 1 && args[0] === "--help") console.log(usage);
@@ -152,11 +152,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     try {
       const values: Record<string, string> = {};
       for (let i = 0; i < args.length; i += 2) {
-        if (!["--endpoint", "--model", "--runtime"].includes(args[i]) || !args[i + 1] || values[args[i]]) throw new Error(usage);
+        if (!["--endpoint", "--model", "--runtime", "--timeout-ms"].includes(args[i]) || !args[i + 1] || values[args[i]]) throw new Error(usage);
         values[args[i]] = args[i + 1];
       }
       if (!values["--endpoint"] || !values["--model"] || !values["--runtime"]) throw new Error(usage);
-      const report = await verifyLocalLlm({ endpoint: values["--endpoint"], model: values["--model"], runtime: values["--runtime"] });
+      const report = await verifyLocalLlm({ endpoint: values["--endpoint"], model: values["--model"], runtime: values["--runtime"], ...(values["--timeout-ms"] !== undefined ? { timeoutMs: Number(values["--timeout-ms"]) } : {}) });
       console.log(JSON.stringify(report, null, 2));
       process.exitCode = report.passed ? 0 : 1;
     } catch { console.error(`${usage}\nSupply an explicit loopback /v1 endpoint, named model and runtime label; no server is started or discovered.`); process.exitCode = 2; }
