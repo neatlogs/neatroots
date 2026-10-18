@@ -1,6 +1,6 @@
 import http from "node:http";
 import { afterEach, expect, it, vi } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { LlmClient } from "../src/models/llm.js";
 import { localEndpoint, verifyLocalLlm } from "../scripts/verify-local-llm.js";
@@ -119,4 +119,28 @@ it.each(["99", "45001", "600000", "NaN", "Infinity", "100.5", "invalid"])("rejec
   const child = spawnSync(process.execPath, ["--import", "tsx", script, "--endpoint", "http://127.0.0.1:1/v1", "--model", "mock", "--runtime", "mock", "--timeout-ms", timeout], { encoding: "utf8", timeout: 5000 });
   expect(child.status).toBe(2);
   expect(child.stdout).toBe("");
+});
+
+it.each([
+  ["--model", "mock-model", "--runtime", "--timeout-ms"],
+  ["--runtime", "--model", "--model", "mock-model"],
+  ["--model", "--runtime", "--runtime", "mock"],
+  ["--model", "mock-model", "--runtime", "-"],
+  ["--model", "mock-model", "--runtime"],
+  ["--model", "mock-model", "--runtime", "mock", "--timeout-ms", "--help"],
+  ["--model", "mock-model", "--runtime", "mock", "--runtime", "duplicate"],
+])("rejects missing or duplicate operands before any endpoint request: %j", async (...args) => {
+  const s = await server();
+  const script = fileURLToPath(new URL("../scripts/verify-local-llm.ts", import.meta.url));
+  const result = await new Promise<{ code: number | null; stdout: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", script, "--endpoint", s.endpoint, ...args], { stdio: ["ignore", "pipe", "ignore"] });
+    let stdout = "";
+    child.stdout.on("data", data => { stdout += data; });
+    const timer = setTimeout(() => { child.kill(); reject(new Error("CLI did not reject invalid operands promptly")); }, 5000);
+    child.once("error", error => { clearTimeout(timer); reject(error); });
+    child.once("close", code => { clearTimeout(timer); resolve({ code, stdout }); });
+  });
+  expect(result.code).toBe(2);
+  expect(result.stdout).toBe("");
+  expect(s.seen).toEqual([]);
 });

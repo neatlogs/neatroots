@@ -152,7 +152,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     try {
       const values: Record<string, string> = {};
       for (let i = 0; i < args.length; i += 2) {
-        if (!["--endpoint", "--model", "--runtime", "--timeout-ms"].includes(args[i]) || !args[i + 1] || values[args[i]]) throw new Error(usage);
+        if (!["--endpoint", "--model", "--runtime", "--timeout-ms"].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith("-") || values[args[i]]) throw new Error(usage);
         values[args[i]] = args[i + 1];
       }
       if (!values["--endpoint"] || !values["--model"] || !values["--runtime"]) throw new Error(usage);
