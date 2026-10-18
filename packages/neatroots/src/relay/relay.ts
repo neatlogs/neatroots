@@ -201,6 +201,12 @@ export class Relay {
     }
     let enc: ReturnType<Relay["encode"]>;
     try {
+      // Credential lookup can yield while an import replaces a live run. Check trusted
+      // provenance again in the same synchronous section that snapshots the payload.
+      if (initiatedBy === "auto" && traceIds.some(id => !automaticForwardAllowed(this.roots.store, id))) {
+        return this.roots.store.insertForward({ ...base, status: "error", http_status: null, span_count: 0, bytes: 0,
+          redactions: 0, error: "Automatic forwarding suppressed: imported or unknown run provenance" });
+      }
       enc = this.encode(traceIds);
     } catch (err) {
       const error = err instanceof RedactionPatternError ? err.message : `encode failed: ${(err as Error).message}`;
