@@ -367,7 +367,8 @@ export interface Insights {
   totals: InsightTotals;
   previous: InsightTotals;
   buckets: { start_ms: number; runs: number; failed: number; with_problems: number }[];
-  problems: { check_id: string; title: string; kind: string; runs: number; prev_runs: number; dismissed: number; last_ms: number; example_trace_id: string; projects: string[] }[];
+  quiet_after?: number;
+  problems: { check_id: string; title: string; kind: string; runs: number; prev_runs: number; dismissed: number; last_ms: number; example_trace_id: string; projects: string[]; dismissal_projects?: { project: string | null; name: string; runs: number; dismissed: number; newest_finding_id: string | null }[] }[];
   tools: { name: string; calls: number; failures: number; empty: number; runs: number; prev_calls: number; prev_failures: number; p50_ms: number | null }[];
   models: { name: string; calls: number; errors: number; tokens: number; p50_ms: number | null }[];
   projects: { name: string; runs: number; failed: number; with_problems: number; prev_runs: number; prev_with_problems: number; last_ms: number; top_problem: string | null }[];

@@ -115,6 +115,12 @@ as one problem, headed by the most specific one, and count once.
 A check you dismiss 3 times in a project goes **quiet** there: its findings are still recorded on the
 run page, but no longer count, send notes or appear on Home. Reopen one to count it again.
 
+On Home, each Problems row names its project and shows that project's total dismissals toward
+the threshold of 3, including dismissals before the selected period. **Dismiss finding** dismisses
+only this check's newest currently open finding in that project. If that finding changed since
+the row loaded, Home refreshes and asks you to review it before trying again. Existing open
+findings are not retroactively quieted; the threshold applies to new findings.
+
 ## Which model answers
 
 With `classifier.backend: auto`: Jev cloud when you turned it on; otherwise the local LLM. Every LLM
