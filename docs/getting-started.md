@@ -113,6 +113,11 @@ ordered score levels. Editing a definition starts its calibration again; unchang
 their counts across restarts. Runtime parameter substitutions calibrate separately when they change
 the rendered question. Legacy counters without a definition and earlier normalized signature
 formats are not used to promote Laya; they require calibration under the exact-definition format.
+Calibration history keeps at most 32 definitions per name, 1,024 definitions and 1,024 names in total,
+and 256 KiB of serialized metadata. Old entries are forgotten in deterministic enumeration order,
+not global LRU order. Returning to an evicted definition starts calibration from zero, even if it
+was trusted before. Very large names can lose their entire calibration row; surviving counters
+are never combined or partially trimmed. Reads apply these bounds without writing metadata.
 Settings and `/api/status` report the current registered checks with their default parameters, not
 all runtime plan variants; status rows identify this scope and the definition signature. Reading
 status never changes routing or calibration. Explicit backend choices and the no-LLM fallback are

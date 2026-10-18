@@ -29,6 +29,41 @@ function validStats(raw: unknown): raw is TrustStats {
   return Number.isSafeInteger(n) && Number.isSafeInteger(agree) && n >= 0 && agree >= 0 && agree <= n;
 }
 
+// Whole-counter forgetting can only remove calibration, never transfer evidence.
+const HISTORY_PER_NAME = 32;
+const HISTORY_DEFINITIONS = 1024;
+const HISTORY_NAMES = 1024;
+const HISTORY_BYTES = 256 * 1024;
+
+/** Deterministic enumeration-order retention, without writes or per-eviction serialization. */
+function boundHistory(data: Record<string, StoredTrustRecord>): void {
+  const names = Object.keys(data);
+  for (const name of names.slice(0, Math.max(0, names.length - HISTORY_NAMES))) delete data[name];
+  const entries: [string, string][] = [];
+  for (const [name, row] of Object.entries(data)) {
+    const signatures = Object.keys(row.defs);
+    for (const sig of signatures.slice(0, Math.max(0, signatures.length - HISTORY_PER_NAME))) delete row.defs[sig];
+    for (const sig of Object.keys(row.defs)) entries.push([name, sig]);
+  }
+  for (const [name, sig] of entries.slice(0, Math.max(0, entries.length - HISTORY_DEFINITIONS))) delete data[name].defs[sig];
+  // Exact JSON object size: braces, commas and each independently serialized key/value.
+  // Serialize every row once, rather than the shrinking full map for every eviction.
+  const rows = Object.entries(data).map(([name, row]) => ({
+    name, bytes: Buffer.byteLength(JSON.stringify(name) + ":" + JSON.stringify(row), "utf8"),
+  }));
+  let bytes = 2 + Math.max(0, rows.length - 1) + rows.reduce((sum, row) => sum + row.bytes, 0);
+  let remaining = rows.length;
+  for (const row of rows) {
+    if (bytes <= HISTORY_BYTES) break;
+    delete data[row.name];
+    bytes -= row.bytes + (remaining-- > 1 ? 1 : 0);
+  }
+  // Verify actual serialized bytes as well; failure can only discard calibration.
+  if (Buffer.byteLength(JSON.stringify(data), "utf8") > HISTORY_BYTES) {
+    for (const name of Object.keys(data)) delete data[name];
+  }
+}
+
 /** Loads only versioned definition records; legacy names and older normalized signatures stay untrusted. */
 export function createTrustStore(initial?: Record<string, unknown>, onWrite?: (data: Record<string, StoredTrustRecord>) => void): TrustStore {
   const data: Record<string, StoredTrustRecord> = Object.create(null);
@@ -42,6 +77,8 @@ export function createTrustStore(initial?: Record<string, unknown>, onWrite?: (d
     }
     data[name] = { defs, activeSig: typeof r.activeSig === "string" && /^[0-9a-f]{64}$/.test(r.activeSig) ? r.activeSig : undefined };
   }
+  boundHistory(data);
+  const persist = () => { boundHistory(data); onWrite?.(data); };
   const get = (q: string | DecisionQuestion): TrustStats => {
     const row = data[typeof q === "string" ? q : q.name];
     const sig = typeof q === "string" ? row?.activeSig : questionSignature(q);
@@ -57,15 +94,17 @@ export function createTrustStore(initial?: Record<string, unknown>, onWrite?: (d
       const prev = row.defs[sig] ?? { n: 0, agree: 0 };
       if (prev.n === Number.MAX_SAFE_INTEGER) return;
       row.defs[sig] = { n: prev.n + 1, agree: prev.agree + (agreed ? 1 : 0) };
-      onWrite?.(data);
+      persist();
     },
     activate: q => {
       if (!q.name || q.name === "_") return;
       const sig = questionSignature(q);
+      if (data[q.name]?.activeSig === sig) return;
+      const before = JSON.stringify(data);
       const row = data[q.name] ?? (data[q.name] = { defs: Object.create(null) });
-      if (row.activeSig === sig) return;
       row.activeSig = sig;
-      onWrite?.(data);
+      boundHistory(data);
+      if (JSON.stringify(data) !== before) onWrite?.(data);
     },
     all: () => Object.fromEntries(Object.keys(data).map(name => [name, get(name)])),
   };
