@@ -49,6 +49,20 @@ test("missing plugin export fails and remains retryable", t => {
   assert.notEqual(f.run().status, 0);
   assert.equal(fs.readFileSync(f.calls, "utf8"), "install\ninstall\n");
 });
+
+test("same-version wrong export is repaired and verified in one initialization", t => {
+  const f = fixture(t);
+  const sdk = path.join(f.workspace, ".harness/neatroots-sdk/node_modules/neatlogs");
+  fs.mkdirSync(path.join(sdk, "dist"), { recursive: true });
+  fs.writeFileSync(path.join(sdk, "package.json"), JSON.stringify({ version: "1.1.28", type: "module" }));
+  fs.writeFileSync(path.join(sdk, "dist/opencode-plugin.mjs"), "export const wrong = 1;");
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(f.calls, "utf8"), "install\n");
+  assert.equal(JSON.parse(fs.readFileSync(f.marker)).sdkVersion, "1.1.28");
+  const checker = path.join(root, "toolchain/check-workspace.mjs");
+  assert.equal(spawnSync(process.execPath, [checker, f.workspace]).status, 0);
+});
 test("conflicting user plugin is preserved and no install occurs", t => {
   const f = fixture(t); const plugin = path.join(f.workspace, ".opencode/plugin/neatlogs.ts");
   fs.mkdirSync(path.dirname(plugin), { recursive: true }); fs.writeFileSync(plugin, "user plugin");

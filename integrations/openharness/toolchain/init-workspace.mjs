@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 export const version = "1.1.28";
 export const registration = "export { NeatlogsOpencodePlugin as default } from '../../.harness/neatroots-sdk/node_modules/neatlogs/dist/opencode-plugin.mjs';\n";
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -30,7 +31,10 @@ export async function initialize(workspace = process.env.HARNESS_WORKSPACE || pr
   const verify = async () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(managed, "node_modules/neatlogs/package.json"), "utf8"));
     if (pkg.version !== version) throw new Error("SDK version does not match the pin");
-    const mod = await import(pathToFileURL(path.join(managed, "node_modules/neatlogs/dist/opencode-plugin.mjs")).href);
+    const url = pathToFileURL(path.join(managed, "node_modules/neatlogs/dist/opencode-plugin.mjs"));
+    // A repaired file must not reuse the pre-install module from this process.
+    url.searchParams.set("verification", randomUUID());
+    const mod = await import(url.href);
     if (typeof mod.NeatlogsOpencodePlugin !== "function") throw new Error("Pinned SDK has no OpenCode plugin export");
   };
   let ready = false;

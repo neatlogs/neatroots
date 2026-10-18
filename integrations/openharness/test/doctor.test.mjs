@@ -19,15 +19,19 @@ test("doctor checks health with a fixed deadline and never follows redirects", a
   t.after(() => fs.rmSync(bin, { recursive: true, force: true }));
   fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   let mode = "ok", requests = 0;
-  const server = http.createServer((_req, res) => {
+  const paths = [];
+  const server = http.createServer((req, res) => {
     requests++;
-    if (mode === "ok") res.end("ok");
+    paths.push(req.url);
+    if (mode === "ok") { res.statusCode = req.url === "/health" ? 200 : 404; res.end("ok"); }
     else if (mode === "redirect") { res.writeHead(302, { location: "http://example.invalid" }); res.end(); }
   });
   await new Promise(r => server.listen(0, "127.0.0.1", r));
   t.after(() => { server.closeAllConnections(); server.close(); });
   const base = "http://127.0.0.1:" + server.address().port;
   assert.equal((await run(base, bin)).code, 0);
+  assert.equal((await run(base + "/", bin)).code, 0);
+  assert.deepEqual(paths, ["/health", "/health"]);
   mode = "redirect"; assert.notEqual((await run(base, bin)).code, 0);
   mode = "stall"; const start = Date.now();
   assert.notEqual((await run(base, bin)).code, 0); assert.ok(Date.now() - start < 7000);
