@@ -160,8 +160,7 @@ export class AuditHold {
   status() {
     const projects = (this.roots.store.db.prepare("SELECT DISTINCT project FROM runs WHERE doctor=0").all() as { project: string }[])
       .map(r => r.project).filter(p => p && projectSettings(this.roots.config, p).audit);
-    const pending = this.roots.engine ? (this.roots.store.db.prepare("SELECT trace_id FROM runs WHERE doctor=0").all() as { trace_id: string }[])
-      .filter(r => !this.roots.engine!.auditReady(r.trace_id)).map(r => r.trace_id) : [];
+    const pending = this.roots.engine?.auditBusy() ?? [];
     return { enabled: this.roots.config.audit.enabled, directory: this.directory(),
       ...archiveObservations(this.roots.store).status(this.directory(), projects, namedUnknownProjects(this.roots.store), !!this.roots.engine, pending) };
   }

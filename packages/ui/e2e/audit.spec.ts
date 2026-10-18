@@ -121,3 +121,30 @@ test("archive status labels observations without claiming a current integrity ch
   await expect(page.getByText(/Status does not reverify archive files/)).toBeVisible();
   await expect(page.getByText("Last observed archive size", { exact: true })).toBeVisible();
 });
+
+
+test("connected client notice is a sentence distinct from capture evidence", async ({ page }, info) => {
+  const data = await api<any>("/api/audit/status");
+  data.coverage.connections = { state: "available", checked_ms: Date.now(), clients: [
+    { id: "connected-fixture", label: "Fixture connected", detected: true, connected: true, capture: "not_established" },
+    { id: "disconnected-fixture", label: "Fixture disconnected", detected: true, connected: false, capture: "not_established" },
+  ] };
+  await page.route("**/api/audit/status", route => route.fulfill({ json: data }));
+  await open(page, "settings/audit");
+  await expect(page.getByText(`An MCP connection ${data.coverage.connection_notice}.`, { exact: true })).toBeVisible();
+  const connected = page.getByText("Fixture connected", { exact: true }).locator("..");
+  const disconnected = page.getByText("Fixture disconnected", { exact: true }).locator("..");
+  await expect(connected).toContainText(`This MCP connection ${data.coverage.connection_notice}.`);
+  await expect(disconnected).toContainText("Connection does not establish whether this client's runs are captured.");
+  for (const width of [1440, 390]) {
+    for (const scheme of ["light", "dark"] as const) {
+      await page.setViewportSize({ width, height: 960 });
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.evaluate(mode => document.documentElement.classList.toggle("dark", mode === "dark"), scheme);
+      await page.getByText("MCP connections", { exact: true }).scrollIntoViewIfNeeded();
+      await expect(connected).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await page.screenshot({ animations: "disabled", path: info.outputPath(`connected-${width}-${scheme}.png`) });
+    }
+  }
+});

@@ -87,7 +87,7 @@ export function AuditSection({ status }: { status: Status }) {
         <p className="text-sm">An MCP connection {data.coverage.connection_notice}.</p>
         {data.coverage.connections.state === "unavailable" ? <p role="status" className="text-sm">Connection inventory unavailable. Stored-run counts remain available.</p> : <div className="h-64 overflow-auto">
           {data.coverage.connections.clients.map(c => <div key={c.id} className="flex h-28 items-center gap-3 border-b border-border sm:h-20">
-            <div className="min-w-0 flex-1"><p className="text-sm">{c.label}</p><p className="mt-1 text-xs text-muted-foreground">{c.connected ? data.coverage.connection_notice : "Connection does not establish whether this client's runs are captured."}</p></div>
+            <div className="min-w-0 flex-1"><p className="text-sm">{c.label}</p><p className="mt-1 text-xs text-muted-foreground">{c.connected ? `This MCP connection ${data.coverage.connection_notice}.` : "Connection does not establish whether this client's runs are captured."}</p></div>
             <StatusPill size="sm" tone={c.connected ? "neutral" : "muted"}>{c.connected ? "Connected" : c.detected ? "Detected" : "Not detected"}</StatusPill>
           </div>)}
         </div>}

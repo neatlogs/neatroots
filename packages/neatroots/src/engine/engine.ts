@@ -219,6 +219,15 @@ export class Engine {
     return !this.auditJobs.has(traceId) && !this.pending(traceId) && !this.progress.state(traceId) && (!run || run.endHandled);
   }
 
+  /** In-memory status hints only; persisted progress is checked by the status SQL. */
+  auditBusy(): string[] {
+    const ids = new Set<string>();
+    for (const [id, count] of this.auditJobs) if (count > 0) ids.add(id);
+    for (const [id, count] of this.jobs) if (count > 0) ids.add(id);
+    for (const [id, run] of this.live) if (run.dirty.size || !run.endHandled) ids.add(id);
+    return [...ids];
+  }
+
   /** A deleted run may be imported again before its old in-memory state expires. */
   resetForImport(traceId: string): void {
     if (this.pending(traceId)) throw new Error("previous checks for this deleted run are still active; retry the import when they finish");
