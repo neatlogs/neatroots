@@ -68,4 +68,23 @@ test.describe("settings", () => {
     await expect(page.getByText("Not connected")).toBeVisible();
     await expect(page.getByRole("button", { name: "Store key" })).toBeDisabled();
   });
+
+  test("Neatlogs Cloud saves, shows and clears extra redaction patterns", async ({ page }) => {
+    await api("/api/settings", { method: "POST", body: JSON.stringify({ redact_patterns: [] }) });
+    await open(page, "settings/cloud");
+    const box = page.getByRole("textbox", { name: "Extra redaction patterns" });
+    await expect(box).toHaveValue("");
+    await box.fill("cust_[0-9]+");
+    await page.getByRole("button", { name: "Save cloud settings" }).click();
+    await expect(page.getByText("Cloud settings saved")).toBeVisible();
+    const saved = await api<{ cloud: { redact_patterns: string[] } }>("/api/status");
+    expect(saved.cloud.redact_patterns).toEqual(["cust_[0-9]+"]);
+    await page.reload();
+    await expect(page.getByRole("textbox", { name: "Extra redaction patterns" })).toHaveValue("cust_[0-9]+");
+    await page.getByRole("textbox", { name: "Extra redaction patterns" }).fill("");
+    await page.getByRole("button", { name: "Save cloud settings" }).click();
+    await expect(page.getByText("Cloud settings saved")).toBeVisible();
+    const cleared = await api<{ cloud: { redact_patterns: string[] } }>("/api/status");
+    expect(cleared.cloud.redact_patterns).toEqual([]);
+  });
 });
