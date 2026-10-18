@@ -12,8 +12,8 @@ Only the state selects a static BGR color: live blue, checking violet, loop ambe
 interrupted dim amber, attention yellow, incomplete grey, success green. Idle clears lighting.
 Success is accepted only as an upstream state; this component never infers check completion.
 
-One serialized owner registers at fixed `http://localhost:54235/razer/chromasdk`, requests only
-ChromaLink, and uses the returned HTTP session on the same loopback hostname and a dynamically
+One serialized owner registers at fixed `http://localhost:54235/razer/chromasdk`, requests the
+selected devices (ChromaLink by default), and uses the returned HTTP session on the same loopback hostname and a dynamically
 assigned port, at exactly `/chromasdk`. Credentials, query strings, fragments, other hosts,
 paths, protocols and redirects are rejected before follow-up. Test options permit an ephemeral
 loopback registration port; never populate these from configuration or environment variables.
@@ -37,8 +37,8 @@ kill switch and teardown, then repeat on one real device. No emulator or physica
 
 ## Optional motion and devices
 
-Construction remains disabled, static and ChromaLink-only. Later integration may explicitly
-construct `new ChromaOutput({ animation: true, devices: ["keyboard", "mouse"] })`; enabling
+Construction defaults to disabled, static and ChromaLink-only. The controller uses the saved
+animation and device settings to construct `ChromaOutput`; enabling
 still requires the global/per-output gates outside this component. Options are fixed for
 that owner, and arbitrary endpoint paths are rejected. All six allowed devices are
 `chromalink`, `keyboard`, `mouse`, `mousepad`, `headset`, `keypad`. Device lists are copied,

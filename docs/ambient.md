@@ -66,12 +66,12 @@ future device outputs must own their cancellation and never act after disable. N
 or speculative device interface is part of this stage.
 
 
-## Completion acceptance still pending
+## Completion evidence
 
-The current application adapter conservatively uses existing progress evidence. It cannot
-establish settled success until the reviewed issue463 completion contract is integrated.
-Real successful-run acceptance and the final full validation matrix remain incomplete;
-unit tests that inject settled receipts only exercise the mapping, not that dependency.
+Success requires the engine's current-generation completion receipt: the end pass finished,
+no accepted work remains, and no check failed. Changed evidence after the end pass requires
+an explicit recheck before success can show again. Real-engine tests cover settled success,
+changed evidence, and the fresh recheck; injected states alone are not completion evidence.
 
 The controller isolates log/device failures and serializes Chroma teardown before replacement.
 Global disable unsubscribes the run observer and cancels owned timers; bounded in-flight cleanup
