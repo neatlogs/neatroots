@@ -315,12 +315,44 @@ describe("server", () => {
       }
     }
     expect(tb.roots.store.listForwards(10)).toEqual([]); // forward used to save the bad value as a failed send
-    // a real list still works
+    // a real list still works, on every route
     const { t, batches } = sampleRun();
     tb.roots.ingest(batches);
     const ok = await post("/api/cloud/preview", [t]);
     expect(ok.status).toBe(200);
     expect(((await ok.json()) as { span_count: number }).span_count).toBe(3);
+    // Forward and import only ever reach this local stand-in for the cloud; keys come from the
+    // environment, never the Keychain.
+    const seen: string[] = [];
+    const cloud = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        seen.push(req.url ?? "");
+        res.statusCode = req.url === "/v1/traces" ? 200 : 404;
+        res.end("{}");
+      });
+    });
+    await new Promise<void>((r) => cloud.listen(0, "127.0.0.1", r));
+    const base = `http://127.0.0.1:${(cloud.address() as { port: number }).port}`;
+    tb.roots.config.cloud.endpoint = base;
+    tb.roots.config.cloud.apiBase = `${base}/api/v1/public`;
+    process.env.NEATLOGS_CLOUD_API_KEY = "nl-test-key";
+    process.env.NEATLOGS_SERVICE_TOKEN = "nlsa_test_token";
+    try {
+      const forward = await post("/api/cloud/forward", [t]);
+      expect(forward.status).toBe(200);
+      expect(((await forward.json()) as { status: string }).status).toBe("ok");
+      expect(seen.filter((u) => u === "/v1/traces").length).toBeGreaterThan(0);
+      const imported = await post("/api/cloud/import", [t]);
+      expect(imported.status).toBe(202);
+      const job = (await imported.json()) as { id: string };
+      await until(() => tb.roots.imports.get(job.id)?.state !== "running");
+      expect(seen.some((u) => u.startsWith(`/api/v1/public/traces/${t}/export`))).toBe(true);
+    } finally {
+      delete process.env.NEATLOGS_CLOUD_API_KEY;
+      delete process.env.NEATLOGS_SERVICE_TOKEN;
+      cloud.close();
+    }
   });
 
   it("rejects non-string trace ids before querying the store", async () => {
