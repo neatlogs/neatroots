@@ -189,8 +189,8 @@ describe("decision requests that leave the machine", () => {
       bodies,
       url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
       close: () => {
-        server.closeAllConnections();
         server.close();
+        server.closeAllConnections();
       },
     };
   }
