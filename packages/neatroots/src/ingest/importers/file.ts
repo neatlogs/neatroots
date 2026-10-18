@@ -58,6 +58,20 @@ function fromNeatlogsExport(exp: Record<string, unknown>, project: string): Reso
   return toBatches(nodes, { project: trace.workflowName || trace.traceName || project, source: "file" });
 }
 
+const WORKFLOW_RESOURCE_KEYS = new Set(["service.name", "neatlogs.workflow_name", "neatlogs.workflow.name"]);
+const WORKFLOW_SPAN_KEYS = new Set(["neatlogs.workflow_name", "neatlogs.workflow.name"]);
+
+function hasNonEmptyStringValue(a: { value: Record<string, unknown> }): boolean {
+  return "stringValue" in a.value && typeof a.value.stringValue === "string" && a.value.stringValue.length > 0;
+}
+
+function hasProjectAttribution(b: ResourceSpansBatch): boolean {
+  return (
+    b.resource.attributes.some((a) => WORKFLOW_RESOURCE_KEYS.has(a.key) && hasNonEmptyStringValue(a)) ||
+    b.spans.some((s) => s.attributes.some((a) => WORKFLOW_SPAN_KEYS.has(a.key) && hasNonEmptyStringValue(a)))
+  );
+}
+
 /** Parses a file's text into batches. Throws ImportError naming the line that failed. */
 export function parseTraceFile(text: string, name: string, project?: string): ResourceSpansBatch[] {
   const batches = readBatches(text, name, project ?? "imported");
@@ -65,15 +79,7 @@ export function parseTraceFile(text: string, name: string, project?: string): Re
   for (const b of batches) {
     setImportSource(b, "file");
     if (project) setProject(b, project);
-    else if (
-      !b.resource.attributes.some(
-        (a) =>
-          (a.key === "service.name" || a.key === "neatlogs.workflow_name") &&
-          "stringValue" in a.value &&
-          typeof a.value.stringValue === "string" &&
-          a.value.stringValue.length > 0
-      )
-    ) {
+    else if (!hasProjectAttribution(b)) {
       setProject(b, "imported");
     }
   }
@@ -87,7 +93,7 @@ function setImportSource(b: ResourceSpansBatch, source: string): void {
 
 /** An explicit project wins over the project named in the file. */
 function setProject(b: ResourceSpansBatch, project: string): void {
-  const rest = b.resource.attributes.filter((a) => a.key !== "service.name" && a.key !== "neatlogs.workflow_name");
+  const rest = b.resource.attributes.filter((a) => !WORKFLOW_RESOURCE_KEYS.has(a.key));
   b.resource.attributes = [{ key: "service.name", value: { stringValue: project } }, { key: "neatlogs.workflow_name", value: { stringValue: project } }, ...rest];
 }
 

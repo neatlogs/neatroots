@@ -95,4 +95,66 @@ describe("file import source and Neatlogs export span fields", () => {
     expect(view.error).toBe("Card declined: insufficient funds");
     expect(view.toolName).toBe("stripe_charge");
   });
+
+  it("preserves neatlogs.workflow.name resource and span aliases without overwriting with 'imported'", async () => {
+    t = await makeRoots({ noEngine: true });
+    const resourceAliasTid = hex(16);
+    const spanAliasTid = hex(16);
+    const otlpWithAliases = JSON.stringify({
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [{ key: "neatlogs.workflow.name", value: { stringValue: "existing-workflow" } }],
+          },
+          scopeSpans: [
+            {
+              scope: { name: "test" },
+              spans: [
+                {
+                  traceId: resourceAliasTid,
+                  spanId: hex(8),
+                  name: "resource-alias-root",
+                  kind: 1,
+                  startTimeUnixNano: "1000000",
+                  endTimeUnixNano: "2000000",
+                  status: {},
+                },
+              ],
+            },
+          ],
+        },
+        {
+          resource: { attributes: [] },
+          scopeSpans: [
+            {
+              scope: { name: "test" },
+              spans: [
+                {
+                  traceId: spanAliasTid,
+                  spanId: hex(8),
+                  name: "span-alias-root",
+                  kind: 1,
+                  startTimeUnixNano: "1000000",
+                  endTimeUnixNano: "2000000",
+                  attributes: [{ key: "neatlogs.workflow.name", value: { stringValue: "span-workflow" } }],
+                  status: {},
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    const batches = parseTraceFile(otlpWithAliases, "aliases.json");
+    expect(buildView(batches[0].spans[0], batches[0].resource.attributes).workflow).toBe("existing-workflow");
+    expect(buildView(batches[1].spans[0], batches[1].resource.attributes).workflow).toBe("span-workflow");
+
+    const ingested = t.roots.ingest(batches);
+    expect(importSource(t.roots, ingested[0].traceId)).toBe("file");
+    expect(t.roots.store.getRun(ingested[0].traceId)?.project).toBe("existing-workflow");
+    expect(importSource(t.roots, ingested[1].traceId)).toBe("file");
+    expect(t.roots.store.getRun(ingested[1].traceId)?.project).toBe("span-workflow");
+  });
 });
+
