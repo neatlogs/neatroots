@@ -58,6 +58,13 @@ projects:
     audit: false
 ```
 
+Settings checks existing directory components before saving: roots, user-controlled
+links and non-directory components are refused without applying other requested
+settings. Missing future directories are accepted without creating them. This
+preflight does not establish write access or private permissions; the archive
+writer rechecks the path and permissions when used, and filesystem changes can
+still invalidate a saved path.
+
 With `audit.enabled: true`, projects inherit coverage unless they explicitly set
 `audit: false`. A missing project override inherits the global setting. Runs without
 a project and synthetic doctor probes are always exempt. Merely connecting a coding
@@ -87,6 +94,11 @@ completion markers. Archive writes and the delete guard are synchronous in the
 running server, so ingest/check callbacks cannot interleave verification and removal.
 A failed write or verification leaves the run live; explicit DELETE returns HTTP 409
 with the hold reason. Recovery does not silently remove interrupted archive artifacts.
+
+The 32-run batch limit applies to background capture, not retention or explicit
+deletion. Retention can synchronously verify the full archive during candidate
+selection and again at final deletion for each selected covered run; large eligible
+sweeps may block the server.
 
 Within one retention sweep, a shared archive access or verification failure holds
 remaining covered candidates without rescanning the failed archive. Run-specific

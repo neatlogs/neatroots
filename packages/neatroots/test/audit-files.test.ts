@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuditArchive, comparisonDirectory } from "../src/audit/archive.js";
-import { readFile } from "../src/audit/files.js";
+import { readFile, inspectArchiveDirectory, archiveDirectory } from "../src/audit/files.js";
 import { batch, hex, makeRoots, span, type TestRoots } from "./helpers.js";
 
 let t: TestRoots | undefined;
@@ -76,4 +76,19 @@ describe.skipIf(process.platform === "win32")("nonblocking archive reads", () =>
     expect(child.status, child.stderr).toBe(0);
     expect(JSON.parse(child.stdout).errors.join()).toContain("unsafe archive file");
   });
+});
+
+it("preflights future relative directories without writes while the reader still requires them", async () => {
+  t = await makeRoots({ noEngine: true });
+  const future = path.join(t.roots.home, "future", "nested");
+  expect(() => inspectArchiveDirectory("../archive")).toThrow(/invalid/);
+  const mkdir = vi.spyOn(fs, "mkdirSync").mockImplementation(() => { throw new Error("must not create"); });
+  const chmod = vi.spyOn(fs, "chmodSync").mockImplementation(() => { throw new Error("must not chmod"); });
+  const open = vi.spyOn(fs, "openSync").mockImplementation(() => { throw new Error("must not open"); });
+  expect(inspectArchiveDirectory(future)).toBe(future);
+  expect(inspectArchiveDirectory("new-future-archive/nested")).toBe(path.resolve("new-future-archive/nested"));
+  expect(() => archiveDirectory(future)).toThrow();
+  expect(mkdir).not.toHaveBeenCalled();
+  expect(chmod).not.toHaveBeenCalled();
+  expect(open).not.toHaveBeenCalled();
 });

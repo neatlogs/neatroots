@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { archiveDirectory } from "../src/audit/files.js";
+import { archiveDirectory, inspectArchiveDirectory } from "../src/audit/files.js";
 import { protectedSystemAlias } from "../src/audit/system-alias.js";
 
 interface Node { uid: number; mode: number; target?: string; file?: boolean }
@@ -30,6 +30,8 @@ describe.skipIf(process.platform === "win32")("protected POSIX system aliases (s
     filesystem({ "/": directory(), "/private": directory(), "/var": directory(),
       [alias]: link(target), [target]: directory(mode), [`${alias}/audit`]: directory(0o700, 1000) });
     expect(archiveDirectory(`${alias}/audit`)).toBe(`${alias}/audit`);
+    expect(inspectArchiveDirectory(`${alias}/future/audit`)).toBe(`${alias}/future/audit`);
+    expect(() => inspectArchiveDirectory(alias)).toThrow(/unsafe/);
     expect(() => archiveDirectory(alias)).toThrow(/unsafe/);
   });
 
@@ -46,6 +48,7 @@ describe.skipIf(process.platform === "win32")("protected POSIX system aliases (s
     if (unsafe === "file target") nodes["/private/data"].file = true;
     filesystem(nodes);
     expect(() => archiveDirectory("/system/alias/audit")).toThrow(/unsafe/);
+    expect(() => inspectArchiveDirectory("/system/alias/future/audit")).toThrow(/unsafe/);
   });
 
   it("rejects a cyclic root-owned alias chain", () => {

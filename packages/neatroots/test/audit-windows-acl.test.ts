@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { archiveDirectory } from "../src/audit/files.js";
+import { archiveDirectory, inspectArchiveDirectory } from "../src/audit/files.js";
 import * as windows from "../src/audit/windows-acl.js";
 vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 
@@ -49,6 +49,10 @@ it("secures only newly created Windows directories and only inspects an existing
   const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
   Object.defineProperty(process, "platform", { value: "win32" });
   try {
+    expect(inspectArchiveDirectory(created)).toBe(created);
+    expect(inspectArchiveDirectory(existing)).toBe(existing);
+    expect(fs.existsSync(created)).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
     archiveDirectory(created, true);
     expect(spy.mock.calls).toEqual([[created, "secure"], [created, "validate"]]);
     spy.mockClear();

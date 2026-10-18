@@ -6,8 +6,8 @@ import { protectedSystemAlias } from "./system-alias.js";
 
 export const sha256 = (bytes: string | Buffer): string => crypto.createHash("sha256").update(bytes).digest("hex");
 
-/** Reject ambiguous paths and user-controlled links; only protected system ancestors may be aliases. */
-export function archiveDirectory(input: string, create = false): string {
+/** Shared structural inspection; the caller decides how to handle missing components. */
+function inspectDirectory(input: string, missing: (current: string, error: NodeJS.ErrnoException) => void): string {
   if (!input || input.includes("\0") || input.split(/[\\/]/).includes("..")) throw new Error("invalid archive directory");
   const dir = path.resolve(input);
   if (dir === path.parse(dir).root) throw new Error("archive directory cannot be a filesystem root");
@@ -20,12 +20,26 @@ export function archiveDirectory(input: string, create = false): string {
         throw new Error(`unsafe archive directory component: ${current}`);
       }
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT" || !create) throw e;
-      fs.mkdirSync(current, { mode: 0o700 });
-      if (process.platform === "win32") windowsDirectoryAcl(current, "secure");
-      syncDirectory(path.dirname(current));
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      missing(current, e as NodeJS.ErrnoException);
     }
   }
+  return dir;
+}
+
+/** Read-only preflight: inspect existing components, allowing future directories without creating them. */
+export function inspectArchiveDirectory(input: string): string {
+  return inspectDirectory(input, () => {});
+}
+
+/** Reject ambiguous paths and user-controlled links; only protected system ancestors may be aliases. */
+export function archiveDirectory(input: string, create = false): string {
+  const dir = inspectDirectory(input, (current, error) => {
+    if (!create) throw error;
+    fs.mkdirSync(current, { mode: 0o700 });
+    if (process.platform === "win32") windowsDirectoryAcl(current, "secure");
+    syncDirectory(path.dirname(current));
+  });
   if (create) {
     if (process.platform === "win32") windowsDirectoryAcl(dir, "validate");
     else if (fs.statSync(dir).mode & 0o077) throw new Error("archive directory must have user-only permissions (chmod 700)");

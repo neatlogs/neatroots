@@ -26,6 +26,7 @@ import { UnknownSpanError } from "../engine/engine.js";
 import type { RunRow } from "../types.js";
 import { VERSION } from "../version.js";
 import { mountAuditApi } from "./api-audit.js";
+import { inspectArchiveDirectory } from "../audit/files.js";
 
 export { checkFromInput } from "./api-checks.js";
 
@@ -285,6 +286,10 @@ export function mountApi(app: Hono, roots: Roots): void {
     if (b.project !== undefined && (typeof b.project !== "string" || ["__proto__", "constructor", "prototype"].includes(b.project))) return err(c, 400, "invalid project name");
     if (b.audit !== undefined && (typeof b.project !== "string" || !b.project.trim() || (b.audit !== null && typeof b.audit !== "boolean"))) return err(c, 400, "audit requires a project and must be boolean or null (inherit)");
     if (b.audit_directory !== undefined && (typeof b.audit_directory !== "string" || (b.audit_directory !== "" && (!path.isAbsolute(b.audit_directory) || b.audit_directory.includes("\0") || b.audit_directory.split(/[\\/]/).includes(".."))))) return err(c, 400, "audit_directory must be an absolute directory without traversal, or empty for the default");
+    if (b.audit_directory) {
+      try { inspectArchiveDirectory(b.audit_directory); }
+      catch (error) { return err(c, 400, `audit_directory is not usable: ${(error as Error).message}`); }
+    }
     if (b.project && b.steering !== undefined && !STEERING_MODES.includes(b.steering)) return err(c, 400, `steering must be one of ${STEERING_MODES.join(", ")}`);
     if (b.classifier_backend && !["auto", "laya", "jev", "jev-cloud", "llm"].includes(b.classifier_backend)) return err(c, 400, "classifier_backend must be auto, laya, jev, jev-cloud or llm");
     if (b.cloud_endpoint && !allowedEndpoint(b.cloud_endpoint)) return err(c, 400, "cloud endpoint must be an https://*.neatlogs.com URL (or localhost for testing)");
