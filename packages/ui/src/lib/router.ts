@@ -8,10 +8,12 @@ function read(): { parts: string[]; query: URLSearchParams } {
   return { parts: path.split("/").filter(Boolean), query: new URLSearchParams(qs ?? "") };
 }
 
+/** Subscribe to the path segments of the current hash route. */
 export function useRoute(): string[] {
   return useLocation().parts;
 }
 
+/** Return a fresh route snapshot for every activation, including repeated same-hash navigation. */
 export function useLocation(): { parts: string[]; query: URLSearchParams } {
   const [loc, setLoc] = useState(read);
   useEffect(() => {
@@ -34,6 +36,7 @@ export function useLocation(): { parts: string[]; query: URLSearchParams } {
   return loc;
 }
 
+/** Activate a hash route and notify subscribers even when its URL is already current. */
 export function go(path: string): void {
   const hash = `#/${path.replace(/^[#/]+/, "")}`;
   if (window.location.hash === hash) window.dispatchEvent(new Event(NAVIGATE_EVENT));

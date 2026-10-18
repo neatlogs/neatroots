@@ -151,3 +151,32 @@ for (const settled of [false, true]) {
     expect(requests.length).toBe(count);
   });
 }
+
+
+test("palette refreshes only the selected saved query", async ({ page }, testInfo) => {
+  const savedQuery = "  since:24h  ";
+  const otherQuery = "project:e2e-support";
+  const requests: string[] = [];
+  await page.addInitScript(({ key, savedQuery }) => localStorage.setItem(key, JSON.stringify([{ name: "Recent", query: savedQuery }])), { key, savedQuery });
+  await page.route("**/api/search/runs?**", async (route) => {
+    requests.push(new URL(route.request().url()).searchParams.get("q")!);
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ total: 0, runs: [] }) });
+  });
+  await open(page, `search?q=${encodeURIComponent(savedQuery)}`);
+  const input = page.getByRole("textbox", { name: "Search runs" });
+  await expect.poll(() => requests.filter((query) => query === savedQuery).length).toBe(1);
+  await input.fill(otherQuery);
+  await expect.poll(() => requests.filter((query) => query === otherQuery).length).toBe(1);
+  await page.keyboard.press("Control+k");
+  await page.getByRole("button", { name: "Open Recent", exact: true }).click();
+  await expect(input).toHaveValue(savedQuery);
+  await expect.poll(() => requests.filter((query) => query === savedQuery).length).toBe(2);
+  await page.waitForTimeout(500); // Include navigation and debounce before checking for extra requests.
+  await testInfo.attach("palette-requests", { body: JSON.stringify(requests), contentType: "application/json" });
+  expect(requests.filter((query) => query === otherQuery)).toHaveLength(1);
+  await expect(page).toHaveURL(new RegExp(`q=${encodeURIComponent(savedQuery)}$`));
+  await page.keyboard.press("Control+k");
+  await page.getByRole("button", { name: "Open Recent", exact: true }).click();
+  await expect.poll(() => requests.filter((query) => query === savedQuery).length).toBe(3);
+  expect(requests.filter((query) => query === otherQuery)).toHaveLength(1);
+});

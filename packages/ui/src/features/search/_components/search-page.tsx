@@ -43,6 +43,7 @@ function Snippet({ text }: { text: string }): ReactNode {
   );
 }
 
+/** Publish the latest value after a quiet interval, canceling any superseded update. */
 function useDebounced<T>(v: T, ms: number): T {
   const [d, setD] = useState(v);
   useEffect(() => {

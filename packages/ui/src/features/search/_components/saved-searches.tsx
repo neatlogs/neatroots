@@ -5,12 +5,14 @@ import { Input } from "@/components/ui/input";
 import { go } from "@/lib/router";
 import { useSavedSearches } from "../saved-searches";
 
+/** Manage named presets while preserving the current query text exactly when saving. */
 export function SavedSearches({ query }: { query: string }) {
   const { items, save } = useSavedSearches();
   const qc = useQueryClient();
   const [name, setName] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [error, setError] = useState("");
+  /** Reject blank or duplicate names and retain the editing state when persistence fails. */
   const submit = () => {
     const trimmed = name.trim();
     if (!trimmed || (editing === null && !query.trim())) { setError("Enter a name and a query."); return; }
