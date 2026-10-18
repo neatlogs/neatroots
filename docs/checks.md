@@ -138,8 +138,9 @@ Counts describe observations, including repeated evaluations, rather than a pass
 details retain their target span and evaluation attempt identity. A rule returning no result is
 unknown because its evaluator can also skip work.
 
-Each live/recheck/resume generation replaces the previous bounded document, retaining its
-previous generation ID. Late results cannot update the new document. Up to 256 checks and
+Live updates reuse a run's saved generation, including after idle eviction or a restart.
+Explicit recheck/resume starts a new generation and replaces the previous bounded document,
+retaining its previous generation ID. Late results cannot update the new document. Up to 256 checks and
 32 recent observations per check are retained; cumulative reason counts remain visible.
 Explanations survive restarts and are deleted with their run, including retention deletion.
 Older runs without records show explanations unavailable; no outcomes are reconstructed from

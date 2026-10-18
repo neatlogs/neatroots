@@ -3,6 +3,7 @@ import { Store } from "../src/store/db.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Engine } from "../src/engine/engine.js";
 import { CheckOutcomes } from "../src/engine/check-outcomes.js";
 import { parseChecks } from "../src/checks/registry.js";
 import { DecisionUnavailableError } from "../src/models/decision.js";
@@ -126,6 +127,67 @@ describe("observed live check explanations", () => {
     await tb.roots.engine!.waitIdle(t, 5000);
     expect(JSON.stringify(observed(tb, t))).toBe(before);
     expect(tb.roots.engine!.outcomes.read(t)?.generation).toBe(current.generation);
+  });
+
+  it("keeps saved observations when an idle live map entry is evicted before a late span", async () => {
+    const { tb, t, root } = await setup();
+    await charge(tb, t, root);
+    const engine = tb.roots.engine!;
+    const saved = engine.outcomes.read(t)!;
+    engine.outcomes.observe(t, saved.generation, { id: "historical-target" }, "verification_rejected", "previous-span", 1, "previous-attempt");
+    const historical = engine.outcomes.read(t)!.checks.find((c) => c.check_id === "historical-target");
+    // The idle cleanup removes exactly this map entry; do not wait 60 seconds in the regression.
+    (engine as unknown as { live: Map<string, unknown> }).live.delete(t);
+    await charge(tb, t, root);
+    const after = engine.outcomes.read(t)!;
+    expect(after.generation).toBe(saved.generation);
+    expect(after.started_ms).toBe(saved.started_ms);
+    expect(after.previous_generation).toBe(saved.previous_generation);
+    expect(after.checks.find((c) => c.check_id === "historical-target")).toEqual(historical);
+    expect(observed(tb, t)?.counts.below_threshold).toBeGreaterThan(saved.checks.find((c) => c.check_id === "observed")!.counts.below_threshold!);
+  });
+
+  it("loads persisted metadata into a new engine without replacing its generation on late ingest", async () => {
+    const tb = await makeRoots({ noEngine: true }); cleanup.push(tb.close);
+    const t = hex(16), root = hex(8);
+    tb.roots.ingest([batch([span({ traceId: t, spanId: root, name: "finished", kind: "workflow" })])]);
+    const persisted = new CheckOutcomes(tb.roots.store);
+    const generation = persisted.begin(t, "resume");
+    persisted.observe(t, generation, { id: "saved-check" }, "span_cap", "saved-span", 3, "saved-attempt");
+    const saved = persisted.read(t)!;
+    // A newly constructed engine has an empty live map, as after process restart.
+    const engine = new Engine(tb.roots, tb.roots.llm, tb.roots.decisions, tb.roots.checks, tb.roots.steering);
+    tb.roots.ingest([batch([toolSpan(t, root, "late", "{}", "result")])]);
+    await engine.waitIdle(t, 5000);
+    const after = engine.outcomes.read(t)!;
+    expect(after).toMatchObject({ generation, origin: "resume", started_ms: saved.started_ms, previous_generation: saved.previous_generation });
+    expect(after.checks.find((c) => c.check_id === "saved-check")).toEqual(saved.checks[0]);
+  });
+
+  it("starts fresh after deletion and same-ID ingestion even when the old live entry remains", async () => {
+    const { tb, t, root } = await setup();
+    const engine = tb.roots.engine!;
+    const old = engine.outcomes.read(t)!.generation;
+    tb.roots.store.deleteRun(t);
+    tb.roots.ingest([batch([llmSpan(t, root, { user: "replacement run", out: "hello" })])]);
+    await engine.waitIdle(t, 5000);
+    const replacement = engine.outcomes.read(t)!;
+    expect(replacement.generation).not.toBe(old);
+    expect(replacement.previous_generation).toBeNull();
+    engine.outcomes.observe(t, old, { id: "deleted-generation-result" }, "flagged");
+    expect(engine.outcomes.read(t)).toEqual(replacement);
+  });
+
+  it.each([false, true])("explicit recheck starts a replacement generation (resume=%s)", async (resume) => {
+    const { tb, t } = await setup();
+    const engine = tb.roots.engine!;
+    const previous = engine.outcomes.read(t)!;
+    engine.outcomes.observe(t, previous.generation, { id: "old-only" }, "span_cap");
+    await engine.recheck(t, { resume });
+    await engine.waitIdle(t, 5000);
+    expect(engine.outcomes.read(t)).toMatchObject({ previous_generation: previous.generation, origin: resume ? "resume" : "recheck" });
+    expect(engine.outcomes.read(t)!.generation).not.toBe(previous.generation);
+    expect(engine.outcomes.read(t)!.checks.some((c) => c.check_id === "old-only")).toBe(false);
   });
 
   it("reports a timed-out rule as unknown rather than clear", async () => {

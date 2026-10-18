@@ -60,10 +60,14 @@ export class CheckOutcomes {
     return document;
   }
 
-  current(traceId: string, generation: string): boolean {
-    if (!this.store.db.open) return false;
+  generationOf(traceId: string): string | null {
+    if (!this.store.db.open) return null;
     const row = this.store.db.prepare("SELECT generation FROM check_outcomes WHERE trace_id = ?").get(traceId) as { generation: string } | undefined;
-    return row?.generation === generation;
+    return row?.generation ?? null;
+  }
+
+  current(traceId: string, generation: string): boolean {
+    return this.generationOf(traceId) === generation;
   }
 
   observe(traceId: string, generation: string, check: { id: string; title?: string }, reason: OutcomeReason, target: string | null = null, count = 1, attemptId: string | null = null): void {

@@ -254,7 +254,7 @@ export class Engine {
     const row = this.roots.store.getRun(traceId);
     if (!row) return undefined;
     r = {
-      generation: this.outcomes.begin(traceId, origin),
+      generation: (origin === "live" ? this.outcomes.generationOf(traceId) : null) ?? this.outcomes.begin(traceId, origin),
       traceId,
       project: row.project ?? "unknown",
       workflow: row.workflow ?? row.project ?? "unknown",
