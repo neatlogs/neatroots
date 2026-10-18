@@ -11,6 +11,7 @@ import { runStdioBridge } from "./mcp/stdio.js";
 import { api, ask, port, running } from "./cli/util.js";
 import { registerModelCommands } from "./cli/models.js";
 import { doctorModels } from "./cli/doctor-models.js";
+import { steeringContactSinceStart, steeringDiagnostic } from "./cli/doctor-steering.js";
 import { registerServiceCommands } from "./cli/service.js";
 import { registerConnectCommand } from "./cli/connect.js";
 import { registerCloudImportCommands, registerDataCommands } from "./cli/data.js";
@@ -28,18 +29,6 @@ const program = new Command();
 program.name("neatroots").description("neatroots: local, private checks for AI agents while they run").version(VERSION);
 // Root options only before the command, so `neatroots update --version <tag>` reaches update.
 program.enablePositionalOptions();
-
-function steeringContactSinceStart(lastSeenMs: number | null | undefined): string {
-  if (lastSeenMs === null) return "no contact observed";
-  if (lastSeenMs === undefined) return "unknown";
-  const seconds = Math.max(0, Math.round((Date.now() - lastSeenMs) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
-}
 
 // ------------------------------------------------------------------- start
 
@@ -224,7 +213,9 @@ program
       console.log(`  decisions ${s.engine.decision.backend ?? "unavailable"}${s.engine.decision.model ? ` (${s.engine.decision.model})` : ""}`);
       console.log(`  live runs ${s.engine.liveRuns} · pending checks ${s.engine.pendingJobs}`);
     }
-    console.log(`  steering ${s.steering.enabled ? "on" : "OFF (global switch)"} · steering hook · last contact since server start ${steeringContactSinceStart(s.steering.last_seen_ms)}`);
+    console.log(s.steering.enabled
+      ? `  steering on · steering hook · last contact since server start ${steeringContactSinceStart(s.steering.last_seen_ms)}`
+      : `  steering OFF (global switch) · historical hook contact since server start ${steeringContactSinceStart(s.steering.last_seen_ms)}`);
     console.log(`  cloud ${s.cloud.has_key ? "key stored" : "no key"} → ${s.cloud.endpoint}`);
   });
 
@@ -238,8 +229,8 @@ program
     const p = port(opts.port);
     const cfg = loadConfig();
     let ok = true;
-    const line = (pass: boolean | "warn", msg: string) => {
-      console.log(`${pass === "warn" ? "!" : pass ? "✓" : "✗"} ${msg}`);
+    const line = (pass: boolean | "warn" | "info", msg: string) => {
+      console.log(`${pass === "info" ? "·" : pass === "warn" ? "!" : pass ? "✓" : "✗"} ${msg}`);
       if (pass === false) ok = false;
     };
     const up = await running(p);
@@ -272,8 +263,9 @@ program
         line(false, `trace round trip failed: ${(err as Error).message}`);
       }
       const s = await api<any>(p, "/api/status");
+      const steering = steeringDiagnostic(s.steering ?? {});
+      line(steering.level, steering.message);
       line(s.check_errors.length === 0 ? true : "warn", s.check_errors.length ? `${s.check_errors.length} check file problem(s)` : "all checks load");
-
     }
     console.log(`\nTo test the SDK path end to end:  NEATLOGS_API_KEY=neatroots-local NEATLOGS_ENDPOINT=http://localhost:${p} python -m neatlogs doctor --probe`);
     process.exitCode = ok ? 0 : 1;

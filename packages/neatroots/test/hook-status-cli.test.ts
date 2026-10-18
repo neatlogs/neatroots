@@ -31,8 +31,9 @@ for (const mode of ["off", "advisory"] as const) {
       expect(status).toContain(contact === null ? "no contact observed" : contact === "legacy" ? "unknown" : "2m ago");
       const doctor = (await run("doctor")).stdout;
       expect(doctor).toContain("trace round trip through /v1/traces and the doctor read-back");
-      // Reduced scope: doctor does not assess optional steering at all.
-      expect(doctor).not.toMatch(/steering hook contact|steering hook contact time/);
+      // The dependent doctor follow-up reports opt-in configuration and contact history.
+      expect(doctor).toContain("steering:");
+      expect(doctor).not.toMatch(/healthy|connected now/);
     });
   }
 }

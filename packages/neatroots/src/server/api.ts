@@ -132,6 +132,8 @@ export function mountApi(app: Hono, roots: Roots): void {
       tier: { ...tier, platform: `${os.platform()} ${os.arch()}` },
       steering: {
         enabled: roots.config.steering.enabled,
+        // Use the same defaults and global switch as real claims; this is configuration, not contact attribution.
+        enabled_project_count: Object.keys(roots.config.projects).filter((p) => ["advisory", "gate", "self-check"].includes(roots.steering.mode(p))).length,
         hooks_connected: roots.steering.listeners, // Legacy alias retained for status consumers.
         stream_clients: roots.steering.listeners,
         // Process-local; resets when this server restarts. Null means no contact observed this run.
