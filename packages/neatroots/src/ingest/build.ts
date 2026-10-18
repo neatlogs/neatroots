@@ -47,7 +47,13 @@ export function toNs(t: TimeLike | null | undefined): bigint | undefined {
     if (t > 1e11) return BigInt(Math.round(t * 1e6)); // ms
     return BigInt(Math.round(t * 1e9)); // s
   }
-  if (/^\d+$/.test(t)) return toNs(Number(t)) ?? undefined;
+  if (/^\d+$/.test(t)) {
+    const n = BigInt(t);
+    if (n > 100_000_000_000_000_000n) return n;
+    if (n > 100_000_000_000_000n) return n * 1_000n;
+    if (n > 100_000_000_000n) return n * 1_000_000n;
+    return n * 1_000_000_000n;
+  }
   const ms = Date.parse(t);
   if (Number.isNaN(ms)) {
     // An epoch with a fraction sent as a string ("1700000000.5") reads like the same number,

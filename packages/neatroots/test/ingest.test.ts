@@ -278,6 +278,8 @@ describe("imports", () => {
   it("parses ms, s, ns and ISO times", () => {
     expect(toNs(1_700_000_000_000)).toBe(1_700_000_000_000_000_000n);
     expect(toNs(1_700_000_000)).toBe(1_700_000_000_000_000_000n);
+    expect(toNs("1700000000123456789")).toBe(1_700_000_000_123_456_789n);
+    expect(toNs("1700000000123456")).toBe(1_700_000_000_123_456_000n);
     expect(toNs("2026-10-09T10:00:00.123456789Z")).toBe(BigInt(Date.parse("2026-10-09T10:00:00.123Z")) * 1_000_000n + 456789n);
     expect(buildSpan({ traceId: "x", spanId: "y", name: "n", start: 1 }).traceId).toHaveLength(32);
   });
