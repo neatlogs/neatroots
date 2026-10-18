@@ -424,8 +424,9 @@ checks
   .action(async (opts) => {
     const p = port(opts.port);
     const r = await api<any>(p, "/api/checks");
+    console.log("Each finding counts once after it is raised or made active; failed and quiet findings count only if later raised or made active. Older totals are preserved.");
     for (const c of r.checks) {
-      const prec = c.precision.precision === null ? "" : ` · precision ${(c.precision.precision * 100).toFixed(0)}% of ${c.precision.hits}`;
+      const prec = c.precision.precision === null ? "" : ` · precision ${(c.precision.precision * 100).toFixed(0)}% of ${c.precision.hits} counted findings`;
       console.log(`${c.enabled ? "●" : "○"} ${c.id.padEnd(32)} ${c.kind.padEnd(7)} ${c.source.padEnd(8)}${prec}`);
     }
     for (const e of r.errors) console.log(`✗ ${e.path}: ${e.message}`);

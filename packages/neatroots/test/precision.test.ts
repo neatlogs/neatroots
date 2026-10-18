@@ -144,13 +144,125 @@ describe("a check the person keeps dismissing", () => {
       const f = await until(() => tb.roots.store.findingsForTrace(t).find((x) => x.check_id === "repeated-tool-call"));
       tb.roots.store.updateFinding(f.id, { status: "dismissed" });
     }
+    expect(tb.roots.checks.precision("repeated-tool-call")).toMatchObject({ hits: 3, dismissed: 3, precision: 0, noisy: false });
     const t = loop();
     const f = await until(() => tb.roots.store.findingsForTrace(t).find((x) => x.check_id === "repeated-tool-call"));
     expect(f.status).toBe("quiet");
+    expect(tb.roots.checks.precision("repeated-tool-call")).toMatchObject({ hits: 3, dismissed: 3, precision: 0, noisy: false });
     expect(tb.roots.store.getRun(t)!.open_finding_count).toBe(0);
     // It isn't raised again on the next span either.
     tb.roots.ingest([batch([toolSpan(t, hex(8), "lookup_order", '{"order_id":"4512"}', '{"ok":true}')])]);
     await tb.roots.engine!.waitIdle(t, 3000);
     expect(tb.roots.store.findingsForTrace(t).filter((x) => x.check_id === "repeated-tool-call")).toHaveLength(1);
+  });
+});
+
+describe("actionable check metrics", () => {
+  it("does not let failed or quiet rows inflate the denominator or hide a noisy check", async () => {
+    const tb = await makeRoots({ noEngine: true });
+    try {
+      const checkId = "test-actionable-metrics";
+      tb.roots.store.upsertCheckRow({ id: checkId, kind: "question", source: "user", path: null, body: "test" });
+      const insert = (status: "raised" | "active" | "failed" | "quiet", index: number) =>
+        tb.roots.store.insertFinding({
+          trace_id: hex(16),
+          check_id: checkId,
+          check_kind: "question",
+          title: "Test finding",
+          probability: null,
+          status,
+          evidence_span_ids: [],
+          detail: { index },
+          model: null,
+          triage_score: null,
+          explanation_id: null,
+        });
+
+      let firstId = "";
+      for (let i = 0; i < 20; i++) {
+        const finding = insert("raised", i);
+        if (i === 0) {
+          firstId = finding.id;
+          tb.roots.store.updateFinding(finding.id, { status: "active" });
+          expect(tb.roots.checks.precision(checkId)).toMatchObject({ hits: 1, dismissed: 0, precision: 1, noisy: false });
+        }
+        if (i < 14) tb.roots.store.updateFinding(finding.id, { status: "dismissed" });
+      }
+
+      const actionable = tb.roots.checks.precision(checkId);
+      expect(actionable).toMatchObject({ hits: 20, dismissed: 14, noisy: true });
+      expect(actionable.precision).toBeCloseTo(0.3);
+
+      for (let i = 0; i < 10; i++) insert(i < 5 ? "failed" : "quiet", i);
+
+      const withUncountedRows = tb.roots.checks.precision(checkId);
+      expect(withUncountedRows).toMatchObject({ hits: 20, dismissed: 14, noisy: true });
+      expect(withUncountedRows.precision).toBeCloseTo(0.3);
+      expect(tb.roots.store.getFinding(firstId)?.status).toBe("dismissed");
+    } finally {
+      await tb.close();
+    }
+  });
+
+  it("counts status API dismissals only after a finding has become actionable", async () => {
+    const tb = await makeRoots({ serve: true, noEngine: true });
+    try {
+      const checkId = "test-status-transition-metrics";
+      tb.roots.store.upsertCheckRow({ id: checkId, kind: "question", source: "user", path: null, body: "test" });
+      const insert = (status: "raised" | "active" | "failed" | "quiet", index: number) =>
+        tb.roots.store.insertFinding({
+          trace_id: hex(16),
+          check_id: checkId,
+          check_kind: "question",
+          title: "Test finding",
+          probability: null,
+          status,
+          evidence_span_ids: [],
+          detail: { index },
+          model: null,
+          triage_score: null,
+          explanation_id: null,
+        });
+      const setStatus = async (id: string, status: "dismissed" | "active" | "raised") => {
+        const response = await fetch(`${tb.url}/api/findings/${id}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status }),
+        });
+        expect(response.status).toBe(200);
+        const result = await response.json();
+        expect(result).not.toHaveProperty("metric_counted");
+        expect(result).not.toHaveProperty("metric_generation");
+      };
+
+      insert("raised", 0);
+      const quietA = insert("quiet", 1);
+      const quietB = insert("quiet", 2);
+      const failed = insert("failed", 3);
+      await setStatus(quietA.id, "dismissed");
+      await setStatus(quietB.id, "dismissed");
+      await setStatus(failed.id, "dismissed");
+      expect(tb.roots.checks.precision(checkId)).toMatchObject({ hits: 1, dismissed: 0, precision: 1 });
+
+      await setStatus(quietB.id, "raised");
+      expect(tb.roots.checks.precision(checkId)).toMatchObject({ hits: 2, dismissed: 0, precision: 1 });
+      await setStatus(quietB.id, "dismissed");
+      expect(tb.roots.checks.precision(checkId)).toMatchObject({ hits: 2, dismissed: 1, precision: 0.5 });
+
+      await setStatus(failed.id, "active");
+      expect(tb.roots.checks.precision(checkId)).toMatchObject({ hits: 3, dismissed: 1, precision: 1 - 1 / 3 });
+      await setStatus(failed.id, "dismissed");
+      expect(tb.roots.checks.precision(checkId)).toMatchObject({ hits: 3, dismissed: 2, precision: 1 - 2 / 3 });
+
+      await setStatus(quietA.id, "active");
+      expect(tb.roots.checks.precision(checkId)).toMatchObject({ hits: 4, dismissed: 2 });
+      await setStatus(quietA.id, "dismissed");
+      await setStatus(quietA.id, "active");
+      await setStatus(quietA.id, "dismissed");
+      await setStatus(quietA.id, "dismissed");
+      expect(tb.roots.checks.precision(checkId)).toMatchObject({ hits: 4, dismissed: 3, precision: 1 - 3 / 4 });
+    } finally {
+      await tb.close();
+    }
   });
 });

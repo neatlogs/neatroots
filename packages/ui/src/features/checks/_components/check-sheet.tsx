@@ -26,13 +26,16 @@ export function CheckSheet({ check, onClose, onEdit, onDelete }: { check: CheckR
                   <span className="font-mono">{check.id}</span>
                   {check.precision.hits > 0 && (
                     <span className="tabular-nums">
-                      · {check.precision.hits} findings, {check.precision.dismissed} dismissed
+                      · {check.precision.hits} counted findings, {check.precision.dismissed} dismissed
                       {check.precision.precision !== null ? ` (${pct(check.precision.precision)} kept)` : ""}
                     </span>
                   )}
                 </SheetDescription>
               </SheetHeader>
               <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-6 py-4">
+                <p className="text-xs text-muted-foreground">
+                  Each finding counts once after it is raised or made active. Failed checks and findings recorded while quiet count only if later raised or made active. Dismissals lower the kept percentage. Older totals are preserved.
+                </p>
                 <pre className="rounded-lg border border-border bg-muted px-3 py-2 font-mono text-xs whitespace-pre-wrap">{check.yaml}</pre>
                 {check.path && <span className="font-mono text-2xs text-muted-foreground">{check.path}</span>}
               </div>
