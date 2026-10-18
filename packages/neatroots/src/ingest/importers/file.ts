@@ -23,25 +23,38 @@ function fromNeatlogsExport(exp: Record<string, unknown>, project: string): Reso
   const trace = exp.trace as { traceId: string; workflowName?: string; traceName?: string; sessionId?: string };
   const spans = exp.spans as Record<string, unknown>[];
   const ids = new Set(spans.map((s) => s.spanId));
-  const nodes = spans.map<SpanNode>((s) => ({
-    traceId: String(s.traceId ?? trace.traceId),
-    spanId: String(s.spanId),
-    parentSpanId: s.parentSpanId && ids.has(s.parentSpanId) ? String(s.parentSpanId) : null,
-    name: String(s.spanName ?? "span"),
-    kind: (s.spanType as string) ?? null,
-    start: String(s.startedAt),
-    end: (s.endedAt as string) ?? null,
-    durationMs: (s.durationMs as number) ?? null,
-    status: String(s.status ?? "OK").toUpperCase().startsWith("ERR") ? "ERROR" : "OK",
-    model: (s.model as string) ?? null,
-    provider: (s.provider as string) ?? null,
-    promptTokens: (s.promptTokens as number) ?? null,
-    completionTokens: (s.completionTokens as number) ?? null,
-    totalTokens: (s.totalTokens as number) ?? null,
-    input: s.input,
-    output: s.output,
-    sessionId: trace.sessionId ?? null,
-  }));
+  const nodes = spans.map<SpanNode>((s) => {
+    const err =
+      typeof s.error === "string"
+        ? s.error
+        : s.error && typeof s.error === "object"
+          ? String((s.error as { message?: unknown; value?: unknown }).message ?? (s.error as { value?: unknown }).value ?? "") || null
+          : null;
+    const isErr = String(s.status ?? "OK").toUpperCase().startsWith("ERR") || !!err;
+    const kind = (s.spanType as string) ?? null;
+    const name = String(s.spanName ?? "span");
+    return {
+      traceId: String(s.traceId ?? trace.traceId),
+      spanId: String(s.spanId),
+      parentSpanId: s.parentSpanId && ids.has(s.parentSpanId) ? String(s.parentSpanId) : null,
+      name,
+      kind,
+      start: String(s.startedAt),
+      end: (s.endedAt as string) ?? null,
+      durationMs: (s.durationMs as number) ?? null,
+      status: isErr ? "ERROR" : "OK",
+      error: err || (isErr ? "error" : null),
+      model: (s.model as string) ?? null,
+      provider: (s.provider as string) ?? null,
+      promptTokens: (s.promptTokens as number) ?? null,
+      completionTokens: (s.completionTokens as number) ?? null,
+      totalTokens: (s.totalTokens as number) ?? null,
+      toolName: (s.toolName as string) ?? (kind && /tool/i.test(kind) ? name : null),
+      input: s.input,
+      output: s.output,
+      sessionId: trace.sessionId ?? null,
+    };
+  });
   return toBatches(nodes, { project: trace.workflowName || trace.traceName || project, source: "file" });
 }
 
@@ -49,8 +62,17 @@ function fromNeatlogsExport(exp: Record<string, unknown>, project: string): Reso
 export function parseTraceFile(text: string, name: string, project?: string): ResourceSpansBatch[] {
   const batches = readBatches(text, name, project ?? "imported");
   if (!batches.length) throw new ImportError(`${name} has no traces`);
-  if (project) for (const b of batches) setProject(b, project);
+  for (const b of batches) {
+    setImportSource(b, "file");
+    if (project) setProject(b, project);
+    else if (!b.resource.attributes.some((a) => (a.key === "service.name" || a.key === "neatlogs.workflow_name") && a.value.stringValue)) setProject(b, "imported");
+  }
   return batches;
+}
+
+function setImportSource(b: ResourceSpansBatch, source: string): void {
+  const rest = b.resource.attributes.filter((a) => a.key !== "neatroots.import.source");
+  b.resource.attributes = [...rest, { key: "neatroots.import.source", value: { stringValue: source } }];
 }
 
 /** An explicit project wins over the project named in the file. */
