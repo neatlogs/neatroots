@@ -145,6 +145,8 @@ export interface Replay {
   overrides: { messages?: { role: string; content: string }[]; input?: string; model?: string; system?: string };
   state: "running" | "succeeded" | "failed";
   new_trace_id: string | null;
+  attribution: "explicit" | "fallback-unverified" | "ambiguous" | "unknown";
+  attribution_reason: string;
   output_preview: string | null;
   error: string | null;
   log_tail: string | null;

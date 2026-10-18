@@ -271,7 +271,8 @@ describe("replay", () => {
       expect(r).toMatchObject(mode === "missing" ? { state: "succeeded", new_trace_id: endpoint.traceId(), error: null } : {
         state: "failed",
         new_trace_id: null,
-        error: "the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?",
+        attribution: "unknown",
+        error: expect.stringMatching(/no uniquely attributable new run/),
       });
       expect(t.roots.store.getRun(endpoint.traceId()!)?.project).toBe("support-agent");
       expect(ticks.polls()).toBe(20);

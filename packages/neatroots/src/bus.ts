@@ -18,7 +18,8 @@ export interface RootsEvents {
   /** A coding agent asked the app to open something (MCP show_in_ui); path is a hash route. */
   navigate: { path: string };
   /** A replay finished or failed (replay/). */
-  replay: { id: string; state: string; trace_id: string; new_trace_id?: string | null; error?: string | null };
+  replay: { id: string; state: string; trace_id: string; new_trace_id?: string | null; error?: string | null;
+    attribution?: string; attribution_reason?: string; previous_trace_id?: string | null };
 }
 
 export class Bus {

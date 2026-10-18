@@ -79,6 +79,7 @@ export class Roots {
 
   ingest(batches: ResourceSpansBatch[]): TraceUpdate[] {
     const updates = this.store.ingest(batches);
+    this.replays.observe(batches, updates);
     for (const u of updates) this.bus.emit("trace", u);
     return updates;
   }

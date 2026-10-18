@@ -410,6 +410,7 @@ export class Store {
   readonly blobs: BlobStore;
   private readonly searchIds: SearchIds;
   private seq = 0;
+  private readonly deletionListeners = new Set<(ids: string[]) => void>();
   readonly dir: string;
   readonly file: string;
 
@@ -437,7 +438,14 @@ export class Store {
   }
 
   close(): void {
+    this.deletionListeners.clear();
     this.db.close();
+  }
+
+  /** Observers run after committed deletion and blob cleanup (including retention). */
+  onRunsDeleted(listener: (ids: string[]) => void): () => void {
+    this.deletionListeners.add(listener);
+    return () => this.deletionListeners.delete(listener);
   }
 
   /** Adds columns introduced after a database was first created. */
@@ -1418,6 +1426,7 @@ export class Store {
     });
     tx();
     this.reclaimUnreferencedBlobs(shas);
+    for (const listener of this.deletionListeners) listener(traceIds);
   }
 
   /** Deletes candidate payloads only after checking every remaining span reference. */

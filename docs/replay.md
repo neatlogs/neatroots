@@ -105,4 +105,22 @@ over uncorrelated candidates and works during concurrent replays.
 
 The fallback cannot prove which process produced a lone same-project run. Use explicit correlation
 when other agents send telemetry to the same project. If neither matching correlation nor the
-constrained fallback is available, the replay fails with the existing no new run reached neatroots error.
+constrained fallback is available, the replay fails with a reason explaining why no uniquely attributable run was available.
+
+
+### Attribution and later evidence
+
+Replay records expose `attribution` and `attribution_reason` in the API and UI. Only `explicit`
+means a unique root or resource claim was observed. The constrained fallback is labeled
+`fallback-unverified`; execution success alone does not verify identity. Historical links are
+`unknown` because their original evidence was not retained.
+
+Evidence is retained across restarts. Conflicting or malformed claims and duplicate producers can
+revoke a completed replay link and output. Deleting a destination also revokes the link; reusing
+its trace ID does not restore proof. Child-only claims cannot certify a destination or justify
+choosing another untagged run.
+
+Correlation retains at most 256 attempt windows, 512 candidate traces per attempt and 4096
+candidate associations overall, inspecting at most 512 attributes per claim and 64 active windows.
+Exceeding a bound yields uncertainty rather than a verified link. Pruning retained evidence clears
+the affected link; deleted original runs prune their owned evidence.

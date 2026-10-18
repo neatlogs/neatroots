@@ -5,8 +5,9 @@ import type { Roots } from "../core.js";
 import { loadTrace, runGoal } from "../engine/trace.js";
 import { toBatches, type SpanNode } from "../ingest/build.js";
 import type { ChatMessage } from "../models/llm.js";
-import type { Plain } from "../otlp/types.js";
-import { attr } from "../otlp/types.js";
+import type { Plain, ResourceSpansBatch } from "../otlp/types.js";
+import type { TraceUpdate } from "../store/db.js";
+import { ReplayCorrelation, type Attribution } from "./correlation.js";
 import { isSystemRole, preview } from "../semantics/view.js";
 import { log } from "../util/log.js";
 
@@ -36,6 +37,8 @@ export interface Replay {
   overrides: ReplayOverrides;
   state: "running" | "succeeded" | "failed";
   new_trace_id: string | null;
+  attribution: Attribution;
+  attribution_reason: string;
   output_preview: string | null;
   error: string | null;
   log_tail: string | null;
@@ -85,10 +88,25 @@ export function toChat(messages: Plain | undefined): ChatMessage[] {
 }
 
 export class Replays {
-  // Overlap is remembered for the entire replay, even if its neighbour finishes first.
-  private readonly replayWindows = new Map<string, { overlapped: boolean }>();
+  readonly correlation: ReplayCorrelation;
   constructor(private readonly roots: Roots) {
     roots.store.db.exec(SCHEMA);
+    const columns = roots.store.db.prepare("PRAGMA table_info(replays)").all() as { name: string }[];
+    if (!columns.some((c) => c.name === "attribution")) roots.store.db.exec("ALTER TABLE replays ADD COLUMN attribution TEXT NOT NULL DEFAULT 'unknown'");
+    if (!columns.some((c) => c.name === "attribution_reason")) roots.store.db.exec("ALTER TABLE replays ADD COLUMN attribution_reason TEXT NOT NULL DEFAULT 'Replay association predates attribution evidence.'");
+    this.correlation = new ReplayCorrelation(roots.store);
+    roots.store.db.prepare("UPDATE replay_windows SET active=0").run();
+    roots.store.onRunsDeleted((traces) => {
+      const ids = JSON.stringify(traces);
+      const affected = roots.store.db.prepare(`SELECT DISTINCT replay_id AS id,trace_id AS previous FROM replay_candidates
+        WHERE trace_id IN (SELECT value FROM json_each(?)) UNION
+        SELECT id,NULL AS previous FROM replays WHERE trace_id IN (SELECT value FROM json_each(?))`).all(ids, ids) as { id: string; previous: string | null }[];
+      for (const row of affected) {
+        const r = this.get(row.id);
+        if (r) roots.bus.emit("replay", { id: r.id, trace_id: r.trace_id, state: r.state, new_trace_id: r.new_trace_id,
+          previous_trace_id: row.previous, attribution: r.attribution, attribution_reason: r.attribution_reason });
+      }
+    });
     // A replay runs in this process (a child command or an HTTP call); it cannot
     // survive a restart. Mark any left in "running" as failed so they don't show
     // "running" forever. (Checks resume after a restart; a replay can't.)
@@ -97,16 +115,18 @@ export class Replays {
       .run("interrupted by a restart", Date.now());
   }
 
-  private save(r: Replay): void {
+  private save(r: Replay, previousTrace?: string | null): void {
     this.roots.store.db
       .prepare(
-        `INSERT INTO replays (id, trace_id, span_id, kind, via, overrides, state, new_trace_id, output_preview, error, log_tail, created_ms, finished_ms)
-         VALUES (@id, @trace_id, @span_id, @kind, @via, @overrides, @state, @new_trace_id, @output_preview, @error, @log_tail, @created_ms, @finished_ms)
+        `INSERT INTO replays (id, trace_id, span_id, kind, via, overrides, state, new_trace_id, output_preview, error, log_tail, created_ms, finished_ms, attribution, attribution_reason)
+         VALUES (@id, @trace_id, @span_id, @kind, @via, @overrides, @state, @new_trace_id, @output_preview, @error, @log_tail, @created_ms, @finished_ms, @attribution, @attribution_reason)
          ON CONFLICT(id) DO UPDATE SET state = excluded.state, new_trace_id = excluded.new_trace_id, output_preview = excluded.output_preview,
-           error = excluded.error, log_tail = excluded.log_tail, finished_ms = excluded.finished_ms`,
+           error = excluded.error, log_tail = excluded.log_tail, finished_ms = excluded.finished_ms,
+           attribution=excluded.attribution, attribution_reason=excluded.attribution_reason`,
       )
       .run({ ...r, overrides: JSON.stringify(r.overrides) });
-    this.roots.bus.emit("replay", { id: r.id, state: r.state, trace_id: r.trace_id, new_trace_id: r.new_trace_id, error: r.error });
+    this.roots.bus.emit("replay", { id: r.id, state: r.state, trace_id: r.trace_id, new_trace_id: r.new_trace_id,
+      previous_trace_id: previousTrace, error: r.error, attribution: r.attribution, attribution_reason: r.attribution_reason });
   }
 
   private parse(row: Row): Replay {
@@ -129,6 +149,20 @@ export class Replays {
     return row ? this.parse(row) : undefined;
   }
 
+  /** Raw request evidence survives span replacement; completed associations remain revocable. */
+  observe(batches: ResourceSpansBatch[], updates: TraceUpdate[]): Set<string> {
+    const ids = this.correlation.observe(batches, updates);
+    for (const id of ids) {
+      const r = this.get(id);
+      if (!r || r.state === "running" || (!r.new_trace_id && r.attribution === "unknown")) continue;
+      const association = this.correlation.select(id, r.attribution === "fallback-unverified");
+      if (r.new_trace_id === association.trace && r.attribution === association.attribution && r.attribution_reason === association.reason) continue;
+      this.save({ ...r, new_trace_id: association.trace, attribution: association.attribution,
+        attribution_reason: association.reason, output_preview: association.trace ? this.roots.store.getRun(association.trace)?.output_preview ?? null : null }, r.new_trace_id);
+    }
+    return ids;
+  }
+
   /** How this project's agent can be re-run: a command, an HTTP endpoint, or neither. */
   target(project: string | null | undefined): { command?: string; cwd?: string; url?: string } | undefined {
     return project ? this.roots.config.rerun[project] : undefined;
@@ -144,20 +178,28 @@ export class Replays {
       overrides,
       state: "running",
       new_trace_id: null,
+      attribution: "unknown",
+      attribution_reason: "Waiting for replay attribution evidence.",
       output_preview: null,
       error: null,
       log_tail: null,
       created_ms: Date.now(),
       finished_ms: null,
     };
-    for (const window of this.replayWindows.values()) window.overlapped = true;
-    this.replayWindows.set(r.id, { overlapped: this.replayWindows.size > 0 });
-    this.save(r);
+    const evictions = this.correlation.open(r.id, this.roots.store.getRun(traceId)?.project ?? null);
+    try { this.save(r); } catch (err) { this.correlation.close(r.id); throw err; }
+    for (const id of evictions) {
+      const evicted = this.get(id);
+      if (evicted) this.roots.bus.emit("replay", { id, state: evicted.state, trace_id: evicted.trace_id, new_trace_id: null,
+        attribution: evicted.attribution, attribution_reason: evicted.attribution_reason });
+    }
     return r;
   }
 
   private finish(r: Replay, patch: Partial<Replay>): Replay {
-    this.replayWindows.delete(r.id);
+    this.correlation.close(r.id);
+    if (patch.state === "failed" && patch.attribution === undefined)
+      patch = { ...patch, attribution: "unknown", attribution_reason: "Replay execution failed; no run association is certified." };
     Object.assign(r, patch, { finished_ms: Date.now() });
     this.save(r);
     return r;
@@ -213,7 +255,9 @@ export class Replays {
         },
       ];
       this.roots.ingest(toBatches(nodes, { project: t.run?.project ?? "replay", source: "replay" }));
-      return this.finish(r, { state: "succeeded", new_trace_id: newTrace, output_preview: preview(res.text, 400) });
+      const association = this.correlation.select(r.id);
+      return this.finish(r, { state: "succeeded", new_trace_id: association.trace, attribution: association.attribution,
+        attribution_reason: association.reason, output_preview: association.trace ? preview(res.text, 400) : null });
     } catch (err) {
       return this.finish(r, { state: "failed", error: (err as Error).message });
     }
@@ -235,29 +279,6 @@ export class Replays {
   }
 
   private async runAgent(r: Replay, project: string, target: { command?: string; cwd?: string; url?: string }, input: string, o: ReplayOverrides): Promise<Replay> {
-    let linked: string | null = null;
-    const appeared = new Set<string>();
-    const candidates = new Set<string>();
-    const seenIds = new Map<string, Set<Plain>>();
-    const window = this.replayWindows.get(r.id)!;
-    // Only inspect runs first seen during this replay. A root may arrive after its children.
-    const off = this.roots.bus.on("trace", (u) => {
-      if (linked) return;
-      if (u.runCreated) appeared.add(u.traceId);
-      if (!appeared.has(u.traceId)) return;
-      const run = this.roots.store.getRun(u.traceId);
-      const root = run?.root_span_id ? this.roots.store.getOtlpSpan(u.traceId, run.root_span_id) : undefined;
-      const ids = u.spans.map((s) => this.roots.store.getOtlpSpan(u.traceId, s.row.span_id))
-        .map((s) => attr(s?.resource.attributes, "neatroots.replay.id"));
-      ids.push(attr(root?.span.attributes, "neatroots.replay.id"));
-      const explicit = seenIds.get(u.traceId) ?? new Set<Plain>();
-      for (const id of ids) if (id !== undefined) explicit.add(id);
-      seenIds.set(u.traceId, explicit);
-      if (explicit.size) {
-        candidates.delete(u.traceId);
-        if (explicit.size === 1 && explicit.has(r.id)) linked = u.traceId;
-      } else if (run?.project === project) candidates.add(u.traceId);
-    });
     try {
       let tail = "";
       if (target.url) {
@@ -309,16 +330,21 @@ export class Replays {
         }
         if (code !== 0) log.info(`replay ${r.id}: the agent exited with ${code}`);
       }
-      // Prefer an explicit ID throughout the SDK flush window, even after a candidate appears.
-      for (let i = 0; i < 20 && !linked; i++) {
+      // Retain the compatibility fallback only after the entire SDK flush window.
+      let association = this.correlation.select(r.id);
+      for (let i = 0; i < 20 && !association.trace; i++) {
         await new Promise((res) => setTimeout(res, 500));
+        association = this.correlation.select(r.id);
       }
-      if (!linked && !window.overlapped && candidates.size === 1) linked = candidates.values().next().value!;
-      if (!linked) return this.finish(r, { state: "failed", error: "the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?", log_tail: tail || null });
-      const run = this.roots.store.getRun(linked);
-      return this.finish(r, { state: "succeeded", new_trace_id: linked, output_preview: run?.output_preview ?? null, log_tail: tail || null });
+      if (!association.trace) association = this.correlation.select(r.id, true);
+      const attribution = { attribution: association.attribution, attribution_reason: association.reason };
+      if (!association.trace) return this.finish(r, { state: "failed", ...attribution,
+        error: "the agent ran, but no uniquely attributable new run reached neatroots. " + association.reason, log_tail: tail || null });
+      const run = this.roots.store.getRun(association.trace);
+      return this.finish(r, { state: "succeeded", new_trace_id: association.trace, ...attribution,
+        output_preview: run?.output_preview ?? null, log_tail: tail || null });
     } finally {
-      off();
+      this.correlation.close(r.id);
     }
   }
 }
