@@ -35,11 +35,12 @@ if os.environ.get("OTLP_PROTOCOL") == "grpc":
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or os.environ.get("NEATROOTS_GRPC") or "localhost:4317"
-    # neatroots' gRPC server is on this machine and plaintext. Anywhere else the exporter decides,
-    # so a bare host:port and https:// get TLS and authorization headers
-    # (OTEL_EXPORTER_OTLP_TRACES_HEADERS) do not cross the network in the clear by default, while
-    # an http:// endpoint still means plaintext was asked for by name.
-    local = urlparse(endpoint if "://" in endpoint else "//" + endpoint).hostname in ("localhost", "127.0.0.1", "::1")
+    # Plaintext is only allowed for the local collector. Remote http:// would
+    # otherwise select an insecure channel even when insecure=None.
+    parsed_endpoint = urlparse(endpoint if "://" in endpoint else "//" + endpoint)
+    local = parsed_endpoint.hostname in ("localhost", "127.0.0.1", "::1")
+    if parsed_endpoint.scheme == "http" and not local:
+        raise ValueError("Remote OTLP gRPC endpoints must use TLS")
     exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True if local else None)
 else:
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter

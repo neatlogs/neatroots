@@ -29,11 +29,11 @@ const close = s => new Promise((resolve, reject) => {
 const run = (args, env) => new Promise((resolve, reject) => {
   const python = process.env.SMOKE_PYTHON;
   const child = spawn(python || "uv", python ? args.slice(2) : args, { cwd: here, env, stdio: ["ignore", "pipe", "pipe"] });
-  let output = "";
+  let output = "", timedOut = false;
   child.stdout.on("data", b => { output += b; }); child.stderr.on("data", b => { output += b; });
-  const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
-  child.once("error", reject);
-  child.once("exit", code => { clearTimeout(timer); resolve({ code, output }); });
+  const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 60_000);
+  child.once("error", error => { clearTimeout(timer); reject(error); });
+  child.once("exit", code => { clearTimeout(timer); resolve({ code, output: timedOut ? `Agent timed out after 60000ms (SIGKILL)\n${output}` : output }); });
 });
 let roots, web, grpc, mock, trap, failure;
 try {

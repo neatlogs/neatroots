@@ -11,6 +11,15 @@ cd "$(dirname "$0")"
 URL="${NEATROOTS_URL:-http://localhost:4100}"
 MOCK="${MOCK_LLM_URL:-http://127.0.0.1:4110/v1}"
 NEATROOTS="${NEATROOTS_BIN:-neatroots}"
+LOG=$(mktemp "${TMPDIR:-/tmp}/neatroots-example.XXXXXX") || exit 1
+MOCK_PID=""
+cleanup() {
+  [ -z "$MOCK_PID" ] || kill "$MOCK_PID" 2>/dev/null
+  rm -f -- "$LOG"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 STATUS=$(curl -sf "$URL/api/status") || { echo "neatroots isn't answering at $URL. Start it: neatroots start"; exit 1; }
 # Every example sends to this instance, whatever ports it runs on.
@@ -21,7 +30,6 @@ if ! curl -sf "${MOCK%/v1}/v1/models" >/dev/null; then
   echo "→ starting the mock LLM"
   $NEATROOTS mock-llm >/dev/null 2>&1 &
   MOCK_PID=$!
-  trap 'kill $MOCK_PID 2>/dev/null' EXIT
   sleep 1
 fi
 
@@ -41,14 +49,14 @@ for pair in $PAIRS; do
   before=$(count "$project")
   printf '%-24s ' "$ex"
   case "$ex" in
-    python-pydanticai) (cd "$ex" && MOCK_LLM_URL="$MOCK" uv run --frozen -q agent.py >/tmp/neatroots-example.log 2>&1) ;;
-    python-*) (cd "$ex" && MOCK_LLM_URL="$MOCK" uv run -q agent.py >/tmp/neatroots-example.log 2>&1) ;;
-    typescript-*) (cd "$ex" && { [ -d node_modules ] || npm install --silent --no-audit --no-fund; } && MOCK_LLM_URL="$MOCK" npm start --silent >/tmp/neatroots-example.log 2>&1) ;;
-    http-api) (cd "$ex" && sh send.sh >/tmp/neatroots-example.log 2>&1) ;;
+    python-pydanticai) (cd "$ex" && MOCK_LLM_URL="$MOCK" uv run --frozen -q agent.py) >"$LOG" 2>&1 ;;
+    python-*) (cd "$ex" && MOCK_LLM_URL="$MOCK" uv run -q agent.py) >"$LOG" 2>&1 ;;
+    typescript-*) (cd "$ex" && { [ -d node_modules ] || npm install --silent --no-audit --no-fund; } && MOCK_LLM_URL="$MOCK" npm start --silent) >"$LOG" 2>&1 ;;
+    http-api) (cd "$ex" && sh send.sh) >"$LOG" 2>&1 ;;
   esac
   sleep 2
   after=$(count "$project")
-  if [ "$after" -gt "$before" ]; then echo "✓ $((after - before)) new run(s) in $project"; pass=$((pass + 1)); else echo "✗ no new run (see /tmp/neatroots-example.log)"; fail=$((fail + 1)); fi
+  if [ "$after" -gt "$before" ]; then echo "✓ $((after - before)) new run(s) in $project"; pass=$((pass + 1)); else echo "✗ no new run; example output:"; cat "$LOG"; fail=$((fail + 1)); fi
 done
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
