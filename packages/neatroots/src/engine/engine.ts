@@ -160,6 +160,8 @@ export class Engine {
   private workflowPlanning = new Map<string, Promise<PlanRow | undefined>>();
   private jobs = new Map<string, number>();
   private generationJobs = new Map<string, number>();
+  private cleanupTimers = new Map<LiveRun, NodeJS.Timeout>();
+  private cleanupStopped = false;
   private idleWaiters = new Map<string, (() => void)[]>();
   private decisionDown = false;
   readonly progress: CheckProgress;
@@ -216,6 +218,32 @@ export class Engine {
     for (const spans of run.spanQueue.values()) n += spans.length;
     if (includeEndRetries) for (const spans of run.retrySpans.values()) n += spans.size;
     return n;
+  }
+
+  /** Retire finished caches after jobs drain, without certifying abandoned queues. */
+  private scheduleCleanup(run: LiveRun): void {
+    const prior = this.cleanupTimers.get(run);
+    if (prior) clearTimeout(prior);
+    if (this.cleanupStopped || !this.roots.store.db.open || this.live.get(run.traceId) !== run) return;
+    const timer = setTimeout(() => {
+      this.cleanupTimers.delete(run);
+      if (this.cleanupStopped || !this.roots.store.db.open || this.live.get(run.traceId) !== run) return;
+      if (this.jobs.get(run.traceId)) { this.scheduleCleanup(run); return; }
+      // No finalizer is left to drain this work. Keep its receipt unproven and make
+      // recovery explicit; dropping the in-memory queue must never mean success.
+      if ((this.queued(run) || run.deferred.length) && this.roots.store.getRun(run.traceId))
+        this.progress.interrupted(run.traceId);
+      this.live.delete(run.traceId);
+    }, 60_000);
+    timer.unref();
+    this.cleanupTimers.set(run, timer);
+  }
+
+  /** Stop only owned cache-eviction timers; in-flight check shutdown is unchanged. */
+  stopCleanup(): void {
+    this.cleanupStopped = true;
+    for (const timer of this.cleanupTimers.values()) clearTimeout(timer);
+    this.cleanupTimers.clear();
   }
 
   pending(traceId?: string): number {
@@ -1118,9 +1146,7 @@ ${library}`;
     for (const work of run.deferred.splice(0)) await work();
     await this.summarize(run, snap);
     this.roots.checkCompletion.ended(run.traceId, completionGeneration);
-    setTimeout(() => {
-      if (this.live.get(run.traceId) === run && !this.pending(run.traceId)) this.live.delete(run.traceId);
-    }, 60_000);
+    this.scheduleCleanup(run);
   }
 
   private async triageRun(run: LiveRun, snap: TraceSnapshot): Promise<void> {

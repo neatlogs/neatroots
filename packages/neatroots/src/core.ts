@@ -135,6 +135,7 @@ export class Roots {
     if (this.closing) return this.closing;
     this.closing = this.ambient.close();
     clearInterval(this.sweeper);
+    this.engine?.stopCleanup();
     this.replayBatches.close();
     this.replays.close();
     this.laya.stop();

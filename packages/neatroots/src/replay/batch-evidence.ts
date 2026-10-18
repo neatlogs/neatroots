@@ -43,6 +43,7 @@ export class BatchEvidence {
     const attempts = new Set<string>();
     const db = this.store.db;
     const candidates = new Set<string>();
+    const fresh = new Set<string>();
     for (const batch of batches) for (const span of batch.spans) {
       if (db.prepare("SELECT 1 FROM replay_evidence WHERE trace_id=?").get(span.traceId)) candidates.add(span.traceId);
       for (const a of [...(batch.resource.attributes ?? []).slice(0, 512), ...(span.attributes ?? []).slice(0, 512)]) {
@@ -52,13 +53,15 @@ export class BatchEvidence {
         if (!db.prepare("SELECT 1 FROM replay_batch_members WHERE replay_id=? AND deleted=0").get(id)) continue;
         // Two different candidate traces already prove ambiguity; additional traces add no evidence.
         const count = db.prepare("SELECT COUNT(*) AS n FROM replay_evidence WHERE replay_id=?").get(id) as { n: number };
-        if (count.n < 2) db.prepare("INSERT OR IGNORE INTO replay_evidence VALUES (?,?)").run(id, span.traceId);
+        if (count.n < 2 && db.prepare("INSERT OR IGNORE INTO replay_evidence VALUES (?,?)").run(id, span.traceId).changes)
+          fresh.add(span.traceId);
         if (db.prepare("SELECT 1 FROM replay_evidence WHERE trace_id=?").get(span.traceId)) candidates.add(span.traceId);
       }
     }
     for (const trace of candidates) {
       const ids = db.prepare("SELECT replay_id FROM replay_evidence WHERE trace_id=?").all(trace) as { replay_id: string }[];
       for (const row of ids) attempts.add(row.replay_id);
+      if (db.prepare("SELECT 1 FROM replay_evidence_conflicts WHERE trace_id=?").get(trace)) continue;
       let conflict = ids.length !== 1;
       // Include this request before database replacement can hide an earlier conflicting span.
       for (const batch of batches) for (const span of batch.spans) if (span.traceId === trace) {
@@ -67,9 +70,11 @@ export class BatchEvidence {
           for (const a of attrs.slice(0, 512)) if (a.key === "neatroots.replay.id" && !this.matches(a, ids[0]?.replay_id)) conflict = true;
         }
       }
-      // Inspect prior attributes too: a foreign claim may have arrived before the matching claim.
-      // Above this bound, keep an honest unlinked result rather than certify incomplete evidence.
-      const spans = db.prepare("SELECT span_id FROM spans WHERE trace_id=? LIMIT 513").all(trace) as { span_id: string }[];
+      // Backfill prior attributes only on first association. Later requests were checked
+      // above, including replacements; sticky conflicts survive restart. A streaming
+      // trace can grow beyond this backfill bound when every arrival was inspected.
+      const spans = fresh.has(trace)
+        ? db.prepare("SELECT span_id FROM spans WHERE trace_id=? LIMIT 513").all(trace) as { span_id: string }[] : [];
       if (spans.length > 512) conflict = true;
       for (const row of spans.slice(0, 512)) {
         const full = this.store.getOtlpSpan(trace, row.span_id);
