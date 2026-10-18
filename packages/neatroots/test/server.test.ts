@@ -289,7 +289,7 @@ describe("server", () => {
     const current: any = await client.callTool({ name: "get_current_run", arguments: {} });
     expect(current.isError).toBeFalsy();
     expect(text(current).run.trace_id).toBe(latest);
-    expect(text(current).note).toBe(`The run in focus (${old.slice(0, 8)}â¦) was deleted; using the latest run.`);
+    expect(text(current).note).toBe(`The run in focus (${old.slice(0, 8)}…) was deleted; using the latest run.`);
     // The stale focus is cleared once noted, so later calls just use the latest run.
     expect(tb.roots.focus).toBeNull();
     tb.roots.focus = { trace_id: old, span_id: null, at: Date.now() };
@@ -495,7 +495,7 @@ describe("server", () => {
     expect(r.status).toBe(503);
     const msg = (await r.json()).error as string;
     expect(msg).toMatch(/No LLM is reachable/);
-    expect(msg).toMatch(/Settings â Models|neatroots llm use/);
+    expect(msg).toMatch(/Settings → Models|neatroots llm use/);
     expect(msg).not.toMatch(/fetch failed/);
   });
 });
