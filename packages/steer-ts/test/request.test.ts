@@ -23,10 +23,11 @@ describe("OpenAI request helpers", () => {
       return sdkRequest;
     });
     const owner = { create };
-    wrapOpenAI(api === "chat" ? { chat: { completions: owner } } : { responses: owner });
+    const client = wrapOpenAI(api === "chat" ? { chat: { completions: owner } } : { responses: owner });
+    const wrapped = "chat" in client ? client.chat!.completions : client.responses!;
     const params = { model: "test", messages: [{ role: "user", content: "hi" }], input: "hi" };
     const options = { headers: { "x-test": "local" } };
-    const request = owner.create(params, options);
+    const request = wrapped.create(params, options);
     expect(await request.asResponse()).toBe(response);
     expect(await request.withResponse()).toEqual({ data: "ok", response });
     expect(await request).toBe("ok");
@@ -62,10 +63,11 @@ describe("OpenAI parse helpers", () => {
         return (this.create(params, options) as unknown as SteeredRequest)._thenUnwrap((value) => ({ parsed: value }));
       },
     };
-    wrapOpenAI(api === "chat" ? { chat: { completions: owner } } : { responses: owner });
+    const client = wrapOpenAI(api === "chat" ? { chat: { completions: owner } } : { responses: owner });
+    const wrapped = "chat" in client ? client.chat!.completions : client.responses!;
     const params = { model: "test", messages: [], input: "hi" };
     const options = { headers: { "x-test": "local" } };
-    const request = owner.parse(params, options);
+    const request = wrapped.parse(params, options);
     expect(read).not.toHaveBeenCalled();
     expect(await request.asResponse()).toBe(response);
     expect(read).not.toHaveBeenCalled();

@@ -48,6 +48,10 @@
     "ai": "^7.0.131",
     "tsup": "^8.5.1",
     "typescript": "6.0.3",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.3",
+    "openai": "7.31.0",
+    "@anthropic-ai/sdk": "0.128.0",
+    "neatlogs": "1.1.26",
+    "zod": "4.6.5"
   }
 }
