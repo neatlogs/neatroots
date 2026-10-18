@@ -105,7 +105,12 @@ export function mountCollector(app: Hono, roots: Roots): void {
 
   // Metrics are accepted so exporters do not retry, but neatroots does not use them.
   app.post("/v1/metrics", async (c) => {
-    await c.req.arrayBuffer();
+    try {
+      await readBody(c);
+    } catch (err) {
+      const status = (err as { status?: number }).status ?? 400;
+      return c.json({ code: 3, message: `invalid OTLP metrics payload: ${(err as Error).message}` }, status as 400);
+    }
     if (isJson(c)) return c.json({ partialSuccess: {} });
     return new Response(new Uint8Array(), { status: 200, headers: { "content-type": "application/x-protobuf" } });
   });
