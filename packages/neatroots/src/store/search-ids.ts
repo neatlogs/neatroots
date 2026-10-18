@@ -121,7 +121,7 @@ export class SearchIds {
    * Fills span_fts_ids from span_fts when they differ, a thousand rows at a time so startup and
    * ingest aren't held up. Rows indexed meanwhile are recorded as usual.
    */
-  rebuild(onDone?: (rows: number, ready: boolean) => void): void {
+  rebuild(onDone?: (rows: number, ready: boolean) => void, onChunk?: (rows: number) => void): void {
     if (this.ready) {
       setImmediate(() => onDone?.(0, true));
       return;
@@ -161,6 +161,7 @@ export class SearchIds {
         return;
       }
       n += rows.length;
+      if (rows.length) onChunk?.(rows.length);
       if (rows.length === CHUNK) {
         after = rows[rows.length - 1].id;
         setImmediate(step);

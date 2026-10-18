@@ -66,6 +66,24 @@ function prepared(st: Store, fn: () => void): string[] {
 }
 
 describe("search index run ids", () => {
+  it("forwards only completed nonempty rebuild chunks while retaining the durable marker", async () => {
+    const dir = dataDir();
+    let st = trackedStore(dir);
+    const insert = st.db.prepare("INSERT INTO span_fts(trace_id,span_id,body) VALUES (?,?,?)");
+    st.db.transaction(() => { for (let i = 0; i < 2105; i++) insert.run(`trace-${i}`, `span-${i}`, "invoice"); })();
+    st.close(); st = trackedStore(dir);
+    const chunks: number[] = [];
+    const ready = await new Promise<boolean>((resolve) => st.rebuildSearchIds((rows, ok) => {
+      expect(rows).toBe(2105); resolve(ok);
+    }, (rows) => {
+      chunks.push(rows);
+      expect(st.db.prepare("SELECT rebuilding FROM retention_search_state WHERE id=1").get()).toEqual({ rebuilding: 1 });
+      expect((st.db.prepare("SELECT COUNT(*) AS n FROM span_fts_ids").get() as { n: number }).n).toBe(chunks.reduce((a, b) => a + b, 0));
+    }));
+    expect(ready).toBe(true); expect(chunks).toEqual([1000, 1000, 105]);
+    idsMatchIndex(st);
+    await new Promise<void>((resolve) => st.rebuildSearchIds(() => resolve(), () => { throw new Error("ready index has no chunks"); }));
+  });
   it("stay in step with ingest, re-sent spans and deleted runs", () => {
     const st = trackedStore(dataDir());
     const a = run(st, "invoice 1 is overdue");

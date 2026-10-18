@@ -1539,8 +1539,8 @@ export class Store {
   }
 
   /** Fills in the run and span of each search-index row, for a store from an older version. */
-  rebuildSearchIds(onDone?: (rows: number, ready: boolean) => void): void {
-    this.searchIds.rebuild(onDone);
+  rebuildSearchIds(onDone?: (rows: number, ready: boolean) => void, onChunk?: (rows: number) => void): void {
+    this.searchIds.rebuild(onDone, onChunk);
   }
 
   refreshRetentionSearch(): void { this.searchIds.refresh(); }

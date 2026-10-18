@@ -45,12 +45,14 @@ export class Retention {
     });
     this.worker = worker;
     worker.on("message", (message: { id?: number; value?: unknown; error?: string; progress?: boolean }) => {
-      if (message.progress || message.id === undefined) return;
+      if (this.worker !== worker || message.id === undefined) return;
       const call = this.pending.get(message.id); if (!call) return;
+      if (message.progress) { call.timer.refresh(); return; }
       clearTimeout(call.timer); this.pending.delete(message.id);
       if (message.error) call.reject(new Error(message.error)); else call.resolve(message.value);
     });
     const fail = (error: Error) => {
+      if (this.worker !== worker) return;
       for (const call of this.pending.values()) { clearTimeout(call.timer); call.reject(error); }
       this.pending.clear();
     };
