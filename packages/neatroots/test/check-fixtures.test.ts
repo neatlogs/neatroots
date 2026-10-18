@@ -206,7 +206,7 @@ describe("check fixture suites", () => {
     const typo = suite("unknown-field", {
       rawManifest: YAML.stringify({ version: 1, checks: "./checks", rules: ["detect-marker"], fixtures: [], fixtuers: [] }),
     });
-    expect(testCheckFixtures(typo.manifest)).toMatchObject({ exit_code: 2, errors: [expect.stringContaining("fixtuers")] });
+    expect(testCheckFixtures(typo.manifest)).toMatchObject({ exit_code: 2, errors: [expect.stringContaining("invalid manifest schema")] });
 
     for (const [name, rules, fixtures] of [
       ["empty-rules", [], [{ id: "hit", trace: "./traces/hit.json", expected: [] }]],

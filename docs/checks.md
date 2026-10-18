@@ -129,6 +129,44 @@ check configuration, unknown/question check id, ambiguous trace selection or tra
 manifest rejects unknown fields, empty rule/fixture lists, duplicate ids and expected ids outside the
 declared rule scope.
 
+Fixture reports also include `findings: [{check_id, evidence_span_ids}]` and one
+`rule_evaluations` record per selected rule: `{check_id, status, reason}`. Evidence IDs are
+sorted and deduplicated; findings omit raw span content, titles and finding parameters.
+A run-level finding may legitimately have no evidence span IDs. Each selected trace gets fresh
+regex memo and timeout state, independent of other cases or previous suite calls.
+
+The proposed strict suite policy is intended for maintainer review: exit 0 requires complete
+evaluation and matching expectations; exit 1 means a complete evaluation disagrees; exit 2 takes
+precedence for invalid input, errors or incomplete evaluation. Completed cases remain in the
+report when a later case errors. There is no expected-skip opt-out. Ordinary `neatroots check`
+keeps its existing behavior. Multi-trace files still require explicit `trace_id`; only that trace
+is evaluated (the file must still be parseable). Only currently firing hits count as suite findings;
+resolved streaks and satisfied prerequisites remain completed negatives. Parser/evaluator failures
+use controlled error categories rather than quoting trace, check or manifest source.
+
+Evaluation statuses describe the existing deterministic algorithms, not the completeness of
+instrumentation or the truth of an agent's claims:
+
+- `evaluated / complete`: the rule completed its existing comparison. No matching spans is a
+  valid empty-set comparison for count, repeat, errors, slow, requires_before and cycle. Their
+  thresholds, ordering and recovery semantics are unchanged. Unmet thresholds are negatives.
+- `unevaluated / scope_mismatch`: project or workflow excludes the selected run.
+- Match rules require selected targets and a readable selected field on every target:
+  `no_match_targets` or `missing_match_field` otherwise. A readable empty string is still tested.
+  `clipped_match_evidence` means the existing 200,000-character field budget omitted content,
+  even if a prefix matched. Missing/clipped targets make the evaluation incomplete, including
+  when another target produced a finding. The existing MCP text-first matching order is retained.
+- `error / regex_timeout` or `regex_quarantined`: the bounded regex could not complete, or an
+  earlier rule with the same pattern in this case timed out. Later cases start fresh.
+  `invalid_regex` and `evaluation_error` are errors, never clean negatives.
+- Threshold requires a run (`missing_run`). Run-end and unrecovered-error require an end-time
+  evaluation with a run (`missing_completed_run`); the no-output rule also requires a root
+  (`missing_root`). Unrecovered-error requires final output (`missing_final_output`) unless the
+  run is already failed/interrupted, which the algorithm excludes as a completed negative.
+- Growth needs selected spans with token evidence (`missing_token_evidence` otherwise).
+  Reported zero tokens and insufficient positive-token calls still follow its existing threshold
+  comparison. These diagnostics do not reconstruct missing telemetry or validate causal intent.
+
 See [the example files](../examples/check-fixtures/) for the manifest, one custom rule and two
 trace inputs.
 
