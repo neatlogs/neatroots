@@ -62,6 +62,19 @@ export function mountChecksApi(app: Hono, roots: Roots): void {
     }),
   );
 
+  const historyPage = (offset: string | undefined) => Math.max(0, Math.min(1_000_000, Number.parseInt(offset ?? "0", 10) || 0));
+  app.get("/api/checks/:id/history", (c) => {
+    const id = c.req.param("id"); const offset = historyPage(c.req.query("offset"));
+    return c.json({ revisions: roots.store.checkHistory.revisions(id, 100, offset), ...roots.store.checkHistory.pageInfo("check", id, 100, offset) });
+  });
+
+  app.get("/api/runs/:id/check-history", (c) => {
+    const id = c.req.param("id");
+    if (!roots.store.getRun(id)) return err(c, 404, "run not found");
+    const offset = historyPage(c.req.query("offset"));
+    return c.json({ evaluations: roots.store.checkHistory.forTrace(id, 100, offset), ...roots.store.checkHistory.pageInfo("trace", id, 100, offset), legacy_provenance: "unknown" });
+  });
+
   app.post("/api/checks", async (c) => {
     const ct = c.req.header("content-type") ?? "";
     const raw = ct.includes("yaml") || ct.includes("text/plain") ? await c.req.text() : await body(c);

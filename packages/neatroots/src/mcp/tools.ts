@@ -181,6 +181,9 @@ function outline(roots: Roots, traceId: string, maxSpans: number) {
     findings: d.findings
       .filter((f) => f.status !== "dismissed" && f.status !== "quiet")
       .map((f) => ({ id: f.id, check: f.check_id, title: f.title, status: f.status, probability: f.probability, group: f.detail.group ?? null, evidence_span_ids: f.evidence_span_ids.map((x) => x.slice(0, 8)) })),
+    check_provenance: d.check_provenance,
+    provenance_page: d.provenance_page,
+    legacy_provenance: d.legacy_provenance,
     notes_sent: d.notes.filter((n) => n.status === "delivered").map((n) => ({ text: n.text, kind: n.kind })),
   };
 }
@@ -309,6 +312,9 @@ export const TOOLS = [
             evidence_span_ids: f.evidence_span_ids,
             explanation: exp ? { cause: exp.cause, fix: exp.fix, grounding: exp.grounding } : null,
             details: f.detail,
+            provenance: roots.store.checkHistory.forFinding(f.id),
+            provenance_page: roots.store.checkHistory.pageInfo("finding", f.id, 25),
+            legacy_provenance: "unknown",
           };
         }),
       };

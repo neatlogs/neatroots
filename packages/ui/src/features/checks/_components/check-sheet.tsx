@@ -1,3 +1,4 @@
+import { CheckHistory } from "./check-history";
 import { useState } from "react";
 import { NeatBadge } from "@/components/neat-ui/neat-badge";
 import { Button } from "@/components/ui/button";
@@ -34,6 +35,7 @@ export function CheckSheet({ check, onClose, onEdit, onDelete }: { check: CheckR
               </SheetHeader>
               <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-6 py-4">
                 <pre className="rounded-lg border border-border bg-muted px-3 py-2 font-mono text-xs whitespace-pre-wrap">{check.yaml}</pre>
+                <CheckHistory checkId={check.id} />
                 {check.path && <span className="font-mono text-2xs text-muted-foreground">{check.path}</span>}
               </div>
               <div className="flex items-center justify-end gap-2 border-t border-border px-6 py-3">

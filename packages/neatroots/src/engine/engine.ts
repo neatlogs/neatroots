@@ -1,3 +1,5 @@
+import { flagThreshold, evaluationSettings } from "../checks/evaluation-settings.js";
+import { captureEvaluation } from "../store/check-history.js";
 import type { Roots } from "../core.js";
 import type { TraceUpdate } from "../store/db.js";
 import type { LlmClient } from "../models/llm.js";
@@ -117,13 +119,13 @@ export function flagged(c: QuestionCheck, r: DecisionResult): { flagged: boolean
   const a = r.answers[c.id];
   if (!a) return { flagged: false, probability: 0 };
   // LLM answers top out at 90% (see shrinkDistribution), so a stricter line could never be met.
-  const line = (at: number) => (r.backend === "llm" ? Math.min(at, 0.88) : at);
-  if (c.kind === "yes_no") return { flagged: a.probability >= line(c.flag_at), probability: a.probability };
+  const threshold = flagThreshold(c, r.backend);
+  if (c.kind === "yes_no") return { flagged: a.probability >= threshold, probability: a.probability };
   if (c.kind === "choice") {
     const p = c.flag_on.reduce((acc, o) => acc + (a.distribution[o] ?? 0), 0);
-    return { flagged: p >= line(c.flag_at), probability: p };
+    return { flagged: p >= threshold, probability: p };
   }
-  return { flagged: (a.score ?? 0) >= c.flag_at_level, probability: a.probability };
+  return { flagged: (a.score ?? 0) >= threshold, probability: a.probability };
 }
 
 /**
@@ -429,7 +431,9 @@ export class Engine {
       if (!hit?.firing) run.ruleGrace.delete(rule.id);
       else if (!open && !atEnd && rule.rule.type === "requires_before" && this.waitForLateSpans(run, rule.id)) continue;
       if (hit?.firing) {
+        const snapshot = captureEvaluation(rule, hit.params, null, JSON.stringify(hit.evidenceSpanIds.map((id) => snap.spans.find((s) => s.id === id))), hit.evidenceSpanIds);
         if (open) {
+          this.roots.store.checkHistory.record(run.traceId, snapshot, { backend: "rule", model: null }, null, open.id);
           const changed = JSON.stringify(open.evidence_span_ids) !== JSON.stringify(hit.evidenceSpanIds);
           if (changed) {
             const f = this.roots.store.updateFinding(open.id, { evidence_span_ids: hit.evidenceSpanIds, detail: { ...open.detail, params: hit.params } });
@@ -450,6 +454,7 @@ export class Engine {
             triage_score: null,
             explanation_id: null,
           });
+          this.roots.store.checkHistory.record(run.traceId, snapshot, { backend: "rule", model: null }, null, f.id);
           this.roots.bus.emit("finding", f);
           if (status === "raised") this.onFindingRaised(run, f, lc, hit.params, snap);
         }
@@ -528,9 +533,16 @@ export class Engine {
     snap: TraceSnapshot,
     spanId: string | null,
   ): Promise<"unavailable" | void> {
+    const snapshot = captureEvaluation(check, params, toQuestion(check, params), evidence, spanIds);
+    snapshot.run_identity = this.roots.store.checkHistory.runIdentity(run.traceId);
+    if (!snapshot.run_identity) return;
+    check = snapshot.revision.definition as QuestionCheck;
+    params = snapshot.params;
+    const loaded = this.registry.get(check.id);
+    const origin = loaded ? { ...loaded, check } : undefined;
     let result: DecisionResult;
     try {
-      result = await this.decisions.decide(evidence, [toQuestion(check, params)]);
+      result = await this.decisions.decide(evidence, [snapshot.question as DecisionQuestion]);
       this.decisionDown = false;
     } catch (err) {
       if (err instanceof DecisionUnavailableError || err instanceof LlmUnavailableError) {
@@ -538,6 +550,7 @@ export class Engine {
         this.decisionDown = true;
         return "unavailable";
       }
+      if (!this.roots.store.checkHistory.isCurrent(run.traceId, snapshot)) return;
       // A model error or timeout is a failed check, never a "no".
       const existing = this.roots.store.latestFindingFor(run.traceId, check.id);
       if (!existing || existing.status !== "failed") {
@@ -554,13 +567,15 @@ export class Engine {
           triage_score: null,
           explanation_id: null,
         });
+        this.roots.store.checkHistory.record(run.traceId, snapshot, { backend: "unknown", model: null }, null, f.id);
         this.roots.bus.emit("finding", f);
       }
       return;
     }
+    if (!this.roots.store.checkHistory.isCurrent(run.traceId, snapshot)) return;
     const answer = result.answers[check.id];
     const verdict = flagged(check, result);
-    this.roots.store.insertDecision({
+    const decision = this.roots.store.insertDecision({
       trace_id: run.traceId,
       check_id: check.id,
       span_id: spanId,
@@ -569,9 +584,11 @@ export class Engine {
       backend: result.backend,
       latency_ms: result.latencyMs,
     });
+    const evaluationId = this.roots.store.checkHistory.record(run.traceId, snapshot, { ...result, evaluation: evaluationSettings(check, result.backend) }, decision.id);
     const open = this.findOpen(run.traceId, check.id, spanId);
     if (verdict.flagged) {
       if (open) {
+        this.roots.store.checkHistory.linkFinding(evaluationId, open.id);
         const spans = spanId && findingSpans(open).length > 1 ? [...new Set([...open.evidence_span_ids, ...spanIds])] : spanIds;
         const f = this.roots.store.updateFinding(open.id, { probability: Math.max(verdict.probability, open.probability ?? 0), evidence_span_ids: spans });
         if (f) this.roots.bus.emit("finding", f);
@@ -580,6 +597,7 @@ export class Engine {
       // A question about single spans raises one finding per run; later spans join it.
       const sibling = spanId ? this.roots.store.openFindingFor(run.traceId, check.id) : undefined;
       if (sibling) {
+        this.roots.store.checkHistory.linkFinding(evaluationId, sibling.id);
         const f = addOccurrence(this.roots.store, sibling, spanId!, spanIds);
         if (f) this.roots.bus.emit("finding", f);
         return;
@@ -592,6 +610,7 @@ export class Engine {
         log.debug(`${check.id}: flag not confirmed on a second look${check2.quote ? ` (quote: ${clip(check2.quote, 80)})` : ""}`);
         return;
       }
+      if (!this.roots.store.checkHistory.isCurrent(run.traceId, snapshot)) return;
       const evidenceSpans = snap.spans.filter((s) => spanIds.includes(s.id));
       const errSpan = [...evidenceSpans].reverse().find((s) => s.status === "error");
       const focus = spanId ? snap.spans.find((s) => s.id === spanId) : undefined;
@@ -621,10 +640,11 @@ export class Engine {
         triage_score: null,
         explanation_id: null,
       });
+      this.roots.store.checkHistory.linkFinding(evaluationId, f.id);
       this.roots.bus.emit("finding", f);
-      const lc = this.registry.get(check.id);
-      if (lc && status === "raised") this.onFindingRaised(run, f, lc, findingParams, snap);
+      if (origin && status === "raised") this.onFindingRaised(run, f, origin, findingParams, snap);
     } else if (open) {
+      this.roots.store.checkHistory.linkFinding(evaluationId, open.id);
       // This span reads clean now: it leaves the finding, which resolves once no span shows it.
       const rest = spanId ? dropOccurrence(this.roots.store, open, spanId) : undefined;
       if (rest) this.roots.bus.emit("finding", rest);
@@ -640,6 +660,7 @@ export class Engine {
   // ------------------------------------------------------- tool result labels
 
   private async labelTool(run: LiveRun, s: SpanInfo, snap: TraceSnapshot): Promise<void> {
+    const identity = this.roots.store.checkHistory.runIdentity(run.traceId);
     let label = heuristicToolLabel(s);
     let backend = "heuristic";
     let probability = 1;
@@ -666,6 +687,7 @@ export class Engine {
         return;
       }
     }
+    if (!identity || this.roots.store.checkHistory.runIdentity(run.traceId) !== identity) return;
     this.roots.store.insertDecision({
       trace_id: run.traceId,
       check_id: "neatroots.tool-result",

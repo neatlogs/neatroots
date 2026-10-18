@@ -127,3 +127,31 @@ seconds). With no local LLM, Laya answers everything. Settings → Models shows 
 When the local LLM stands in for the decision model, span-level questions are asked only about the
 newest waiting span (at most four per check per run), identical questions are answered from a cache,
 and note-writing jumps the LLM queue. With Laya or Jev every span is asked.
+
+
+## Definition history and verdict provenance
+
+The Checks sheet shows immutable parsed definitions and identifies the active revision. Run pages
+show each recorded evaluation, its revision, effective question and parameters, evidence SHA-256,
+and the backend and model returned by the decision service. Rule occurrences also retain their
+revision, including when several occurrences share a finding. A definition revision hashes the
+whole parsed check with sorted object keys and an explicit enabled default; formatting and key
+order do not change it. This is compatible with offline manifest definition hashes.
+
+The evaluation snapshot is captured before the model call. Edits and rechecks append evidence
+rather than rewriting earlier verdicts. Provider, transport and sampling internals unavailable
+from the decision service are explicitly unknown. The evidence fingerprint describes the text
+submitted to that service, before any downstream provider redaction or prompt construction; it
+is not a promise of deterministic reproduction. Legacy verdict provenance remains unknown.
+
+Read-only APIs: `GET /api/checks/:id/history` and `GET /api/runs/:id/check-history`. History does
+not approve, restore or activate checks and does not confer Laya trust. Run deletion and retention
+remove their evaluation records and run identities. Active and referenced revisions are retained;
+up to the latest 2,000 unreferenced definitions are retained globally. Older unreferenced history
+is collected on registry reload and run deletion. Removed checks can still be inspected through
+the history API while their revisions remain retained. History APIs return at most 100 records,
+with `total`, `offset`, `limit` and `truncated`; request the next page with `?offset=100` (and so on).
+The UI provides page navigation. Run detail and MCP outlines include at most 25 compact provenance
+summaries plus `provenance_page` counts; MCP finding details include at most 25 indexed occurrences.
+The history API provides full evaluation snapshots in pages. These limits avoid repeatedly loading
+every definition for a large run.
