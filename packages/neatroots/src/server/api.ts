@@ -25,6 +25,7 @@ import { loadTrace } from "../engine/trace.js";
 import { UnknownSpanError } from "../engine/engine.js";
 import type { RunRow } from "../types.js";
 import { VERSION } from "../version.js";
+import { mountAuditApi } from "./api-audit.js";
 
 export { checkFromInput } from "./api-checks.js";
 
@@ -110,6 +111,7 @@ function projects(roots: Roots) {
 
 
 export function mountApi(app: Hono, roots: Roots): void {
+  mountAuditApi(app, roots);
   const engine = roots.engine;
   mountModelsApi(app, roots);
   mountChecksApi(app, roots);

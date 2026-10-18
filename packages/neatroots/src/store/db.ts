@@ -1415,6 +1415,7 @@ export class Store {
         this.db.prepare(`DELETE FROM ${t} WHERE ${inIds}`).run(ids);
       }
       this.db.prepare(`DELETE FROM runs WHERE ${inIds}`).run(ids);
+      this.db.prepare("DELETE FROM meta WHERE key IN (SELECT 'import-source:' || value FROM json_each(?))").run(ids);
     });
     tx();
     this.reclaimUnreferencedBlobs(shas);

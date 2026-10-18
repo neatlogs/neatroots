@@ -77,8 +77,16 @@ export class Roots {
     }
   }
 
-  ingest(batches: ResourceSpansBatch[]): TraceUpdate[] {
-    const updates = this.store.ingest(batches);
+  ingest(batches: ResourceSpansBatch[], opts: { importSource?: string } = {}): TraceUpdate[] {
+    if (opts.importSource) {
+      const ids = new Set(batches.flatMap((b) => b.spans.map((s) => s.traceId)));
+      for (const id of ids) if (!this.store.getRun(id)) this.engine?.resetForImport(id);
+    }
+    const updates = opts.importSource ? this.store.db.transaction(() => {
+      const ingested = this.store.ingest(batches);
+      for (const u of ingested) this.store.setMeta(`import-source:${u.traceId}`, opts.importSource!);
+      return ingested;
+    })() : this.store.ingest(batches);
     for (const u of updates) this.bus.emit("trace", u);
     return updates;
   }

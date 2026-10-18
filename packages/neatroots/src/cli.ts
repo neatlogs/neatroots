@@ -14,6 +14,7 @@ import { doctorModels } from "./cli/doctor-models.js";
 import { registerServiceCommands } from "./cli/service.js";
 import { registerConnectCommand } from "./cli/connect.js";
 import { registerCloudImportCommands, registerDataCommands } from "./cli/data.js";
+import { registerAuditCommands } from "./cli/audit.js";
 import { connectClient, findClient, listClients, serverCommand, CLIENTS } from "./mcp/clients.js";
 import { parseChecks } from "./checks/registry.js";
 import { checkWarnings } from "./checks/lint.js";
@@ -454,6 +455,7 @@ registerModelCommands(program);
 registerServiceCommands(program);
 registerConnectCommand(program);
 registerDataCommands(program);
+registerAuditCommands(program);
 
 program
   .command("mock-llm")
