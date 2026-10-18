@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { api, post, type SpanDetail } from "@/lib/api";
 import { REVIEW_LABELS, VERDICTS, type ReviewItem, type Verdict } from "./types";
 
+/** Opens a finding from saved state while preserving the draft until explicit reload. */
 export function ReviewSheet({ id, onClose, onSaved }: { id: string; onClose: () => void; onSaved: (id: string) => Promise<void> }) {
   // Each opening starts from the saved review, while an open draft keeps its evidence version.
   const { data, error, refetch } = useQuery({ queryKey: ["review", id], queryFn: () => api<ReviewItem>(`/api/reviews/${encodeURIComponent(id)}`), gcTime: 0, refetchOnWindowFocus: false });
@@ -29,6 +30,7 @@ export function ReviewSheet({ id, onClose, onSaved }: { id: string; onClose: () 
   );
 }
 
+/** Saves a judgment against the displayed evidence version, preserving failed drafts. */
 function ReviewForm({ item, reload, onSaved }: { item: ReviewItem; reload: () => Promise<void>; onSaved: (id: string) => Promise<void> }) {
   const initial = item.review ?? { verdict: "" as const, reason: "" };
   const [verdict, setVerdict] = useState<Verdict | "">(initial.verdict);
@@ -83,6 +85,7 @@ function ReviewForm({ item, reload, onSaved }: { item: ReviewItem; reload: () =>
   );
 }
 
+/** Displays one recorded evidence span at a time in a scrollable panel. */
 function Evidence({ item }: { item: ReviewItem }) {
   const ids = item.finding.evidence_span_ids;
   const [chosen, setChosen] = useState(ids[0] ?? "");

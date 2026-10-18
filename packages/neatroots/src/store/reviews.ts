@@ -33,6 +33,7 @@ export interface ReviewFilter {
   limit?: number;
 }
 
+/** Creates local review storage and the deterministic evidence hash function. */
 export function initReviews(db: Database.Database): void {
   db.function("review_fingerprint", { deterministic: true }, (value) => sha256(String(value)));
   db.exec(`CREATE TABLE IF NOT EXISTS finding_reviews (
@@ -49,16 +50,15 @@ export function initReviews(db: Database.Database): void {
 // seq advances on every span ingest, including replacements. Conservatively re-review the
 // whole run after ANY span arrives again, even an identical retransmission. No trace copy is
 // stored. Lifecycle status, triage and explanations do not change the evidence fingerprint.
-const QUEUE = `WITH evidence AS (
-  SELECT trace_id, MAX(seq) AS seq, COUNT(*) AS spans FROM spans GROUP BY trace_id
-), versions AS (
+/** Restricts findings before hashing, using evidence counters maintained during ingest. */
+function queueSql(scope: string): string {
+  return `WITH versions AS (
   SELECT f.*, r.project, r.root_name AS run_name,
     review_fingerprint(json_array(f.check_id, f.title, f.probability, f.evidence_span_ids,
-      f.detail, f.model, c.body, e.seq, e.spans)) AS evidence_version
+      f.detail, f.model, c.body, NULLIF(r.evidence_seq, 0), NULLIF(r.evidence_spans, 0))) AS evidence_version
   FROM findings f JOIN runs r ON r.trace_id = f.trace_id
-  LEFT JOIN evidence e ON e.trace_id = f.trace_id
   LEFT JOIN checks c ON c.id = f.check_id
-  WHERE f.status != 'failed' AND r.doctor = 0
+  WHERE f.status != 'failed' AND r.doctor = 0 ${scope ? `AND ${scope}` : ""}
 ), queue AS (
   SELECT v.*, rv.verdict, rv.reason, rv.source, rv.updated_ms AS reviewed_ms,
     CASE WHEN rv.finding_id IS NULL THEN 'unreviewed'
@@ -66,7 +66,9 @@ const QUEUE = `WITH evidence AS (
       ELSE rv.verdict END AS review_state
   FROM versions v LEFT JOIN finding_reviews rv ON rv.finding_id = v.id
 )`;
+}
 
+/** Converts a queue row into a finding and its independent review metadata. */
 function item(row: Record<string, unknown>): ReviewItem {
   const { project, run_name, evidence_version, verdict, reason, source, reviewed_ms, review_state, ...f } = row;
   return {
@@ -79,28 +81,32 @@ function item(row: Record<string, unknown>): ReviewItem {
   };
 }
 
+/** Reads one finding with the current evidence version and review state. */
 export function reviewItem(store: Store, id: string): ReviewItem | undefined {
-  const row = store.db.prepare(`${QUEUE} SELECT * FROM queue WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
+  const row = store.db.prepare(`${queueSql("f.id = @id")} SELECT * FROM queue`).get({ id }) as Record<string, unknown> | undefined;
   return row ? item(row) : undefined;
 }
 
+/** Lists matching findings in stable cursor order, with the full filtered count. */
 export function reviewQueue(store: Store, filter: ReviewFilter = {}) {
+  const scope: string[] = [];
   const where: string[] = [];
   const params: Record<string, string | number> = {};
-  if (filter.project) { where.push("project = @project"); params.project = filter.project; }
-  if (filter.check) { where.push("check_id = @check"); params.check = filter.check; }
+  if (filter.project) { scope.push("r.project = @project"); params.project = filter.project; }
+  if (filter.check) { scope.push("f.check_id = @check"); params.check = filter.check; }
+  const query = queueSql(scope.join(" AND "));
   const state = filter.state ?? "due";
   if (state === "due") where.push("review_state IN ('unreviewed', 'stale')");
   else if (state !== "all") { where.push("review_state = @state"); params.state = state; }
   const clause = () => where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const { total } = store.db.prepare(`${QUEUE} SELECT COUNT(*) AS total FROM queue ${clause()}`).get(params) as { total: number };
+  const { total } = store.db.prepare(`${query} SELECT COUNT(*) AS total FROM queue ${clause()}`).get(params) as { total: number };
   if (filter.cursor) {
     where.push("(created_ms > @created OR (created_ms = @created AND id > @id))");
     params.created = filter.cursor.created_ms;
     params.id = filter.cursor.id;
   }
   const limit = Math.min(100, Math.max(1, filter.limit ?? 25));
-  const rows = store.db.prepare(`${QUEUE} SELECT * FROM queue ${clause()} ORDER BY created_ms, id LIMIT @limit`).all({ ...params, limit: limit + 1 }) as Record<string, unknown>[];
+  const rows = store.db.prepare(`${query} SELECT * FROM queue ${clause()} ORDER BY created_ms, id LIMIT @limit`).all({ ...params, limit: limit + 1 }) as Record<string, unknown>[];
   const items = rows.slice(0, limit).map(item);
   const last = items.at(-1)?.finding;
   return { items, total, next_cursor: rows.length > limit && last ? `${last.created_ms}:${last.id}` : null };

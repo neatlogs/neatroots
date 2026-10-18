@@ -1,5 +1,6 @@
 import { SearchAreaIcon } from "@hugeicons/core-free-icons";
 import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { ListPageLayout, ListPageTable } from "@/components/list-page/list-page-layout";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -15,7 +16,25 @@ import { REVIEW_LABELS, type ReviewQueue } from "./types";
 
 const FILTERS = { due: "Needs review", all: "All findings", ...REVIEW_LABELS };
 
+/** Lists findings for review with URL filters, cursor paging and save-and-next. */
 export function ReviewsPage({ query }: { query: URLSearchParams }) {
+  const project = query.get("project") ?? "";
+  const check = query.get("check") ?? "";
+  const [filters, setFilters] = useState({ project, check });
+  useEffect(() => { setFilters({ project, check }); }, [project, check]);
+  useEffect(() => {
+    if (filters.project === project && filters.check === check) return;
+    const timer = setTimeout(() => {
+      const next = new URLSearchParams(query);
+      next.set("project", filters.project);
+      next.set("check", filters.check);
+      if (!filters.project) next.delete("project");
+      if (!filters.check) next.delete("check");
+      next.delete("cursor"); next.delete("item");
+      go(`reviews?${next}`, { replace: true });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [filters, project, check, query]);
   const params = new URLSearchParams(query);
   params.delete("item");
   const qs = params.toString();
@@ -48,8 +67,8 @@ export function ReviewsPage({ query }: { query: URLSearchParams }) {
             <SelectTrigger aria-label="Review status" className="h-8 w-44"><SelectValue /></SelectTrigger>
             <SelectContent>{Object.entries(FILTERS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent>
           </Select>
-          <Input aria-label="Filter project" placeholder="Project name" className="h-8 w-40" value={query.get("project") ?? ""} onChange={(e) => change("project", e.target.value, true)} />
-          <Input aria-label="Filter check" placeholder="Check ID" className="h-8 w-40" value={query.get("check") ?? ""} onChange={(e) => change("check", e.target.value, true)} />
+          <Input aria-label="Filter project" placeholder="Project name" className="h-8 w-40" value={filters.project} onChange={(e) => setFilters({ ...filters, project: e.target.value })} />
+          <Input aria-label="Filter check" placeholder="Check ID" className="h-8 w-40" value={filters.check} onChange={(e) => setFilters({ ...filters, check: e.target.value })} />
           <span className="ml-auto text-xs text-muted-foreground tabular-nums" role="status">{isLoading ? "Loading findings…" : `${queue.total} matching findings`}</span>
         </div>
       }>

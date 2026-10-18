@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { expect, test } from "@playwright/test";
 import { api, open, watchErrors } from "./util";
 
+/** Seeds a unique project with two rule findings, independent of other tests. */
 async function seedReviewRun() {
   const project = `refund-review-${randomUUID().slice(0, 8)}`;
   const lookup = { name: "lookup_order", kind: "TOOL", tool_name: "lookup_order", input: { order_id: "4512" }, status: "ERROR", error: "404: order 4512 not found", duration_ms: 30 };
@@ -47,6 +48,47 @@ test("reviews evidence, advances, persists after reload and keeps resolution sep
   const saved = await api<{ items: { review: { verdict: string }; finding: { status: string } }[] }>(`/api/reviews?project=${project}&state=uncertain`);
   expect(saved.items[0]).toMatchObject({ review: { verdict: "uncertain" }, finding: { status: "resolved" } });
   expect(errors).toEqual([]);
+});
+
+test("text filters preserve the caret, debounce requests and replace history", async ({ page }) => {
+  const { route, project } = await seedReviewRun();
+  await page.route("**/api/events", (r) => r.fulfill({ contentType: "text/event-stream", body: ": quiet\n\n" }));
+  await open(page, `${route}&limit=1`);
+  await expect(page.locator("tbody tr").first()).toBeVisible();
+  await page.clock.install();
+  const requests: URL[] = [];
+  page.on("request", (r) => { const url = new URL(r.url()); if (url.pathname === "/api/reviews") requests.push(url); });
+  const historyLength = await page.evaluate(() => history.length);
+  const projectInput = page.getByRole("textbox", { name: "Filter project" });
+  const checkInput = page.getByRole("textbox", { name: "Filter check" });
+  await projectInput.focus();
+  await projectInput.evaluate((input: HTMLInputElement) => input.setSelectionRange(1, 1));
+  await projectInput.pressSequentially("X");
+  const edited = `${project[0]}X${project.slice(1)}`;
+  await expect(projectInput).toHaveValue(edited);
+  expect(await projectInput.evaluate((input: HTMLInputElement) => input.selectionStart)).toBe(2);
+  await checkInput.pressSequentially("repeated-tool-call");
+  expect(requests).toHaveLength(0);
+  await page.clock.runFor(250);
+  await expect.poll(() => requests.length).toBe(1);
+  expect(requests[0].searchParams.get("project")).toBe(edited);
+  expect(requests[0].searchParams.get("check")).toBe("repeated-tool-call");
+  expect(await page.evaluate(() => history.length)).toBe(historyLength);
+  await page.evaluate(() => { location.hash = "#/reviews?project=restored&check=another-check"; });
+  await expect(projectInput).toHaveValue("restored");
+  await expect(checkInput).toHaveValue("another-check");
+  await page.goBack();
+  await expect(projectInput).toHaveValue(edited);
+  await expect(checkInput).toHaveValue("repeated-tool-call");
+  await page.clock.runFor(500);
+  await expect(projectInput).toHaveValue(edited);
+  await projectInput.fill("");
+  await checkInput.fill("");
+  await page.clock.runFor(250);
+  await expect.poll(() => new URLSearchParams(new URL(page.url()).hash.split("?")[1]).has("project")).toBe(false);
+  const cleared = new URLSearchParams(new URL(page.url()).hash.split("?")[1]);
+  expect(cleared.has("check")).toBe(false);
+  expect(cleared.get("limit")).toBe("1");
 });
 
 test("stale evidence rejects save and preserves the draft until explicit reload", async ({ page }) => {

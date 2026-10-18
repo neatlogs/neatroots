@@ -20,6 +20,11 @@ export function useLocation(): { parts: string[]; query: URLSearchParams } {
   return loc;
 }
 
-export function go(path: string): void {
-  window.location.hash = `#/${path.replace(/^[#/]+/, "")}`;
+/** Navigates to a hash route; replace updates filters without adding a history entry. */
+export function go(path: string, { replace = false }: { replace?: boolean } = {}): void {
+  const hash = `#/${path.replace(/^[#/]+/, "")}`;
+  if (replace) {
+    window.history.replaceState(null, "", hash);
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  } else window.location.hash = hash;
 }

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/server/app.js";
 import { Store } from "../src/store/db.js";
 import { reviewItem, reviewQueue, saveReview } from "../src/store/reviews.js";
+import { sha256 } from "../src/util/ids.js";
 import { batch, closeTrackedStores, hex, makeRoots, span, tmpHome, trackedStore } from "./helpers.js";
 
 const homes: string[] = [];
@@ -12,6 +13,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true });
 });
 
+/** Stores one tool span and finding for an isolated review scenario. */
 function seed(st: Store, project = "review-agent", id = hex(8)) {
   const trace = hex(16);
   const sp = span({ traceId: trace, name: "lookup_order", kind: "tool" });
@@ -22,6 +24,7 @@ function seed(st: Store, project = "review-agent", id = hex(8)) {
   return { finding, sp, trace };
 }
 
+/** Creates a tracked store and a home removed after the test. */
 function setup() {
   const home = tmpHome(); homes.push(home);
   const dir = path.join(home, "data");
@@ -31,6 +34,38 @@ function setup() {
 const judgment = { verdict: "correct", reason: "The same lookup ran three times.", source: "human" } as const;
 
 describe("local finding reviews", () => {
+  it("reads a filtered queue without scanning spans or fingerprinting unrelated findings", () => {
+    const { st } = setup();
+    const wanted = seed(st, "wanted");
+    const otherProject = seed(st, "other");
+    const otherCheck = seed(st, "wanted");
+    st.updateFinding(otherProject.finding.id, { title: "Unrelated project" });
+    st.db.prepare("UPDATE findings SET check_id = 'other-check', title = 'Unrelated check' WHERE id = ?").run(otherCheck.finding.id);
+    const hashed: string[] = [];
+    st.db.function("review_fingerprint", { deterministic: true }, (value) => {
+      hashed.push(String(value));
+      return sha256(String(value));
+    });
+    const plans: { detail: string }[] = [];
+    const prepare = st.db.prepare.bind(st.db);
+    st.db.prepare = ((sql: string) => {
+      const statement = prepare(sql);
+      const all = statement.all.bind(statement);
+      const get = statement.get.bind(statement);
+      const inspect = (args: unknown[]) => plans.push(...prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args) as { detail: string }[]);
+      statement.all = ((...args: unknown[]) => { inspect(args); return all(...args); }) as typeof statement.all;
+      statement.get = ((...args: unknown[]) => { inspect(args); return get(...args); }) as typeof statement.get;
+      return statement;
+    }) as typeof st.db.prepare;
+    try {
+      expect(reviewQueue(st, { project: "wanted", check: "repeated-tool" }).items.map((i) => i.finding.id)).toEqual([wanted.finding.id]);
+      expect(reviewItem(st, wanted.finding.id)?.finding.id).toBe(wanted.finding.id);
+    } finally { st.db.prepare = prepare; }
+    expect(plans.filter((p) => /\b(?:SCAN|SEARCH) spans\b/.test(p.detail))).toEqual([]);
+    expect(hashed.length).toBeGreaterThan(0);
+    expect(hashed.some((value) => value.includes("Unrelated"))).toBe(false);
+  });
+
   it("persists one editable review after restart, independently of resolution and precision", () => {
     const { st, dir } = setup();
     const { finding } = seed(st);
@@ -47,6 +82,24 @@ describe("local finding reviews", () => {
     expect(reviewItem(reopened, finding.id)).toMatchObject({ state: "uncertain", finding: { status: "resolved" }, review: { reason: "Need more context", source: "human" } });
     expect(reviewQueue(reopened).total).toBe(0);
     expect(reviewQueue(reopened, { state: "uncertain" }).total).toBe(1);
+  });
+
+  it("backfills evidence counters for existing stores without invalidating saved reviews", () => {
+    const { st, dir } = setup();
+    const { finding, sp, trace } = seed(st);
+    st.ingest([batch([span({ traceId: trace, name: "neatlogs.trace.complete", kind: "workflow" })], "review-agent")]);
+    expect(st.getRun(trace)!.span_count).toBe(1);
+    const version = reviewItem(st, finding.id)!.evidence_version;
+    saveReview(st, finding.id, version, judgment);
+    st.db.exec("ALTER TABLE runs DROP COLUMN evidence_seq; ALTER TABLE runs DROP COLUMN evidence_spans");
+    st.close();
+    const reopened = trackedStore(dir);
+    expect(reviewItem(reopened, finding.id)).toMatchObject({ state: "correct", evidence_version: version });
+    // A retransmission changes the sequence without increasing the number of stored spans.
+    reopened.ingest([batch([sp], "review-agent")]);
+    expect(reviewItem(reopened, finding.id)!.state).toBe("stale");
+    expect(reopened.db.prepare("SELECT evidence_seq, evidence_spans FROM runs WHERE trace_id = ?").get(trace)).toEqual(
+      reopened.db.prepare("SELECT MAX(seq) AS evidence_seq, COUNT(*) AS evidence_spans FROM spans WHERE trace_id = ?").get(trace));
   });
 
   it("invalidates on span replacement, new context, finding evidence and check changes; rejects stale saves", () => {

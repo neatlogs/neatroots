@@ -3,6 +3,7 @@ import type { Roots } from "../core.js";
 import { REVIEW_STATES, REVIEW_VERDICTS, reviewItem, reviewQueue, saveReview, type ReviewFilter, type ReviewVerdict } from "../store/reviews.js";
 import { body, clampInt, err } from "./util.js";
 
+/** Mounts local review reads and validated, evidence-versioned saves. */
 export function mountReviewsApi(app: Hono, roots: Roots): void {
   app.get("/api/reviews", (c) => {
     const q = c.req.query();
