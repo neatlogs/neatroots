@@ -258,6 +258,11 @@ export class AgentChats {
     this.closed = true;
     const groups = [...this.running.values()];
     this.running.clear();
+    if (process.platform === "win32") {
+      // No process groups on Windows: end each agent's whole process tree instead.
+      for (const p of groups) if (p.pid) spawnSync("taskkill", ["/pid", String(p.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+      return;
+    }
     for (const p of groups) signalGroup(p, "SIGTERM");
     const nap = new Int32Array(new SharedArrayBuffer(4));
     for (let waited = 0; waited < 1000 && groups.some(groupAlive); waited += 50) Atomics.wait(nap, 0, 0, 50);

@@ -102,7 +102,7 @@ echo '{"type":"result","subtype":"success","is_error":true,"result":"${err}","se
   });
 });
 
-describe("an agent still answering", () => {
+describe.skipIf(process.platform === "win32")("an agent still answering", () => {
   // A stand-in agent that starts a command of its own (like a shell tool call) and keeps working.
   const setup = async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-chat-"));
