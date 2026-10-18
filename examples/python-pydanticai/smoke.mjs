@@ -33,7 +33,7 @@ const run = (args, env) => new Promise((resolve, reject) => {
   child.stdout.on("data", b => { output += b; }); child.stderr.on("data", b => { output += b; });
   const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 60_000);
   child.once("error", error => { clearTimeout(timer); reject(error); });
-  child.once("exit", code => { clearTimeout(timer); resolve({ code, output: timedOut ? `Agent timed out after 60000ms (SIGKILL)\n${output}` : output }); });
+  child.once("close", code => { clearTimeout(timer); resolve({ code, output: timedOut ? `Agent timed out after 60000ms (SIGKILL)\n${output}` : output }); });
 });
 let roots, web, grpc, mock, trap, failure;
 try {

@@ -34,8 +34,10 @@ if name=='curl':
     print(json.dumps({'runs':[{}]*n}) if '/api/runs?' in url else '{}')
 elif name!='sleep':
     info=os.fstat(1)
+    log_path=next(p for p in pathlib.Path(os.environ['TMPDIR']).glob('neatroots-example.*')
+                  if os.path.samestat(info, p.stat()))
     with (root/'records').open('a') as f:
-        f.write(json.dumps({'path':os.readlink('/proc/self/fd/1'),'mode':stat.S_IMODE(info.st_mode)})+'\\n')
+        f.write(json.dumps({'path':str(log_path),'mode':stat.S_IMODE(info.st_mode)})+'\\n')
     print('fixture output')
     if os.environ['FAIL']=='0': count.write_text(str(n+1))
 """

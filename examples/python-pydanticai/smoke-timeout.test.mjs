@@ -15,10 +15,16 @@ for (const timeout of [false, true]) test(`child diagnostics: timeout=${timeout}
     process: { env: {} }, here: ".", spawn: () => child,
     setTimeout: callback => { timer = callback; return 1; }, clearTimeout: () => {},
   });
-  const result = run([], {});
+  let resolved = false;
+  const result = run([], {}).then(receipt => { resolved = true; return receipt; });
   child.stderr.emit("data", "child output");
   if (timeout) timer(); else child.emit("exit", 0);
+  await Promise.resolve();
+  assert.equal(resolved, false, "Must wait for stdio close after exit");
+  child.stderr.emit("data", " trailing stderr");
+  child.emit("close", timeout ? null : 0);
   const receipt = await result;
+  assert.match(receipt.output, /child output trailing stderr/);
   if (timeout) { assert.equal(killed, "SIGKILL"); assert.match(receipt.output, /timed out after 60000ms/); }
-  else { assert.equal(receipt.code, 0); assert.equal(receipt.output, "child output"); }
+  else { assert.equal(receipt.code, 0); assert.equal(receipt.output, "child output trailing stderr"); }
 });
