@@ -18,9 +18,9 @@ async function cloudForm(page: Page) {
     } else if (pathname === "/api/settings") {
       const submitted = route.request().postDataJSON() as Save;
       saves.push(submitted);
-      await hold;
       if (reject) { reject = false; await route.fulfill({ status: 400, json: { error: "mock rejection" } }); return; }
       patterns = [...submitted.redact_patterns]; endpoint = submitted.cloud_endpoint;
+      await hold;
       await route.fulfill({ json: { ok: true, projects: [] } });
     } else if (pathname === "/api/events") {
       await route.fulfill({ contentType: "text/event-stream", body: "" });
@@ -34,7 +34,7 @@ async function cloudForm(page: Page) {
   await expect(box).toHaveValue("secret_[0-9]+");
   return {
     box, save, saves,
-    update: (value: string[]) => { patterns = value; },
+    update: (value: string[], region = endpoint) => { patterns = value; endpoint = region; },
     stored: () => patterns,
     rejectNext: () => { reject = true; },
     delayNext: () => { let release!: () => void; hold = new Promise<void>((resolve) => { release = resolve; }); return () => { release(); hold = undefined; }; },
@@ -103,4 +103,21 @@ test("a rejected save keeps the draft through background refresh and retry", asy
   await expect(f.box).toHaveValue("keep this draft");
   await f.save.click();
   await expect.poll(f.stored).toEqual(["keep this draft"]);
+});
+
+test("a delayed clean save preserves newer hydrated endpoint and patterns", async ({ page }) => {
+  const f = await cloudForm(page);
+  const region = page.getByRole("combobox").first();
+  const release = f.delayNext();
+  await f.save.click();
+  await expect.poll(() => f.saves.length).toBe(1);
+  expect(f.saves[0]).toEqual({ cloud_endpoint: "https://ingest.neatlogs.com", redact_patterns: ["secret_[0-9]+"] });
+  f.update(["newer_external"], "https://eu.ingest.neatlogs.com");
+  await f.refresh();
+  await expect(region).toContainText("EU");
+  await expect(f.box).toHaveValue("newer_external");
+  release();
+  await expect(f.save).toBeEnabled();
+  await expect(region).toContainText("EU");
+  await expect(f.box).toHaveValue("newer_external");
 });
