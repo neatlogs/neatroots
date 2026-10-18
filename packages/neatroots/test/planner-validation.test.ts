@@ -63,6 +63,45 @@ describe("planner payload validation", () => {
     expect(llm.requests.filter((r) => r.response_format?.json_schema?.name === "plan")).toHaveLength(1);
   });
 
+  it.each([
+    ["unknown selection", { checks: ["unfinished-task", "ignored-tool-error", "system-prompt-violation", "unknown-check"].map((id) => ({ id })), new_questions: [question] }],
+    ["punctuation ID", { checks: [], new_questions: [question, { ...question, id: "!!!" }] }],
+    ["normalized collision", { checks: [], new_questions: ["a b", "a-b", "a_b"].map((id) => ({ ...question, id })) }],
+    ["truncated collision", { checks: [], new_questions: ["x".repeat(40) + "a", "x".repeat(40) + "b"].map((id) => ({ ...question, id })) }],
+  ])("rejects %s before any generated writes", async (_name, payload) => {
+    const { tb, traceId, save, insertPlan } = await start(payload);
+    const plan = tb.roots.store.getPlan(tb.roots.store.getRun(traceId)!.plan_id!)!;
+    expect(plan.created_by).toBe("default");
+    expect(save).not.toHaveBeenCalled();
+    expect(insertPlan).toHaveBeenCalledTimes(1);
+    expect(new Set(plan.check_ids).size).toBe(plan.check_ids.length);
+    expect(plan.check_ids.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("counts duplicate selected IDs once and supplements the minimum", async () => {
+    const { tb, traceId } = await start({ checks: Array(3).fill({ id: "unfinished-task" }), new_questions: [] });
+    const plan = tb.roots.store.getPlan(tb.roots.store.getRun(traceId)!.plan_id!)!;
+    expect(plan.created_by).toBe("planner");
+    expect(new Set(plan.check_ids).size).toBe(plan.check_ids.length);
+    expect(plan.check_ids.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("preserves absent and placeholder ID question fallbacks", async () => {
+    const { tb, traceId, save } = await start({ checks: [], new_questions: [
+      { ask: "Did the agent omit ownership verification?" },
+      { id: "question-1", ask: "Did the agent ignore refund limits?" },
+      { id: "Meaningful Policy", ask: "Did the agent violate the business policy?" },
+    ] });
+    const plan = tb.roots.store.getPlan(tb.roots.store.getRun(traceId)!.plan_id!)!;
+    expect(plan.created_by).toBe("planner");
+    expect(save).toHaveBeenCalledTimes(3);
+    expect(plan.check_ids).toEqual([
+      "test-agent.did-the-agent-omit-ownership-verificatio",
+      "test-agent.did-the-agent-ignore-refund-limits",
+      "test-agent.meaningful-policy",
+    ]);
+  });
+
   it("preserves valid library parameters and generated span and trace questions", async () => {
     const { tb, traceId, save } = await start({
       rationale: "Checks for refunds",

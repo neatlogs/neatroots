@@ -30,3 +30,13 @@ export type PlannerOutput = z.infer<typeof PlannerOutput>;
 export function parsePlannerOutput(value: unknown): PlannerOutput {
   return PlannerOutput.parse(value);
 }
+
+/** Use the same final ID for validation and persistence. */
+export function generatedPlannerId(workflow: string, question: PlannerOutput["new_questions"][number]): string {
+  const base = question.id && !/^(new|question|q|check)[-_ ]?\d*$|new[-_]?question/i.test(question.id)
+    ? question.id : question.ask;
+  const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  const name = normalize(base);
+  if (!name) throw new Error("generated planner check ID has no meaningful slug");
+  return `${normalize(workflow) || "check"}.${name}`.slice(0, 64);
+}
