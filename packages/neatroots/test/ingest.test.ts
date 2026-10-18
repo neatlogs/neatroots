@@ -1,6 +1,8 @@
 import http from "node:http";
+import { spawnSync } from "node:child_process";
 import * as grpc from "@grpc/grpc-js";
 import { afterEach, describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
 import { httpTraceToBatches, HttpTraceError } from "../src/ingest/http-trace.js";
 import { startGrpc } from "../src/ingest/grpc.js";
 import { parseTraceFile } from "../src/ingest/importers/file.js";
@@ -9,6 +11,7 @@ import { encodeTraceRequest } from "../src/otlp/codec.js";
 import { buildView } from "../src/semantics/view.js";
 import { batch, freePort, hex, makeRoots, s, span, type TestRoots } from "./helpers.js";
 
+const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 let t: TestRoots | undefined;
 afterEach(async () => {
   await t?.close();
@@ -144,6 +147,90 @@ describe("Neatlogs HTTP trace API (POST /v1/trace)", () => {
 });
 
 describe("OTLP over gRPC", () => {
+  it("keeps the server alive after an invalid compressed Export", async () => {
+    const grpcPort = await freePort();
+    const childSource = `
+import * as grpc from "@grpc/grpc-js";
+import http2 from "node:http2";
+import { startGrpc } from "./src/ingest/grpc.js";
+const grpcPort = __GRPC_PORT__;
+const path = "/opentelemetry.proto.collector.trace.v1.TraceService/Export";
+let ingested = 0;
+const roots = { config: { host: "127.0.0.1", grpcPort }, ingest: () => { ingested += 1; }, store: { ingestLogs: () => {} } };
+const server = await startGrpc(roots);
+if (!server) throw new Error("gRPC server did not start");
+let session;
+let client;
+try {
+  session = http2.connect("http://127.0.0.1:" + grpcPort);
+  const stream = session.request({ ":method": "POST", ":path": path, "content-type": "application/grpc", te: "trailers", "grpc-encoding": "gzip" });
+  const malformed = await new Promise(resolve => {
+    let responseHeaders;
+    let responseTrailers;
+    let responseBodyBytes = 0;
+    let streamError;
+    let rstCode;
+    let settled = false;
+    const events = [];
+    const finish = timedOut => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        httpStatus: responseHeaders?.[":status"],
+        responseGrpcStatus: responseHeaders?.["grpc-status"],
+        responseGrpcMessage: responseHeaders?.["grpc-message"],
+        grpcStatus: responseTrailers?.["grpc-status"],
+        grpcMessage: responseTrailers?.["grpc-message"],
+        responseBodyBytes,
+        streamError,
+        rstCode,
+        events,
+        timedOut,
+      });
+    };
+    const timer = setTimeout(() => finish(true), 1500);
+    stream.on("response", headers => { responseHeaders = headers; events.push("response"); });
+    stream.on("trailers", trailers => { responseTrailers = trailers; events.push("trailers"); });
+    // Consume the response so trailers and end/close reflect the full server reply.
+    stream.on("data", chunk => { responseBodyBytes += chunk.length; events.push("data"); });
+    stream.on("end", () => { events.push("end"); });
+    stream.on("aborted", () => { events.push("aborted"); });
+    stream.on("close", () => { events.push("close"); rstCode = stream.rstCode; finish(false); });
+    stream.on("error", error => { streamError = { name: error.name, code: error.code, message: error.message }; events.push("error"); });
+    stream.end(Buffer.from([1, 0, 0, 0, 5, 0xde, 0xad, 0xbe, 0xef, 0x00]));
+  });
+  client = new grpc.Client("127.0.0.1:" + grpcPort, grpc.credentials.createInsecure());
+  const healthy = await new Promise((resolve, reject) => {
+    client.makeUnaryRequest(path, value => value, value => value, Buffer.alloc(0), new grpc.Metadata(), { deadline: new Date(Date.now() + 3000) }, error => error ? reject(error) : resolve(true));
+  });
+  if (ingested !== 1) throw new Error("healthy Export did not reach the OTLP handler");
+  console.log(JSON.stringify({ malformed, healthy, ingested }));
+} finally {
+  session?.destroy();
+  client?.close();
+  server.forceShutdown();
+}
+`;
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childSource.replace("__GRPC_PORT__", String(grpcPort))], {
+      cwd: packageRoot,
+      encoding: "utf8",
+      timeout: 8000,
+    });
+    expect(child.error, child.stderr || "child process failed to start").toBeUndefined();
+    expect(child.status, child.stderr || child.stdout).toBe(0);
+    const result = JSON.parse(child.stdout.trim());
+    expect(result.malformed.timedOut, JSON.stringify(result.malformed)).toBe(false);
+    expect(result.malformed.events, JSON.stringify(result.malformed)).toContain("end");
+    expect(result.malformed.httpStatus, JSON.stringify(result.malformed)).toBe(200);
+    // Require rejection without assuming a particular grpc-js status mapping.
+    const grpcStatus = result.malformed.grpcStatus ?? result.malformed.responseGrpcStatus;
+    expect(grpcStatus, JSON.stringify(result.malformed)).toBeDefined();
+    expect(String(grpcStatus), JSON.stringify(result.malformed)).not.toBe("0");
+    expect(result.healthy).toBe(true);
+    expect(result.ingested).toBe(1);
+  }, 10_000);
+
   it("stores what an exporter sends to TraceService/Export", async () => {
     const grpcPort = await freePort();
     t = await makeRoots({ noEngine: true, config: (c) => (c.grpcPort = grpcPort) });

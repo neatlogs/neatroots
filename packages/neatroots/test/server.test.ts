@@ -53,6 +53,24 @@ describe("server", () => {
     expect(json.status).toBe(400);
   });
 
+  it("caps decompression for gzip bodies sniffed by magic bytes", async () => {
+    const tb = await served();
+    const { t, batches } = sampleRun();
+    const sniffed = await fetch(`${tb.url}/v1/traces`, {
+      method: "POST",
+      headers: { "content-type": "application/x-protobuf", "x-api-key": "anything" },
+      body: zlib.gzipSync(encodeTraceRequest(batches)),
+    });
+    expect(sniffed.status).toBe(200);
+    expect(tb.roots.store.getRun(t)?.span_count).toBe(3);
+    const tooBig = await fetch(`${tb.url}/v1/traces`, {
+      method: "POST",
+      headers: { "content-type": "application/x-protobuf" },
+      body: zlib.gzipSync(Buffer.alloc(257 * 1024 * 1024)),
+    });
+    expect(tooBig.status).toBe(413);
+  });
+
   it("refuses foreign Host headers and cross-origin API calls, but allows OTLP from local pages", async () => {
     const tb = await served();
     const evilStatus = await new Promise<number>((resolve) => {
@@ -285,6 +303,16 @@ describe("server", () => {
     expect(await r.json()).toEqual({ mode: "unknown", known: false, note: null });
   });
 
+  it("rejects non-string trace ids before querying the store", async () => {
+    const tb = await served(false);
+    const headers = { "content-type": "application/json" };
+    for (const path of ["/api/steer/claim", "/api/steer/check", "/api/focus"]) {
+      const r = await fetch(`${tb.url}${path}`, { method: "POST", headers, body: JSON.stringify({ trace_id: {}, question: "Did it fail?", project: "test" }) });
+      expect(r.status, path).toBe(400);
+    }
+    expect((await fetch(`${tb.url}/api/focus`, { method: "POST", headers, body: "{}" })).status).toBe(200);
+  });
+
   it("refuses retention values it can't use instead of answering ok and ignoring them", async () => {
     const tb = await served();
     const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
@@ -302,6 +330,26 @@ describe("server", () => {
     // valid values still save
     expect((await save({ retention_days: 30, retention_max_gb: 2.5 })).status).toBe(200);
     expect(tb.roots.config.retention).toEqual({ days: 30, maxGb: 2.5 });
+  });
+
+  it("refuses non-boolean settings before applying any of them", async () => {
+    const tb = await served();
+    tb.roots.config.steering.enabled = false;
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const save = (b: unknown) => fetch(`${tb.url}/api/settings`, { method: "POST", headers, body: JSON.stringify(b) });
+    const malformed = { project: "shop", forward: "false", steering_enabled: "false", jev_cloud_enabled: "false", laya_enabled: "false" };
+
+    expect((await save(malformed)).status).toBe(400);
+    expect(tb.roots.config.projects.shop).toBeUndefined();
+    expect(tb.roots.config.steering.enabled).toBe(false);
+    expect(tb.roots.config.classifier.jevCloud.enabled).toBe(false);
+    expect(tb.roots.config.classifier.laya.enabled).toBe(false);
+
+    expect((await save({ project: "shop", forward: true, steering_enabled: true, jev_cloud_enabled: true, laya_enabled: true })).status).toBe(200);
+    expect(tb.roots.config.projects.shop?.forward).toBe(true);
+    expect(tb.roots.config.steering.enabled).toBe(true);
+    expect(tb.roots.config.classifier.jevCloud.enabled).toBe(true);
+    expect(tb.roots.config.classifier.laya.enabled).toBe(true);
   });
 
   it("clamps the findings list limit instead of failing on a bad value", async () => {
@@ -351,6 +399,18 @@ describe("server", () => {
     expect(await count("?after=abc")).toBe(2); // not a number: from the start; was none
   });
 
+  it("rejects a non-string chat message instead of throwing", async () => {
+    const tb = await served();
+    const id = tb.roots.chats.create({ agent: "claude", cwd: os.tmpdir() }).id;
+    const r = await fetch(`${tb.url}/api/chat/sessions/${id}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") },
+      body: JSON.stringify({ text: 5 }),
+    });
+    expect(r.status).toBe(400);
+    expect(await r.json()).toEqual({ error: "text is required" });
+  });
+
   it("returns 404 JSON for unknown /api and /v1 routes, not the SPA", async () => {
     const tb = await served();
     for (const path of ["/api/anything-unknown", "/api/imports/abc", "/v1/unknown"]) {
@@ -394,6 +454,20 @@ describe("server", () => {
     expect(res.headers.get("content-type")).toMatch(/text\/html/);
     const body = await res.text();
     expect(body).not.toContain("secret-content");
+  });
+
+  it("a malformed percent-escape in the path serves the app shell instead of a 500", async () => {
+    const uiDir = findUiDir();
+    if (!uiDir) return; // UI not built in this environment; skip rather than false-pass
+    const tb = await served();
+    for (const p of ["/%zz", "/%e0%a4", "/assets/%", "/%2"]) {
+      const res = await fetch(`${tb.url}${p}`);
+      expect(res.status, p).toBe(200);
+      expect(res.headers.get("content-type"), p).toMatch(/text\/html/);
+    }
+    const ok = await fetch(`${tb.url}/%25zz`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-type")).toMatch(/text\/html/);
   });
 
   it("gives a helpful error (not a raw fetch failure) when no LLM is reachable", async () => {

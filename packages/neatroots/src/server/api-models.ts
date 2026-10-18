@@ -19,30 +19,32 @@ export interface ExternalLlmInput {
 
 /** Applies a change to llm.external, returning an error message when it is invalid. */
 export function applyExternalLlm(cfg: RootsConfig["llm"]["external"], b: ExternalLlmInput): string | undefined {
+  const next = { ...cfg };
   if (b.provider !== undefined) {
     const p = providerById(b.provider);
     if (!p) return `provider must be one of ${PROVIDERS.map((x) => x.id).join(", ")}`;
-    if (b.provider !== cfg.provider) {
-      cfg.provider = b.provider;
-      cfg.model = p.defaultModel;
-      cfg.baseUrl = "";
+    if (b.provider !== next.provider) {
+      next.provider = b.provider;
+      next.model = p.defaultModel;
+      next.baseUrl = "";
     }
   }
-  if (b.model !== undefined) cfg.model = b.model.trim();
+  if (b.model !== undefined) next.model = b.model.trim();
   if (b.base_url !== undefined) {
     const u = b.base_url.trim();
     if (u && !/^https?:\/\//.test(u)) return "base URL must start with http:// or https://";
-    cfg.baseUrl = u;
+    next.baseUrl = u;
   }
   if (b.redact !== undefined) {
     if (!(REDACT as readonly string[]).includes(b.redact)) return "redact must be secrets, all or off";
-    cfg.redact = b.redact as (typeof REDACT)[number];
+    next.redact = b.redact as (typeof REDACT)[number];
   }
-  if (b.fallback_to_local !== undefined) cfg.fallbackToLocal = !!b.fallback_to_local;
-  if (b.enabled !== undefined) cfg.enabled = !!b.enabled;
-  const p = providerById(cfg.provider);
-  if (cfg.enabled && !(cfg.baseUrl || p?.baseUrl)) return "this provider needs a base URL";
-  if (cfg.enabled && !(cfg.model || p?.defaultModel)) return "pick a model first";
+  if (b.fallback_to_local !== undefined) next.fallbackToLocal = !!b.fallback_to_local;
+  if (b.enabled !== undefined) next.enabled = !!b.enabled;
+  const p = providerById(next.provider);
+  if (next.enabled && !(next.baseUrl || p?.baseUrl)) return "this provider needs a base URL";
+  if (next.enabled && !(next.model || p?.defaultModel)) return "pick a model first";
+  Object.assign(cfg, next);
   return undefined;
 }
 

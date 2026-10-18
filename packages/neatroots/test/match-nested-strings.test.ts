@@ -6,10 +6,11 @@ import { loadTrace } from "../src/engine/trace.js";
 import { evaluateRule } from "../src/checks/rules.js";
 import { parseChecks } from "../src/checks/registry.js";
 import type { RuleCheck } from "../src/checks/types.js";
-import { batch, hex, tmpHome, toolSpan } from "./helpers.js";
+import { batch, closeTrackedStores, hex, tmpHome, toolSpan, trackedStore } from "./helpers.js";
 
 const homes: string[] = [];
 afterEach(() => {
+  closeTrackedStores();
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 const library = parseChecks(fs.readFileSync(new URL("../library/rules.yaml", import.meta.url), "utf8")).checks;
@@ -21,7 +22,7 @@ const mcp = (text: string, isError = false) => JSON.stringify({ content: [{ type
 function fires(rule: RuleCheck, output: string): boolean {
   const h = tmpHome();
   homes.push(h);
-  const st = new Store(path.join(h, "data"));
+  const st = trackedStore(path.join(h, "data"));
   const t = hex(16);
   st.ingest([batch([toolSpan(t, hex(8), "get_weather", '{"city":"Lagos"}', output)])]);
   return evaluateRule(rule, loadTrace(st, t), false)?.firing === true;

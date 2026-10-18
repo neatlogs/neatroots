@@ -30,4 +30,4 @@ and the HTTP API example, and checks that each produced a run. Run `browser`, `i
 | [browser](browser) | HTML + JS | Neatlogs HTTP trace API from the browser | A chat widget sending traces |
 | [import-files](import-files) | files | `neatroots import` or Add data → Import files | An OpenInference OTLP JSON trace and Neatlogs HTTP traces as JSONL |
 | [refund-agent](refund-agent) | Python | Neatlogs SDK + steering hook | Steering: neatroots adds a note to the agent's next LLM call |
-| [samples](samples) | Python | Neatlogs SDK | Seven scripted failure scenarios (loops, ignored errors, prompt injection, leaks) |
+| [samples](samples) | Python | Neatlogs SDK | Eight scripted scenarios: six failures (loops, ignored errors, prompt injection, leaks, contradictions) and two healthy controls |

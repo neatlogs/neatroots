@@ -19,12 +19,16 @@ function run(toolOut: string, llmOut?: string) {
   const h = tmpHome();
   homes.push(h);
   const st = new Store(path.join(h, "data"));
-  const t = hex(16);
-  const root = hex(8);
-  const spans = [toolSpan(t, root, "fetch_config", "{}", toolOut)];
-  if (llmOut) spans.push(llmSpan(t, root, { user: "hi", out: llmOut }));
-  st.ingest([batch(spans)]);
-  return evaluateRule(rule, loadTrace(st, t), false);
+  try {
+    const t = hex(16);
+    const root = hex(8);
+    const spans = [toolSpan(t, root, "fetch_config", "{}", toolOut)];
+    if (llmOut) spans.push(llmSpan(t, root, { user: "hi", out: llmOut }));
+    st.ingest([batch(spans)]);
+    return evaluateRule(rule, loadTrace(st, t), false);
+  } finally {
+    st.close();
+  }
 }
 
 const random = (n: number, seed: number) => {

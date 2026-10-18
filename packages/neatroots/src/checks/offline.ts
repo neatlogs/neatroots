@@ -38,10 +38,9 @@ export function checkFiles(files: string[], opts: OfflineOptions = {}): { runs: 
     if (opts.only && !opts.only.length) throw new Error("--only names no rule ids");
     const registry = new CheckRegistry(store, path.join(rootsHome(), "checks"), () => opts.dirs ?? []);
     const errors = registry.errors.map((e) => `${e.path}: ${e.message.split("\n")[0]}`);
-    const rules = registry
-      .rules()
-      .map((lc) => lc.check)
-      .filter((c): c is RuleCheck => isRule(c) && (!opts.only || opts.only.includes(c.id)));
+    const loaded = registry.rules().filter((lc) => isRule(lc.check) && (!opts.only || opts.only.includes(lc.check.id)));
+    const rules = loaded.map((lc) => lc.check as RuleCheck);
+    const untrusted = new Set(loaded.filter((lc) => lc.source !== "library").map((lc) => lc.check.id));
     const unknown = (opts.only ?? []).filter((id) => !rules.some((r) => r.id === id));
     if (unknown.length) throw new Error(`no rule check named ${unknown.join(", ")}`);
     const runs: OfflineRun[] = [];
@@ -55,7 +54,7 @@ export function checkFiles(files: string[], opts: OfflineOptions = {}): { runs: 
           const a = rule.applies_to;
           const list = (v: string | string[] | undefined) => (v === undefined ? undefined : Array.isArray(v) ? v : [v]);
           if (run && ((list(a?.project) && !list(a?.project)!.includes(run.project ?? "")) || (list(a?.workflow) && !list(a?.workflow)!.includes(run.workflow ?? "")))) continue;
-          const hit = evaluateRule(rule, snap, true);
+          const hit = evaluateRule(rule, snap, true, undefined, untrusted.has(rule.id));
           if (hit) findings.push({ check_id: rule.id, title: rule.title ?? rule.id, evidence_span_ids: hit.evidenceSpanIds, params: hit.params });
         }
         runs.push({ file, trace_id: traceId, root_name: run?.root_name ?? null, findings });

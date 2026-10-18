@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Command } from "commander";
 import { loadConfig, saveConfig } from "../config.js";
 import { cloudApiBase, listCloudProjects } from "../ingest/importers/neatlogs-cloud.js";
+import { endpointProblem } from "../relay/endpoint.js";
 import { deleteCloudToken, getCloudToken, setCloudToken } from "../relay/keychain.js";
 import type { ImportSource } from "../ingest/importers/types.js";
 import { api, ask, port, running } from "./util.js";
@@ -171,6 +172,17 @@ async function setImportProject(projectId: string | null): Promise<void> {
   }
 }
 
+/**
+ * Where the CLI sends the service-account token: the same check as the server's cloudImportBase,
+ * so a hand-edited cloud.apiBase can't send the token over plain http or to another host.
+ */
+export function checkedCloudApiBase(cfg: ReturnType<typeof loadConfig>): string {
+  const base = cloudApiBase(cfg.cloud.endpoint, cfg.cloud.apiBase);
+  const problem = endpointProblem(base, !!cfg.cloud.trustEndpoint);
+  if (problem) throw new Error(problem);
+  return base;
+}
+
 /** neatroots cloud token / cloud project: what importing from Neatlogs Cloud reads with. */
 export function registerCloudImportCommands(cloud: Command): void {
   cloud
@@ -189,10 +201,12 @@ export function registerCloudImportCommands(cloud: Command): void {
       const where = await setCloudToken(token);
       console.log(`✓ stored in the ${where === "keychain" ? "macOS Keychain" : "file ~/.neatroots/cloud-service-token"}`);
       const cfg = loadConfig();
-      const projects = await listCloudProjects(cloudApiBase(cfg.cloud.endpoint, cfg.cloud.apiBase), token).catch((e: Error) => {
-        console.log(`! couldn't list its projects: ${e.message}`);
-        return null;
-      });
+      const projects = await Promise.resolve()
+        .then(() => listCloudProjects(checkedCloudApiBase(cfg), token))
+        .catch((e: Error) => {
+          console.log(`! couldn't list its projects: ${e.message}`);
+          return null;
+        });
       if (!projects) return;
       if (projects.length === 1) {
         await setImportProject(projects[0].id);
@@ -216,7 +230,7 @@ export function registerCloudImportCommands(cloud: Command): void {
       const token = await getCloudToken();
       if (!token) throw new Error("no service-account token stored: run neatroots cloud token");
       const cfg = loadConfig();
-      const projects = await listCloudProjects(cloudApiBase(cfg.cloud.endpoint, cfg.cloud.apiBase), token);
+      const projects = await listCloudProjects(checkedCloudApiBase(cfg), token);
       if (!projects.length) console.log("The token can't read any project.");
       for (const pr of projects) console.log(`${pr.id === cfg.cloud.projectId ? "→" : " "} ${pr.id}  ${pr.name}${pr.isDefault ? "  (default)" : ""}`);
     });
