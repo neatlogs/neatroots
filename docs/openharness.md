@@ -19,7 +19,7 @@ Setting exporter variables configures an exporter; it does not instrument an age
 The instrumentation prerequisite is the agent's own, and the named setup below states
 it.
 
-## Named setup (Milestone 1)
+## Historical named setup (PR #221, 2026-10-16)
 
 | | |
 |---|---|
@@ -39,12 +39,15 @@ harness dsh install /path/to/neatroots/integrations/openharness --link
 harness dsh doctor neatlogs/neatroots
 ```
 
-Then create a **Neatroots** harness in Harness and talk to the agent as usual.
-Every turn appears in neatroots at <http://localhost:4100>.
+Then create a **Neatroots** harness in Harness. Verify an explicit synthetic
+trace and check result before relying on telemetry; a ready pane is not proof
+that instrumentation delivered its spans.
 
-## Verification (2026-10-16, one headless Linux machine)
+## Historical contributor verification (2026-10-16)
 
-Every step was run against this package as shipped.
+The following table is the PR #221 author’s report for commit
+ade7f5b0996d24d867868e5b2b06b133a42a359b on one headless Linux machine.
+It was not rerun against the modified setup below and is not current acceptance.
 
 | Step | Result |
 |---|---|
@@ -84,3 +87,75 @@ Two honest findings from the run:
 Same machine only: the agent and neatroots run on one machine and the exporter points
 at loopback, per #172's milestone 1. Broader engine coverage is follow-up work, engine
 by engine.
+
+
+## Dependent setup correction
+
+The package now installs locked neatlogs 1.1.28 in a private workspace directory,
+refuses conflicting user plugins, and writes a dedicated success marker after
+import verification. NOTES.md is no longer treated as proof of instrumentation.
+Retry after an initialization failure; the OpenHarness runtime itself only warns
+on init failure, so a launched pane is not a readiness receipt.
+
+Install a published revision with:
+
+    harness dsh install https://github.com/neatlogs/neatroots --path integrations/openharness --ref <published-commit>
+
+The package README is self-contained for sparse subdirectory installs. The
+original verification above is contributor evidence for PR221, not a rerun of
+this correction. Current correction validation is reported separately below.
+The unchanged OTEL variables may still produce internal OpenCode telemetry noise.
+The exact-trace verifier avoids conflating it with the synthetic agent run.
+
+
+## Current correction validation (2026-10-18)
+
+Tested with Node 24.18.0, native OpenCode 1.19.2, locked neatlogs 1.1.28,
+and OpenHarness commit 7476ac0303000ad62f9ff7f6f9f317abda62e0fd.
+
+- Package tests: 13 passed, including failed install, retry/idempotence,
+  conflicting registration, external dependency links, missing/wrong SDK,
+  bounded health checks and exact-trace verifier failures.
+- Official DSH static check: passes with the expected warning that the success
+  marker is absent from the template.
+- Official materialization: failed offline install leaves no success marker;
+  retry succeeds and preserves an existing NOTES.md.
+- Nested Git install at the exact published PR #221 commit: passes. The modified
+  package was tested by local linked install; public installation of this
+  correction remains unverified until it is published.
+- Actual signed-out local daemon DSH create and official restart of the same
+  agent: pass. Each phase produced a distinct completed trace accepted by the
+  unchanged exact-trace verifier, with linked LLM and tool spans, a matching
+  `openharness-smoke` rule finding referencing recorded spans, and completed
+  rules-only coverage with no pending jobs. The create trace had 15 LLM spans
+  and one tool span; the restart trace had two LLM spans and one tool span.
+  This proves bounded local synthetic acceptance, not model-backed checks,
+  paid/hosted operation or physical-machine acceptance.
+
+### Explicit local launch route
+
+For that test, the actual daemon's `agent_create` request supplied an explicit
+`grid` route with `networkName: "localmock"`, `model: "mock"`, a fixture network
+identifier, and the private loopback mock's `/v1` base URL. No remote Grid service
+or real provider credential was used. OpenCode configuration enabled only the
+synthetic `smoke` tool. The route was saved by OpenHarness and retained by the
+same agent's official `agent_restart`.
+
+At the pinned OpenHarness revision, see the public implementations of
+[agent creation](https://github.com/autonomous-ai/openharness/blob/7476ac0303000ad62f9ff7f6f9f317abda62e0fd/cli/src/core/agents/create.ts),
+[launch defaults](https://github.com/autonomous-ai/openharness/blob/7476ac0303000ad62f9ff7f6f9f317abda62e0fd/cli/src/lib/harnessDefaults.ts),
+[explicit routing](https://github.com/autonomous-ai/openharness/blob/7476ac0303000ad62f9ff7f6f9f317abda62e0fd/cli/src/lib/gridLaunch.ts),
+and [restart](https://github.com/autonomous-ai/openharness/blob/7476ac0303000ad62f9ff7f6f9f317abda62e0fd/cli/src/core/agents/restart.ts).
+Workspace-only model settings do not override the launcher's default-model
+policy. Before each test prompt, the running process's arguments and effective
+configuration were checked for `-m localmock/mock`, the expected loopback
+endpoint, and the absence of an inline model override. That proof applies to
+these two tested launches; future launches need their own verification.
+
+Earlier attempts are retained as failure history: an unavailable fixture import,
+an unintended built-in tool with no tool-span receipt, and a launcher default
+that overrode workspace model settings. A later restart also received its prompt
+before offline initialization completed. The successful fixture allowed 65
+seconds for readiness after model-route verification, based on an observed
+roughly 53-second offline dependency initialization delay. This was a test-fixture
+adjustment; no ingest or OpenHarness launch-policy code changed.

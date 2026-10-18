@@ -1,0 +1,9 @@
+{
+  "name": "neatroots-openharness-instrumentation",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "neatlogs": "1.1.28"
+  }
+}

@@ -1,0 +1,7 @@
+id: openharness-smoke
+kind: rule
+title: OpenHarness synthetic marker observed
+rule:
+  type: match
+  field: output
+  pattern: OPENHARNESS_SMOKE_MARKER

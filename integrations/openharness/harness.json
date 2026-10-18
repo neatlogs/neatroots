@@ -8,7 +8,7 @@
   "engine": "opencode",
   "workspace": {
     "template": "template",
-    "marker": "NOTES.md",
+    "marker": ".harness/neatroots-instrumentation-v1.json",
     "init": "toolchain/init-workspace.sh"
   },
   "viewer": {
