@@ -81,6 +81,9 @@ const NEAR = [
   "TAS" + "K0123456789abcdef0123456789abcdef",
   // A key glued to a preceding underscore has no word boundary, same as the redactor.
   "token_ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+  "I created branch task-add-user-authentication-flow and pushed it",
+  "Saved the file as risk-assessment-report-q3-2026.md",
+  "Set the kiosk-mode-configuration-for-lobby flag",
 ];
 
 describe("secret-in-output", () => {
