@@ -316,12 +316,17 @@ export class Replays {
     }
   }
 
-  /** A batch may replace fallback navigation only after verifying unique explicit evidence. */
-  associateBatch(id: string, traceId: string): void {
+  /** A batch replaces navigation with unique evidence, or clears a contested association. */
+  associateBatch(id: string, traceId: string | null): void {
     if (this.closed || !this.roots.store.db.open) return;
     const replay = this.get(id);
+    if (!replay || replay.kind !== "run" || replay.state === "running" || replay.new_trace_id === traceId) return;
+    if (traceId === null) {
+      this.save({ ...replay, new_trace_id: null, output_preview: null });
+      return;
+    }
     const run = this.roots.store.getRun(traceId);
-    if (!replay || replay.kind !== "run" || replay.state === "running" || !run || replay.new_trace_id === traceId) return;
+    if (!run) return;
     this.save({ ...replay, new_trace_id: traceId, output_preview: run.output_preview });
   }
 
