@@ -1113,7 +1113,7 @@ export class Store {
   /** How often the person dismissed a check's findings in one project. */
   dismissalsIn(checkId: string, project: string): number {
     const r = this.db
-      .prepare("SELECT COUNT(*) AS n FROM findings f JOIN runs r ON r.trace_id = f.trace_id JOIN checks c ON c.id = f.check_id AND c.metric_generation = f.metric_generation WHERE f.check_id = ? AND r.project = ? AND f.metric_counted = 1 AND f.status = 'dismissed'")
+      .prepare("SELECT COUNT(*) AS n FROM findings f JOIN runs r ON r.trace_id = f.trace_id WHERE f.check_id = ? AND r.project = ? AND f.status = 'dismissed'")
       .get(checkId, project) as { n: number };
     return r.n;
   }
