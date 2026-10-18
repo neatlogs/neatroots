@@ -70,7 +70,20 @@ describe("a question whose model call failed", () => {
     tb.roots.ingest([batch([toolSpan(t, root, "charge_card", '{"order":"4513"}', '{"status":"card declined"}')])]);
     // The live check's call is dropped; the run then ends.
     await until(() => llm.seen.dropped === 1, 10_000);
-    await tb.roots.engine!.waitIdle(t, 10_000);
+    if (scope === "span") {
+      const engine = tb.roots.engine! as unknown as {
+        live: Map<string, { retrySpans: Map<string, Set<string>> }>;
+      };
+      // This work is recorded, but can only run at end: it must not hold live idleness open.
+      await until(() => !!engine.live.get(t)?.retrySpans.get("charge-failed")?.size);
+      expect(await tb.roots.engine!.waitIdle(t, 1_000)).toBe(true);
+      expect(engine.live.get(t)!.retrySpans.get("charge-failed")!.size).toBe(1);
+      expect(llm.seen.asked).toBe(1);
+      expect(tb.roots.checkCompletion.hasEnded(t)).toBe(false);
+      expect(tb.roots.checkCompletion.state(t)).not.toBe("settled");
+    } else {
+      await tb.roots.engine!.waitIdle(t, 10_000);
+    }
     tb.roots.ingest([batch([llmSpan(t, root, { user: "continue", out: "Order 4513 is charged." }), span({ traceId: t, spanId: root, name: "billing", kind: "workflow" }), markerSpan(t, root)])]);
     await until(() => tb.roots.store.getSummary(t), 20_000);
     await tb.roots.engine!.waitIdle(t, 10_000);

@@ -43,6 +43,8 @@ export function ReplayDialog({ traceId, spans, initialSpan, onClose }: { traceId
   const [input, setInput] = useState<string | undefined>();
   const [system, setSystem] = useState<string | undefined>();
   const [model, setModel] = useState("");
+  const [times, setTimes] = useState("1");
+  const validTimes = /^\d+$/.test(times) && Number(times) >= 1 && Number(times) <= 20;
   const [spanId, setSpanId] = useState(initialSpan ?? llmSpans.at(-1)?.span_id);
   const { data: span } = useSpanDetail(traceId, mode === "llm" ? spanId : undefined);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -54,9 +56,14 @@ export function ReplayDialog({ traceId, spans, initialSpan, onClose }: { traceId
     const body =
       mode === "llm"
         ? { span_id: spanId, messages, model: model || undefined }
-        : { input: input ?? opts?.default_input, system: system !== undefined && system !== (opts?.system ?? "") ? system : undefined, model: model || undefined };
+        : { times: Number(times), input: input ?? opts?.default_input, system: system !== undefined && system !== (opts?.system ?? "") ? system : undefined, model: model || undefined };
     replay.mutate(body, {
       onSuccess: (r) => {
+        if ("times" in r) {
+          toast.success(`Started ${r.times} sequential repeats. Follow progress under Replay batches.`);
+          onClose();
+          return;
+        }
         if (r.state === "failed") toast.error(`Replay failed: ${r.error}`);
         else if (r.state === "succeeded" && r.new_trace_id) {
           toast.success("Replayed. Opening the new run.");
@@ -98,6 +105,10 @@ export function ReplayDialog({ traceId, spans, initialSpan, onClose }: { traceId
               </div>
             ) : (
               <>
+                <Field label="Repeat count" hint="1 to 20 sequential whole-agent runs. Pending checks are never counted as clean.">
+                  <Input aria-label="Repeat count" type="number" min={1} max={20} step={1} value={times} onChange={(e) => setTimes(e.target.value)} />
+                  {!validTimes && <span role="alert" className="text-xs">Enter a whole number from 1 to 20.</span>}
+                </Field>
                 <Field label="User input" hint={opts?.run ? `Runs ${opts.run.command ?? opts.run.url} with NEATROOTS_REPLAY_INPUT set.` : undefined}>
                   <Textarea rows={4} value={input ?? opts?.default_input ?? ""} onChange={(e) => setInput(e.target.value)} />
                 </Field>
@@ -144,7 +155,7 @@ export function ReplayDialog({ traceId, spans, initialSpan, onClose }: { traceId
           <PendingButton
             pending={replay.isPending}
             pendingLabel={mode === "llm" ? "Replaying…" : "Starting…"}
-            disabled={mode === "run" ? !opts?.run : !messages.length || !opts?.llm.available}
+            disabled={mode === "run" ? !opts?.run || !validTimes : !messages.length || !opts?.llm.available}
             onClick={submit}
           >
             {mode === "llm" ? "Replay LLM call" : "Re-run agent"}

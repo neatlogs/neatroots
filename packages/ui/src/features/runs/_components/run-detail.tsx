@@ -21,6 +21,7 @@ import { SteeringNotes } from "./notes-panel";
 import { ProblemsPanel } from "./problems-panel";
 import { ReplayDialog } from "./replay-dialog";
 import { ReplaysPanel } from "./replays-panel";
+import { ReplayBatches } from "./replay-batches";
 import { RUN_VIEWS, RunViews, type RunView } from "./run-views";
 import { SpanSheet } from "./span-sheet";
 
@@ -97,7 +98,7 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
       replay.mutate(
         { span_id: spanId, edit: { from, to } },
         {
-          onSuccess: (res) => (res.state === "succeeded" && res.new_trace_id ? (toast.success("Forked. Opening the new run."), go(`runs/${res.new_trace_id}`)) : toast.error(`Fork failed: ${res.error}`)),
+          onSuccess: (res) => ("new_trace_id" in res && res.state === "succeeded" && res.new_trace_id ? (toast.success("Forked. Opening the new run."), go(`runs/${res.new_trace_id}`)) : toast.error(`Fork failed: ${res.error}`)),
           onError: (e) => toast.error(`Couldn't fork: ${(e as Error).message}`),
           onSettled: () => setForking(null),
         },
@@ -267,6 +268,7 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
         />
         <RunViews traceId={traceId} spans={d.spans} flagged={flagged} view={view} onView={setView} selected={highlighted} onSelect={setOpen} hasSession={!!r.session_id} fork={fork} />
         <ReplaysPanel replays={d.replays} />
+        <ReplayBatches traceId={traceId} />
         <SteeringNotes notes={d.notes} />
       </div>
       <SpanSheet

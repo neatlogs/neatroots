@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { batchTool } from "../replay/batch-tools.js";
 import { checkWarnings } from "../checks/lint.js";
 import type { Roots } from "../core.js";
 import { runDetail, runSummary, spanDetail, checkFromInput } from "../server/api.js";
@@ -439,10 +440,12 @@ export const TOOLS = [
       model: z.string().optional(),
       system: z.string().optional().describe("System prompt override (applied by the neatroots-steer hook)"),
       timeout_sec: z.number().int().min(5).max(900).optional(),
+      times: z.number().int().min(1).max(20).optional().describe("Sequential whole-agent repeats; omitted preserves single replay"),
     },
     run: async (roots, a) => {
       const resolved = resolveTraceNoting(roots, a.trace_id);
       const traceId = resolved.traceId;
+      if (a.times !== undefined) return batchTool(roots, traceId, a.times, { input: a.input, model: a.model, system: a.system }, a.timeout_sec);
       const { replay, done } = roots.replays.startRun(traceId, { input: a.input, model: a.model, system: a.system });
       const r = await Promise.race([done, new Promise<null>((res) => setTimeout(() => res(null), (a.timeout_sec ?? 300) * 1000))]);
       if (!r) return { replay_id: replay.id, state: "running", note: [fallbackNote(resolved).note, "still running; call get_current_run or search_runs later"].filter(Boolean).join(" ") };

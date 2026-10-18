@@ -64,6 +64,9 @@ const INVESTIGATE_AT = 2.5;
 
 interface LiveRun {
   traceId: string;
+  completionGeneration: string;
+  evidenceVersion: number;
+  spanVersions: Map<string, number>;
   project: string;
   workflow: string;
   plan?: PlanRow;
@@ -156,6 +159,7 @@ export class Engine {
   private live = new Map<string, LiveRun>();
   private workflowPlanning = new Map<string, Promise<PlanRow | undefined>>();
   private jobs = new Map<string, number>();
+  private generationJobs = new Map<string, number>();
   private idleWaiters = new Map<string, (() => void)[]>();
   private decisionDown = false;
   readonly progress: CheckProgress;
@@ -174,31 +178,51 @@ export class Engine {
 
   // ----------------------------------------------------------- job tracking
 
-  private track<T>(traceId: string, p: Promise<T>): Promise<T | undefined> {
+  private track<T>(traceId: string, p: Promise<T>, generation = this.live.get(traceId)?.completionGeneration ?? ""): Promise<T | undefined> {
+    this.roots.checkCompletion.started(traceId, generation);
+    const key = JSON.stringify([traceId, generation]);
+    this.generationJobs.set(key, (this.generationJobs.get(key) ?? 0) + 1);
     this.jobs.set(traceId, (this.jobs.get(traceId) ?? 0) + 1);
     this.progress.checking(traceId);
     return p
       .catch((err) => {
+        this.roots.checkCompletion.failed(traceId, generation);
         log.warn(`check job failed for ${traceId.slice(0, 8)}: ${(err as Error).message}`);
         return undefined;
       })
       .finally(() => {
+        const owned = (this.generationJobs.get(key) ?? 1) - 1;
+        if (owned > 0) this.generationJobs.set(key, owned);
+        else this.generationJobs.delete(key);
+        const run = this.live.get(traceId);
+        // A finalizer can certify only its own generation, after its accepted queue drains.
+        // Late deferred triage is not execution-idle work, but it prevents certification.
+        if (owned <= 0 && run?.completionGeneration === generation && !this.queued(run) && !run.deferred.length)
+          this.roots.checkCompletion.settle(traceId, generation);
         const n = (this.jobs.get(traceId) ?? 1) - 1;
         if (n <= 0) {
           this.jobs.delete(traceId);
-          if (this.live.get(traceId)?.endHandled) this.progress.done(traceId);
-          // A debounced trace question still counts as pending; its flush wakes the waiters.
+          // Queued spans and retries remain accepted work even after a worker rejects.
           if (this.pending(traceId)) return;
+          if (run?.endHandled) this.progress.done(traceId);
           for (const fn of this.idleWaiters.get(traceId) ?? []) fn();
           this.idleWaiters.delete(traceId);
         } else this.jobs.set(traceId, n);
       });
   }
 
+  private queued(run: LiveRun, includeEndRetries = true): number {
+    let n = run.dirty.size;
+    for (const spans of run.spanQueue.values()) n += spans.length;
+    if (includeEndRetries) for (const spans of run.retrySpans.values()) n += spans.size;
+    return n;
+  }
+
   pending(traceId?: string): number {
-    if (traceId) return (this.jobs.get(traceId) ?? 0) + (this.live.get(traceId)?.dirty.size ? 1 : 0);
+    if (traceId) return (this.jobs.get(traceId) ?? 0) + (this.live.has(traceId) ? this.queued(this.live.get(traceId)!, false) : 0);
     let n = 0;
     for (const v of this.jobs.values()) n += v;
+    for (const run of this.live.values()) n += this.queued(run, false);
     return n;
   }
 
@@ -249,6 +273,9 @@ export class Engine {
     if (!row) return undefined;
     r = {
       traceId,
+      completionGeneration: this.roots.checkCompletion.begin(traceId),
+      evidenceVersion: 0,
+      spanVersions: new Map(),
       project: row.project ?? "unknown",
       workflow: row.workflow ?? row.project ?? "unknown",
       used: { plans: 0, investigations: 0, notes: 0, summaries: 0 },
@@ -271,19 +298,42 @@ export class Engine {
   }
 
   private onTrace(u: TraceUpdate): void {
+    const changed = u.spans.filter((s) => (s.isChanged ?? s.isNew) && !s.view.isMarker);
+    // Re-delivery must not reset a settled receipt, including after live-state eviction.
+    const existing = this.live.get(u.traceId);
+    if (!changed.length && (!existing || existing.endHandled || (!u.rootEnded && !u.completed))) return;
+    if (changed.length && (existing?.endHandled || this.roots.checkCompletion.hasEnded(u.traceId) || this.roots.checkCompletion.requiresRecheck(u.traceId))) {
+      if (existing) { clearTimeout(existing.endTimer); clearTimeout(existing.debounce); }
+      // Keep in-flight work on its old LiveRun/generation. It cannot certify this invalidation.
+      this.live.delete(u.traceId);
+      this.roots.checkCompletion.requireRecheck(u.traceId);
+      this.progress.interrupted(u.traceId);
+      return;
+    }
     const run = this.liveRun(u.traceId);
     if (!run) return;
+    if (changed.length) run.evidenceVersion++;
+    for (const span of changed) {
+      const id = span.row.span_id;
+      run.spanVersions.set(id, (run.spanVersions.get(id) ?? 0) + 1);
+      if (!span.isNew) {
+        // A live replacement must be evaluated again, without interrupting normal end checking.
+        for (const key of run.spanDone) if (key.endsWith(`:${id}`)) run.spanDone.delete(key);
+        run.answered?.toolSpans.delete(id);
+        run.answered?.traceChecks.clear();
+      }
+    }
     if (run.doctor) {
       this.live.delete(u.traceId);
       return;
     }
-    const fresh = u.spans.filter((s) => s.isNew && !s.view.isMarker);
+    const fresh = changed;
     if (fresh.length) this.track(u.traceId, this.handleSpans(run, fresh.map((s) => s.row.span_id)));
     if (u.rootEnded || u.completed) {
       run.ended = true;
       // Trailing spans can arrive in the next batch; give them a moment.
       clearTimeout(run.endTimer);
-      run.endTimer = setTimeout(() => void this.track(u.traceId, this.handleEnd(run)), 400);
+      run.endTimer = setTimeout(() => void this.track(u.traceId, this.handleEnd(run), run.completionGeneration), 400);
     }
   }
 
@@ -324,7 +374,7 @@ export class Engine {
     const fresh = snap.spans.filter((s) => spanIds.includes(s.id));
     this.applyRules(run, snap, false, new Set(spanIds));
     this.ensurePlan(run, snap);
-    for (const s of fresh) if ((s.kind === "TOOL" || s.kind === "MCP_TOOL") && !run.answered?.toolSpans.has(s.id)) void this.track(run.traceId, this.labelTool(run, s, snap));
+    for (const s of fresh) if ((s.kind === "TOOL" || s.kind === "MCP_TOOL") && !run.answered?.toolSpans.has(s.id)) void this.track(run.traceId, this.labelTool(run, s, snap), run.completionGeneration);
     if (run.plan) this.scheduleQuestions(run, snap, fresh);
   }
 
@@ -341,7 +391,7 @@ export class Engine {
           queue.push(s.id);
         }
         run.spanQueue.set(check.id, queue);
-        if (queue.length) void this.track(run.traceId, this.drainSpanQueue(run, check, params));
+        if (queue.length) void this.track(run.traceId, this.drainSpanQueue(run, check, params), run.completionGeneration);
       } else if (fresh.some((s) => matchesSelector(s, sel))) {
         run.dirty.add(check.id);
       }
@@ -353,7 +403,7 @@ export class Engine {
   private scheduleFlush(run: LiveRun): void {
     clearTimeout(run.debounce);
     const delay = this.idleWaiters.has(run.traceId) ? 0 : 300;
-    run.debounce = setTimeout(() => void this.track(run.traceId, this.flushDirty(run)), delay);
+    run.debounce = setTimeout(() => void this.track(run.traceId, this.flushDirty(run), run.completionGeneration), delay);
   }
 
   /**
@@ -422,6 +472,7 @@ export class Engine {
       try {
         hit = evaluateRule(rule, snap, atEnd, fresh, lc.source !== "library");
       } catch (err) {
+        this.roots.checkCompletion.failed(run.traceId, run.completionGeneration);
         log.warn(`rule ${rule.id} failed: ${(err as Error).message}`);
         continue;
       }
@@ -479,7 +530,7 @@ export class Engine {
         // At run end the rules are applied without waiting, so there is nothing left to do.
         if (!run.endHandled) this.applyRules(run, loadTrace(this.roots.store, run.traceId), false);
       });
-      void this.track(run.traceId, recheck);
+      void this.track(run.traceId, recheck, run.completionGeneration);
     }
     return true;
   }
@@ -511,7 +562,7 @@ export class Engine {
     if (run.answered?.traceChecks.has(check.id)) return;
     const ev = buildEvidence(snap, check.evidence);
     if (!ev.spanIds.length && !check.evidence?.final_output) return;
-    const key = ev.spanIds.join(",") + (check.evidence?.final_output ? `|${finalOutput(snap) ?? ""}` : "");
+    const key = `${run.evidenceVersion}|` + ev.spanIds.join(",") + (check.evidence?.final_output ? `|${finalOutput(snap) ?? ""}` : "");
     if (run.traceEvidence.get(check.id) === key) return;
     run.traceEvidence.set(check.id, key);
     const outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null);
@@ -528,17 +579,25 @@ export class Engine {
     snap: TraceSnapshot,
     spanId: string | null,
   ): Promise<"unavailable" | void> {
+    const generation = run.completionGeneration;
+    const version = spanId ? run.spanVersions.get(spanId) : run.evidenceVersion;
+    const current = () => this.live.get(run.traceId) === run && this.roots.checkCompletion.isCurrent(run.traceId, generation)
+      && version === (spanId ? run.spanVersions.get(spanId) : run.evidenceVersion);
     let result: DecisionResult;
     try {
       result = await this.decisions.decide(evidence, [toQuestion(check, params)]);
+      if (!current()) return "unavailable";
       this.decisionDown = false;
     } catch (err) {
+      if (!current()) return "unavailable";
       if (err instanceof DecisionUnavailableError || err instanceof LlmUnavailableError) {
+        this.roots.checkCompletion.failed(run.traceId, run.completionGeneration);
         if (!this.decisionDown) log.warn(`questions skipped: ${(err as Error).message}`);
         this.decisionDown = true;
         return "unavailable";
       }
       // A model error or timeout is a failed check, never a "no".
+      this.roots.checkCompletion.failed(run.traceId, run.completionGeneration);
       const existing = this.roots.store.latestFindingFor(run.traceId, check.id);
       if (!existing || existing.status !== "failed") {
         const f = this.roots.store.insertFinding({
@@ -559,6 +618,7 @@ export class Engine {
       return;
     }
     const answer = result.answers[check.id];
+    if (!answer) this.roots.checkCompletion.failed(run.traceId, run.completionGeneration);
     const verdict = flagged(check, result);
     this.roots.store.insertDecision({
       trace_id: run.traceId,
@@ -587,6 +647,7 @@ export class Engine {
       // A second look, with a quote that must be in the run, before anything is raised.
       if ((run.rejected.get(check.id) ?? 0) >= 3) return;
       const check2 = check.kind === "yes_no" ? await verifyFlag(this.llm, fillTemplate(check.ask, params) || check.ask, evidence) : undefined;
+      if (!current()) return "unavailable";
       if (check2 && !check2.verified) {
         run.rejected.set(check.id, (run.rejected.get(check.id) ?? 0) + 1);
         log.debug(`${check.id}: flag not confirmed on a second look${check2.quote ? ` (quote: ${clip(check2.quote, 80)})` : ""}`);
@@ -640,6 +701,8 @@ export class Engine {
   // ------------------------------------------------------- tool result labels
 
   private async labelTool(run: LiveRun, s: SpanInfo, snap: TraceSnapshot): Promise<void> {
+    const generation = run.completionGeneration;
+    const version = run.spanVersions.get(s.id);
     let label = heuristicToolLabel(s);
     let backend = "heuristic";
     let probability = 1;
@@ -666,6 +729,7 @@ export class Engine {
         return;
       }
     }
+    if (!this.roots.checkCompletion.isCurrent(run.traceId, generation) || version !== run.spanVersions.get(s.id)) return;
     this.roots.store.insertDecision({
       trace_id: run.traceId,
       check_id: "neatroots.tool-result",
@@ -698,7 +762,7 @@ export class Engine {
       const template = this.steering.push({ traceId: run.traceId, findingId: f.id, kind: "template", text: this.renderGuidance(c, params, f.title) });
       if (template && run.used.notes < this.roots.config.budgets.notesPerRun) {
         run.used.notes++;
-        void this.track(run.traceId, this.writeNote(run, f, template));
+        void this.track(run.traceId, this.writeNote(run, f, template), run.completionGeneration);
       }
     } else if (!run.endHandled && !run.rechecked && this.steering.mode(run.project) !== "off" && !this.overlapsNotedFinding(run.traceId, f, true)) {
       // A live check raised this, but the run was already over (the agent finished before the
@@ -715,7 +779,7 @@ export class Engine {
       });
       this.roots.bus.emit("note", note);
     }
-    void this.track(run.traceId, this.triage(run, f));
+    void this.track(run.traceId, this.triage(run, f), run.completionGeneration);
     void snap;
   }
 
@@ -916,6 +980,7 @@ export class Engine {
         const latest = loadTrace(this.roots.store, run.traceId);
         this.scheduleQuestions(run, latest, latest.spans);
       }),
+      run.completionGeneration,
     ) as Promise<void>;
   }
 
@@ -1015,6 +1080,7 @@ ${library}`;
   private async handleEnd(run: LiveRun): Promise<void> {
     if (run.endHandled) return;
     run.endHandled = true;
+    const completionGeneration = run.completionGeneration;
     // Notes the agent never picked up can no longer help this run.
     for (const n of this.roots.store.notesForTrace(run.traceId, "pending")) {
       this.roots.store.updateNote(n.id, { status: "expired" });
@@ -1051,8 +1117,9 @@ ${library}`;
     }
     for (const work of run.deferred.splice(0)) await work();
     await this.summarize(run, snap);
+    this.roots.checkCompletion.ended(run.traceId, completionGeneration);
     setTimeout(() => {
-      if (!this.pending(run.traceId)) this.live.delete(run.traceId);
+      if (this.live.get(run.traceId) === run && !this.pending(run.traceId)) this.live.delete(run.traceId);
     }, 60_000);
   }
 
@@ -1209,6 +1276,8 @@ ${library}`;
   async recheck(traceId: string, opts: { resume?: boolean } = {}): Promise<void> {
     const row = this.roots.store.getRun(traceId);
     if (!row) return;
+    const previous = this.live.get(traceId);
+    if (previous) { clearTimeout(previous.endTimer); clearTimeout(previous.debounce); }
     this.live.delete(traceId);
     const run = this.liveRun(traceId)!;
     run.ended = row.status !== "running";
@@ -1222,8 +1291,8 @@ ${library}`;
       };
     }
     const snap = loadTrace(this.roots.store, traceId);
-    await this.track(traceId, this.handleSpans(run, snap.spans.map((s) => s.id)));
-    if (run.ended) await this.track(traceId, this.handleEnd(run));
+    await this.track(traceId, this.handleSpans(run, snap.spans.map((s) => s.id)), run.completionGeneration);
+    if (run.ended) await this.track(traceId, this.handleEnd(run), run.completionGeneration);
   }
 }
 

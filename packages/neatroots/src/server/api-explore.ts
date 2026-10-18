@@ -204,8 +204,12 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   });
   app.post("/api/runs/:traceId/replay", async (c) => {
     const traceId = c.req.param("traceId");
-    const b = await body<{ span_id?: string; messages?: { role: string; content: string }[]; edit?: { from: string; to: string }; input?: string; model?: string; system?: string }>(c);
+    const b = await body<{ times?: unknown; span_id?: string; messages?: { role: string; content: string }[]; edit?: { from: string; to: string }; input?: string; model?: string; system?: string }>(c);
     try {
+      if (b.times !== undefined) {
+        if (b.span_id || b.messages || b.edit) return err(c, 400, "times is only supported for whole-agent replay");
+        return c.json(roots.replayBatches.start(traceId, b.times, { input: b.input, model: b.model || undefined, system: b.system || undefined }).batch, 202);
+      }
       if (b.span_id) return c.json(await roots.replays.replayLlm(traceId, b.span_id, { messages: b.messages, edit: b.edit, model: b.model || undefined, system: b.system || undefined }));
       const { replay } = roots.replays.startRun(traceId, { input: b.input, model: b.model || undefined, system: b.system || undefined });
       return c.json(replay, 202);
@@ -216,6 +220,20 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   app.get("/api/replays/:id", (c) => {
     const r = roots.replays.get(c.req.param("id"));
     return r ? c.json(r) : err(c, 404, "no such replay");
+  });
+  app.get("/api/runs/:traceId/replay-batches", (c) => c.json(roots.replayBatches.forRun(c.req.param("traceId"))));
+  app.get("/api/replay-batches/:id", (c) => {
+    const batch = roots.replayBatches.get(c.req.param("id"));
+    return batch ? c.json(batch) : err(c, 404, "no such replay batch");
+  });
+  app.delete("/api/replay-batches/:id", (c) => {
+    if (!roots.replayBatches.get(c.req.param("id"))) return err(c, 404, "no such replay batch");
+    roots.replayBatches.delete(c.req.param("id"));
+    return c.json({ ok: true });
+  });
+  app.post("/api/replay-batches/:id/cancel", (c) => {
+    const batch = roots.replayBatches.cancel(c.req.param("id"));
+    return batch ? c.json(batch) : err(c, 404, "no such replay batch");
   });
   app.post("/api/projects/:project/rerun", async (c) => {
     const project = c.req.param("project");
