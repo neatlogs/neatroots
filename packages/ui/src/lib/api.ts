@@ -1,3 +1,10 @@
+export interface CheckPrecision {
+  hits: number; dismissed: number; precision: number | null; noisy: boolean;
+  /** Optional for older servers; absence never certifies the counter's basis. */
+  basis?: "legacy_mixed" | "actionable_v1";
+  assessment_known?: boolean;
+}
+
 /** Typed client for the neatroots app API. */
 
 export type RunStatus = "running" | "ok" | "error" | "interrupted";
@@ -75,7 +82,7 @@ export interface Finding {
   model: string | null;
   triage_score: number | null;
   explanation: Explanation | null;
-  precision: { hits: number; dismissed: number; precision: number | null; noisy: boolean };
+  precision: CheckPrecision;
   created_ms: number;
 }
 
@@ -384,7 +391,7 @@ export interface CheckRow {
   source: string;
   path: string | null;
   enabled: boolean;
-  precision: { hits: number; dismissed: number; precision: number | null; noisy: boolean };
+  precision: CheckPrecision;
   yaml: string;
   check: Record<string, unknown>;
 }

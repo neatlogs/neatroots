@@ -301,11 +301,13 @@ export class CheckRegistry {
   }
 
   /** Precision per check from dismissals; noisy checks are suggested for retirement. */
-  precision(id: string): { hits: number; dismissed: number; precision: number | null; noisy: boolean } {
+  precision(id: string): { hits: number; dismissed: number; precision: number | null; noisy: boolean; basis: "legacy_mixed" | "actionable_v1"; assessment_known: boolean } {
     const s = this.store.checkStats()[id];
-    if (!s || s.hits === 0) return { hits: s?.hits ?? 0, dismissed: s?.dismissed ?? 0, precision: null, noisy: false };
+    const basis: "actionable_v1" | "legacy_mixed" = s?.basis === "actionable_v1" ? "actionable_v1" : "legacy_mixed";
+    const totals = { hits: s?.hits ?? 0, dismissed: s?.dismissed ?? 0, basis };
+    if (basis !== "actionable_v1" || !s || s.hits === 0) return { ...totals, precision: null, noisy: false, assessment_known: false };
     const precision = 1 - s.dismissed / s.hits;
-    return { hits: s.hits, dismissed: s.dismissed, precision, noisy: s.hits >= 5 && precision < 0.4 };
+    return { ...totals, precision, noisy: s.hits >= 5 && precision < 0.4, assessment_known: true };
   }
 }
 

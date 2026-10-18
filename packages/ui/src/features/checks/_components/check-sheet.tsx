@@ -4,12 +4,13 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import type { CheckRow } from "@/lib/api";
-import { pct } from "@/lib/format";
+import { checkMetric } from "@/lib/check-precision";
 import { CHECK_SOURCE } from "../../runs/_libs/labels";
 
 /** One check in a side sheet: its YAML and what you can do with it. */
 export function CheckSheet({ check, onClose, onEdit, onDelete }: { check: CheckRow | undefined; onClose: () => void; onEdit: (yaml: string) => void; onDelete: (id: string) => void }) {
   const [confirm, setConfirm] = useState(false);
+  const metric = check ? checkMetric(check.precision) : null;
   const src = check ? (CHECK_SOURCE[check.source] ?? CHECK_SOURCE.library) : null;
   return (
     <>
@@ -24,17 +25,12 @@ export function CheckSheet({ check, onClose, onEdit, onDelete }: { check: CheckR
                     {src.label}
                   </NeatBadge>
                   <span className="font-mono">{check.id}</span>
-                  {check.precision.hits > 0 && (
-                    <span className="tabular-nums">
-                      · {check.precision.hits} counted findings, {check.precision.dismissed} dismissed
-                      {check.precision.precision !== null ? ` (${pct(check.precision.precision)} kept)` : ""}
-                    </span>
-                  )}
+                  {metric && <span className="tabular-nums">· {metric.count}, {check.precision.dismissed} dismissed · {metric.assessment}</span>}
                 </SheetDescription>
               </SheetHeader>
               <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-6 py-4">
                 <p className="text-xs text-muted-foreground">
-                  Each finding counts once after it is raised or made active. Failed checks and findings recorded while quiet count only if later raised or made active. Dismissals lower the kept percentage. Older totals are preserved.
+                  {metric?.detail}
                 </p>
                 <pre className="rounded-lg border border-border bg-muted px-3 py-2 font-mono text-xs whitespace-pre-wrap">{check.yaml}</pre>
                 {check.path && <span className="font-mono text-2xs text-muted-foreground">{check.path}</span>}

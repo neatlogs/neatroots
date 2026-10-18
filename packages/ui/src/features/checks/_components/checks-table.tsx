@@ -5,7 +5,7 @@ import { Switch } from "@/components/ui/switch";
 import { ListPageTable } from "@/components/list-page/list-page-layout";
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { CheckRow } from "@/lib/api";
-import { pct } from "@/lib/format";
+import { checkMetric } from "@/lib/check-precision";
 import { cn } from "@/lib/utils";
 import { CHECK_SOURCE } from "../../runs/_libs/labels";
 
@@ -34,7 +34,7 @@ export function ChecksTable({
           <TableHead className={`${HEAD} w-24`}>Scope</TableHead>
           <TableHead
             className={`${HEAD} w-40 pr-6 text-right`}
-            title="Each finding counts once after it is raised or made active. Failed and quiet findings count only if later raised or made active. Older totals are preserved."
+            title="Each finding counts once after it is raised or made active. Failed and quiet findings count only if later raised or made active. Legacy totals have an unknown kept rate."
           >
             Findings
           </TableHead>
@@ -51,6 +51,7 @@ export function ChecksTable({
             ))
           : checks.map((c) => {
               const src = CHECK_SOURCE[c.source] ?? CHECK_SOURCE.library;
+              const metric = checkMetric(c.precision);
               return (
                 <TableRow key={c.id} className="h-12 cursor-pointer" onClick={() => onOpen(c.id)}>
                   <TableCell className="px-3 pl-6" onClick={(e) => e.stopPropagation()}>
@@ -73,21 +74,16 @@ export function ChecksTable({
                   <TableCell className="px-3 text-sm text-muted-foreground">{typeof c.check.scope === "string" ? c.check.scope : "trace"}</TableCell>
                   <TableCell className="px-3 pr-6 text-right">
                     <span className="inline-flex items-center justify-end gap-2 text-xs text-muted-foreground tabular-nums">
-                      {c.precision.noisy && (
+                      {metric.known && c.precision.noisy && (
                         <StatusPill tone="warning" size="sm">
                           Noisy
                         </StatusPill>
                       )}
-                      {c.precision.hits > 0 ? (
-                        <span
-                          title={`${c.precision.hits} counted findings, ${c.precision.dismissed} dismissed. Findings count once after they are raised or made active; older totals are preserved.`}
-                        >
-                          {c.precision.hits}
-                          {c.precision.precision !== null ? ` · ${pct(c.precision.precision)} kept` : ""}
-                        </span>
-                      ) : (
-                        <span>none</span>
-                      )}
+                      <span className="flex flex-col" title={`${metric.count}; ${metric.assessment}. ${metric.detail}`}>
+                        <span>{c.precision.hits} {c.precision.basis === "actionable_v1" ? "findings" : "historical"}</span>
+                        <span>{metric.known ? metric.assessment.replace(" · Noisy", "") : "Rate / Noisy unknown"}</span>
+                        {!metric.known && <span className="sr-only">Noisy assessment unknown</span>}
+                      </span>
                     </span>
                   </TableCell>
                 </TableRow>

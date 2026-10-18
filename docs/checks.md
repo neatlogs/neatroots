@@ -109,6 +109,13 @@ that check go quiet in that project.
 Check totals are stored separately from run details. Run retention can remove finding rows while
 preserving check totals, and deleting a check removes its totals while leaving its findings. Existing
 totals are preserved when opening an older database and may include older failed or quiet rows.
+These appear as **historical records**, with **kept rate unavailable** and **Noisy assessment unknown**.
+Retained findings cannot reconstruct deleted history. Future activity does not make a mixed all-time
+ratio exact, and editing, disabling or restarting a check does not certify its old totals. No totals
+are reset or backfilled. Newly created checks record the actionable basis from their first finding;
+with no counted findings yet, their kept rate and Noisy assessment are also unavailable.
+Older servers without basis metadata are treated as unknown. These labels do not change project
+quieting, the unused confirmed counter, or the global scope of check metrics.
 
 Before a question raises a finding, the LLM takes a second look: it must quote the words in the run
 that show the problem, the quote must really be there, and it must still hold given what the run did

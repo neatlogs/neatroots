@@ -424,9 +424,14 @@ checks
   .action(async (opts) => {
     const p = port(opts.port);
     const r = await api<any>(p, "/api/checks");
-    console.log("Each finding counts once after it is raised or made active; failed and quiet findings count only if later raised or made active. Older totals are preserved.");
+    console.log("Each finding counts once after it is raised or made active; failed and quiet findings count only if later raised or made active. Legacy totals have an unknown kept rate; their Noisy assessment is unavailable.");
     for (const c of r.checks) {
-      const prec = c.precision.precision === null ? "" : ` · precision ${(c.precision.precision * 100).toFixed(0)}% of ${c.precision.hits} counted findings`;
+      const m = c.precision;
+      const prec = m.basis !== "actionable_v1"
+        ? ` · ${m.hits} historical records · kept rate unavailable · Noisy assessment unknown`
+        : m.assessment_known === true && m.precision !== null
+          ? ` · precision ${(m.precision * 100).toFixed(0)}% of ${m.hits} counted findings${m.noisy ? " · Noisy" : ""}`
+          : " · no counted findings yet · kept rate unavailable · Noisy assessment unknown";
       console.log(`${c.enabled ? "●" : "○"} ${c.id.padEnd(32)} ${c.kind.padEnd(7)} ${c.source.padEnd(8)}${prec}`);
     }
     for (const e of r.errors) console.log(`✗ ${e.path}: ${e.message}`);

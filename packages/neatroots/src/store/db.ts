@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS checks (
   confirmed INTEGER NOT NULL DEFAULT 0,
   dismissed INTEGER NOT NULL DEFAULT 0,
   metric_generation TEXT NOT NULL DEFAULT '',
+  metric_basis TEXT NOT NULL DEFAULT 'legacy_mixed',
   created_ms INTEGER NOT NULL,
   updated_ms INTEGER NOT NULL
 );
@@ -454,6 +455,8 @@ export class Store {
     ensure("plans", "body", "TEXT");
     const metricMigration = this.db.transaction(() => {
       ensure("checks", "metric_generation", "TEXT NOT NULL DEFAULT ''");
+      // Existing totals have no reliable lifetime provenance, even when currently zero.
+      ensure("checks", "metric_basis", "TEXT NOT NULL DEFAULT 'legacy_mixed'");
       // Old databases used the all-insert counter behavior. Keep their existing counter basis
       // intact while recording eligibility for future status transitions.
       ensure("findings", "metric_counted", "INTEGER NOT NULL DEFAULT 1");
@@ -1266,19 +1269,20 @@ export class Store {
     const metricGeneration = newId("cmet");
     this.db
       .prepare(
-        `INSERT INTO checks (id, kind, source, path, body, enabled, metric_generation, created_ms, updated_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO checks (id, kind, source, path, body, enabled, metric_generation, metric_basis, created_ms, updated_ms) VALUES (?, ?, ?, ?, ?, ?, ?, 'actionable_v1', ?, ?)
          ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, source = excluded.source, path = excluded.path, body = excluded.body, updated_ms = excluded.updated_ms`,
       )
       .run(c.id, c.kind, c.source, c.path, c.body, c.enabled === false ? 0 : 1, metricGeneration, now, now);
   }
 
-  checkStats(): Record<string, { hits: number; dismissed: number; confirmed: number; enabled: number }> {
-    const rows = this.db.prepare("SELECT id, hits, dismissed, confirmed, enabled FROM checks").all() as {
+  checkStats(): Record<string, { hits: number; dismissed: number; confirmed: number; enabled: number; basis: string }> {
+    const rows = this.db.prepare("SELECT id, hits, dismissed, confirmed, enabled, metric_basis AS basis FROM checks").all() as {
       id: string;
       hits: number;
       dismissed: number;
       confirmed: number;
       enabled: number;
+      basis: string;
     }[];
     return Object.fromEntries(rows.map((r) => [r.id, r]));
   }

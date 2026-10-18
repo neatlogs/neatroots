@@ -1,3 +1,4 @@
+import { checkMetric } from "@/lib/check-precision";
 import { AiBrain01Icon, Alert02Icon, ArrowDown01Icon, CheckmarkCircle02Icon } from "@hugeicons/core-free-icons";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -169,7 +170,7 @@ function ProblemRow({
     f.check_kind === "rule" ? "Rule" : "Question",
     likelihood(f),
     calls > 1 ? `in ${calls} calls` : null,
-    f.precision.precision !== null && f.precision.hits >= 3 ? `${pct(f.precision.precision)} of past findings kept` : null,
+    checkMetric(f.precision).assessment,
   ].filter(Boolean);
   const group = [f, ...related];
   const params = Object.entries((f.detail.params ?? {}) as Record<string, string>).filter(([, v]) => v).slice(0, 2);
