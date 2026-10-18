@@ -48,19 +48,34 @@ export class ReplayCorrelation {
     `))();
   }
 
-  open(id: string, project: string | null): Set<string> {
+  open(id: string, project: string | null, previousTraces?: Map<string, string | null>): Set<string> {
     const db = this.store.db;
-    const evicted = new Set<string>();
-    while ((db.prepare("SELECT COUNT(*) AS n FROM replay_windows").get() as { n: number }).n >= CORRELATION_LIMITS.attempts) {
-      const row = db.prepare("SELECT replay_id FROM replay_windows ORDER BY active, rowid LIMIT 1").get() as { replay_id: string };
-      evicted.add(row.replay_id);
-      db.prepare("DELETE FROM replay_windows WHERE replay_id=?").run(row.replay_id);
-    }
-    const active = (db.prepare("SELECT COUNT(*) AS n FROM replay_windows WHERE active=1").get() as { n: number }).n;
-    db.prepare("UPDATE replay_windows SET overlapped=1 WHERE active=1").run();
-    if (active >= CORRELATION_LIMITS.active) db.prepare("UPDATE replay_windows SET overflow=1 WHERE active=1").run();
-    db.prepare("INSERT INTO replay_windows VALUES (?,?,1,?,?)").run(id, project, Number(active > 0), Number(active >= CORRELATION_LIMITS.active));
-    return evicted;
+    return db.transaction(() => {
+      const evicted = new Set<string>();
+      const evict = (id: string) => {
+        const replay = db.prepare("SELECT new_trace_id FROM replays WHERE id=?").get(id) as { new_trace_id: string | null } | undefined;
+        evicted.add(id);
+        previousTraces?.set(id, replay?.new_trace_id ?? null);
+        db.prepare("DELETE FROM replay_windows WHERE replay_id=?").run(id);
+      };
+      // Reclaim whole completed windows, retaining every claim of windows we keep.
+      // This is headroom, not a reservation: overlapping attempts still share the bound.
+      const headroom = Math.min(CORRELATION_LIMITS.candidates, CORRELATION_LIMITS.totalCandidates);
+      while ((db.prepare("SELECT COUNT(*) AS n FROM replay_candidates").get() as { n: number }).n > CORRELATION_LIMITS.totalCandidates - headroom) {
+        const row = db.prepare("SELECT replay_id FROM replay_windows WHERE active=0 ORDER BY rowid LIMIT 1").get() as { replay_id: string } | undefined;
+        if (!row) break;
+        evict(row.replay_id);
+      }
+      while ((db.prepare("SELECT COUNT(*) AS n FROM replay_windows").get() as { n: number }).n >= CORRELATION_LIMITS.attempts) {
+        const row = db.prepare("SELECT replay_id FROM replay_windows ORDER BY active, rowid LIMIT 1").get() as { replay_id: string };
+        evict(row.replay_id);
+      }
+      const active = (db.prepare("SELECT COUNT(*) AS n FROM replay_windows WHERE active=1").get() as { n: number }).n;
+      db.prepare("UPDATE replay_windows SET overlapped=1 WHERE active=1").run();
+      if (active >= CORRELATION_LIMITS.active) db.prepare("UPDATE replay_windows SET overflow=1 WHERE active=1").run();
+      db.prepare("INSERT INTO replay_windows VALUES (?,?,1,?,?)").run(id, project, Number(active > 0), Number(active >= CORRELATION_LIMITS.active));
+      return evicted;
+    })();
   }
 
   close(id: string): void {

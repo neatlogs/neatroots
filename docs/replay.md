@@ -122,7 +122,12 @@ choosing another untagged run.
 
 Correlation retains at most 256 attempt windows, 512 candidate traces per attempt and 4096
 candidate associations overall, inspecting at most 512 attributes per claim and 64 active windows.
-Exceeding a bound yields uncertainty rather than a verified link. Pruning retained evidence clears
+Opening an attempt reclaims oldest completed whole windows until there is headroom for up to
+512 candidate associations, or no completed windows remain. This keeps sequential replays available
+without discarding claims inside retained windows. Headroom is not reserved: overlapping attempts
+share the global budget, and active evidence is never reclaimed for candidate headroom. The separate
+256-window limit still applies. Active-only saturation yields uncertainty rather than a verified link.
+Pruning retained evidence clears
 the affected link and trace-derived preview. Independently generated direct LLM answers remain,
 but deleting their source or generated run clears them even after pruning. Historical links do not
 acquire generated-output provenance. Deleted original runs prune their owned evidence.

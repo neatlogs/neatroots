@@ -201,12 +201,13 @@ export class Replays {
       created_ms: Date.now(),
       finished_ms: null,
     };
-    const evictions = this.correlation.open(r.id, this.roots.store.getRun(traceId)?.project ?? null);
+    const previousTraces = new Map<string, string | null>();
+    const evictions = this.correlation.open(r.id, this.roots.store.getRun(traceId)?.project ?? null, previousTraces);
     try { this.save(r); } catch (err) { this.correlation.close(r.id); throw err; }
     for (const id of evictions) {
       const evicted = this.get(id);
       if (evicted) this.roots.bus.emit("replay", { id, state: evicted.state, trace_id: evicted.trace_id, new_trace_id: null,
-        attribution: evicted.attribution, attribution_reason: evicted.attribution_reason });
+        previous_trace_id: previousTraces.get(id), attribution: evicted.attribution, attribution_reason: evicted.attribution_reason });
     }
     return r;
   }
