@@ -57,44 +57,51 @@ export function snapshot(roots: Roots, traceId: string): Snapshot {
   })();
 }
 
-/** Synchronous critical section: no await between snapshot, exclusive publication and append. */
-function append(directory: string, traceId: string, data: Snapshot): Entry {
+/** Verification is local to this synchronous writer lock, never reused by a later call. */
+function withWriter<T>(directory: string, write: (dir: string, entries: Entry[]) => T): T {
   const dir = archiveDirectory(directory, true);
   const lock = path.join(dir, ".writer.lock");
   const lockFd = fs.openSync(lock, "wx", 0o600);
   try {
-    let previous = GENESIS;
     if (fs.readdirSync(dir).every((name) => name === ".writer.lock")) {
       atomicFile(path.join(dir, "manifest.jsonl"), line(GENESIS));
-    } else {
-      const verified = verifyArchive(dir, undefined, true);
-      if (!verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
-      previous = verified.entries.at(-1) ?? GENESIS;
     }
-    const seq = previous.seq + 1;
-    const folder = `${String(seq).padStart(8, "0")}-${crypto.randomUUID()}`;
-    const target = path.join(dir, folder);
-    fs.mkdirSync(target, { mode: 0o700 });
-    syncDirectory(dir);
-    atomicFile(path.join(target, "trace.json"), data.trace);
-    atomicFile(path.join(target, "record.json"), data.record);
-    const fields = { seq, ts: new Date().toISOString(), trace_id: traceId, path: `${folder}/trace.json`,
-      bundle_sha256: sha256(data.trace), sidecar_sha256: sha256(data.record), prev: previous.entry_sha256 };
-    const entry = { ...fields, entry_sha256: entryHash(fields) };
-    const manifest = path.join(dir, "manifest.jsonl");
-    const fd = fs.openSync(manifest, fs.constants.O_WRONLY | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW ?? 0));
-    try {
-      if (!fs.fstatSync(fd).isFile() || fs.fstatSync(fd).nlink !== 1) throw new Error("unsafe manifest");
-      fs.writeFileSync(fd, line(entry));
-      fs.fsyncSync(fd);
-    } finally { fs.closeSync(fd); }
-    syncDirectory(dir);
-    return entry;
+    const verified = verifyArchive(dir, undefined, true);
+    if (!verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
+    return write(dir, verified.entries);
   } finally {
     fs.closeSync(lockFd);
     fs.unlinkSync(lock);
     syncDirectory(dir);
   }
+}
+
+/** Caller owns the writer lock and a freshly verified chain. */
+function writeEntry(dir: string, traceId: string, data: Snapshot, previous: Entry): Entry {
+  const seq = previous.seq + 1;
+  const folder = `${String(seq).padStart(8, "0")}-${crypto.randomUUID()}`;
+  const target = path.join(dir, folder);
+  fs.mkdirSync(target, { mode: 0o700 });
+  syncDirectory(dir);
+  atomicFile(path.join(target, "trace.json"), data.trace);
+  atomicFile(path.join(target, "record.json"), data.record);
+  const fields = { seq, ts: new Date().toISOString(), trace_id: traceId, path: `${folder}/trace.json`,
+    bundle_sha256: sha256(data.trace), sidecar_sha256: sha256(data.record), prev: previous.entry_sha256 };
+  const entry = { ...fields, entry_sha256: entryHash(fields) };
+  const manifest = path.join(dir, "manifest.jsonl");
+  const fd = fs.openSync(manifest, fs.constants.O_WRONLY | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW ?? 0));
+  try {
+    if (!fs.fstatSync(fd).isFile() || fs.fstatSync(fd).nlink !== 1) throw new Error("unsafe manifest");
+    fs.writeFileSync(fd, line(entry));
+    fs.fsyncSync(fd);
+  } finally { fs.closeSync(fd); }
+  syncDirectory(dir);
+  return entry;
+}
+
+/** Synchronous critical section: no await between exclusive verification and append. */
+function append(directory: string, traceId: string, data: Snapshot): Entry {
+  return withWriter(directory, (dir, entries) => writeEntry(dir, traceId, data, entries.at(-1) ?? GENESIS));
 }
 
 export interface ExportOptions { directory?: string; redacted?: boolean; output?: string; preview?: boolean; preview_token?: string }
@@ -114,6 +121,35 @@ export class AuditArchive {
     verified = verifyArchive(directory, entry.entry_sha256);
     if (!verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
     return entry;
+  }
+
+  /** Background capture only: never a receipt authorizing later deletion. */
+  ensureMany(traceIds: string[], directory: string): { archived: string[]; failed: string[] } {
+    if (traceIds.length > 32) throw new Error("background archive batch exceeds 32 runs");
+    if (!traceIds.length) return { archived: [], failed: [] };
+    return withWriter(directory, (dir, entries) => {
+      const latest = new Map(entries.map(e => [e.trace_id, e]));
+      let previous = entries.at(-1) ?? GENESIS;
+      let appended = false;
+      const archived: string[] = [], failed: string[] = [];
+      for (const id of new Set(traceIds)) {
+        let data: Snapshot;
+        try { data = snapshot(this.roots, id); }
+        catch { failed.push(id); continue; }
+        const prior = latest.get(id);
+        if (prior?.bundle_sha256 !== sha256(data.trace) || prior.sidecar_sha256 !== sha256(data.record)) {
+          previous = writeEntry(dir, id, data, previous);
+          latest.set(id, previous);
+          appended = true;
+        }
+        archived.push(id);
+      }
+      if (appended) {
+        const verified = verifyArchive(dir, previous.entry_sha256, true);
+        if (!verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
+      }
+      return { archived, failed };
+    });
   }
 
   export(traceId: string, options: ExportOptions = {}) {

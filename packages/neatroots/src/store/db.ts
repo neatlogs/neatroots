@@ -1360,7 +1360,7 @@ export class Store {
            GROUP BY r.trace_id ORDER BY COALESCE(r.ended_ms, r.received_ms) ASC`,
         )
         .all() as { t: string; pinned: number; w: number; b: string | null }[]
-    ).map((r) => ({ ...r, pinned: r.pinned || !this.releasable(r.t) ? 1 : 0, w: r.w + (indexed.get(r.t) ?? 0) }));
+    ).map((r) => ({ ...r, w: r.w + (indexed.get(r.t) ?? 0) }));
     const shas = rows.map((r) => (r.b ? [...new Set(r.b.match(/[0-9a-f]{64}/g) ?? [])] : []));
     const lastRef = new Map<string, number>();
     shas.forEach((list, i) => list.forEach((sha) => lastRef.set(sha, rows[i].pinned ? Infinity : Math.max(lastRef.get(sha) ?? -1, i))));
@@ -1373,6 +1373,11 @@ export class Store {
     let freed = 0;
     for (let i = 0; i < rows.length; i++) {
       if (rows[i].pinned) continue;
+      // Only archive candidates we actually reach. A held row keeps every shared blob.
+      if (!this.releasable(rows[i].t)) {
+        for (const sha of shas[i]) lastRef.set(sha, Infinity);
+        continue;
+      }
       pick.push(rows[i].t);
       freed += rows[i].w * rowScale;
       for (const sha of shas[i]) if (lastRef.get(sha) === i) freed += this.blobs.sizeOf(sha);

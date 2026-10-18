@@ -64,8 +64,14 @@ a project and synthetic doctor probes are always exempt. Merely connecting a cod
 agent over MCP does not trace that agent. No UI or device discovery is added here.
 
 Covered runs are archived, unredacted, after a root/completion marker and idle checks.
-Like the relay, automatic archiving waits 1.5 seconds after changes; it also retries
-eligible live runs every 30 seconds, including after restart. The engine's delayed
+Automatic archiving coalesces change events with a single 1.5-second timer and
+processes at most 32 runs per synchronous batch. Every 30 seconds it also scans the
+next page of up to 32 live runs, including after restart, to capture manual edits
+without events and retry eligible work. Periodic pages get space even while change
+events keep arriving. A complete periodic pass can take more than 30 seconds on a
+large store; this is not a 30-second capture guarantee. A batch verifies the whole
+archive once, and once more if it appends versions. Large histories or individual
+snapshots can still block the server while this synchronous work runs. The engine's delayed
 end work and on-demand investigations/explanations/rechecks count as processing.
 An intentionally disabled/missing engine or unfinished/interrupted checks holds the
 run visibly. Restore the engine or re-run interrupted work to release it. Settled

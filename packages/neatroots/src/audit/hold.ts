@@ -10,10 +10,13 @@ import { readFile, sha256 } from "./files.js";
 import { verifyArchive } from "./manifest.js";
 import { log } from "../util/log.js";
 
-/** Server-owned archive-before-release policy. No background task mutates archive bytes. */
+/** Server-owned archive-before-release policy with bounded synchronous background capture. */
 export class AuditHold {
   private readonly archive: AuditArchive;
-  private readonly timers = new Map<string, NodeJS.Timeout>();
+  private readonly pending = new Set<string>();
+  private readonly periodic = new Set<string>();
+  private timer?: NodeJS.Timeout;
+  private cursor = "";
   private readonly failures = new Map<string, string>();
   private readonly unsubscribe: (() => void)[] = [];
   private readonly interval: NodeJS.Timeout;
@@ -24,7 +27,7 @@ export class AuditHold {
     for (const event of ["finding", "explanation", "summary"] as const) {
       this.unsubscribe.push(roots.bus.on(event, (u) => this.schedule(u.trace_id)));
     }
-    this.unsubscribe.push(roots.bus.on("settings", () => this.scheduleAll()));
+    this.unsubscribe.push(roots.bus.on("settings", () => { this.cursor = ""; this.scheduleAll(); }));
     // Also covers restart, retries, and edits which have no bus notification (e.g. annotations).
     this.interval = setInterval(() => this.scheduleAll(), 30_000);
     this.interval.unref();
@@ -66,30 +69,73 @@ export class AuditHold {
     }
   }
 
+  private candidate(run: RunRow): boolean {
+    return !run.doctor && !!run.project && projectSettings(this.roots.config, run.project).audit;
+  }
+
+  private failed(traceId: string): void {
+    this.failures.set(traceId, "archive could not be written or verified; inspect the local archive directory and permissions");
+    log.warn(`audit archive failed for ${traceId}: local write or verification failed`);
+  }
+
+  private arm(): void {
+    if (this.timer || (!this.pending.size && !this.periodic.size)) return;
+    this.timer = setTimeout(() => { this.timer = undefined; this.drain(); }, 1500);
+    this.timer.unref();
+  }
+
   private schedule(traceId: string): void {
     const run = this.roots.store.getRun(traceId);
-    if (!run || !this.covered(run)) return;
-    if (this.timers.has(traceId)) clearTimeout(this.timers.get(traceId));
-    const timer = setTimeout(() => {
-      this.timers.delete(traceId);
-      const run = this.roots.store.getRun(traceId);
-      if (!run || !this.covered(run) || this.reason(run)) return;
-      try { this.beforeDelete(traceId); } catch { /* Visible in status; retry on change/periodic scan. */ }
-    }, 1500);
-    timer.unref();
-    this.timers.set(traceId, timer);
+    // Exact unknown-project evidence may hydrate payloads; defer it to the bounded drain.
+    if (!run || !this.candidate(run)) return;
+    this.pending.add(traceId);
+    this.arm();
+  }
+
+  private drain(): void {
+    const selected = new Set<string>();
+    const take = (queue: Set<string>, limit: number) => {
+      for (const id of queue) {
+        if (selected.size >= limit) break;
+        queue.delete(id);
+        selected.add(id);
+      }
+    };
+    // Reserve half a batch for periodic capture even under continuous event traffic.
+    take(this.periodic, 16);
+    take(this.pending, 32);
+    take(this.periodic, 32);
+    const ready: string[] = [];
+    for (const id of selected) {
+      this.pending.delete(id);
+      this.periodic.delete(id);
+      const run = this.roots.store.getRun(id);
+      if (!run || !this.candidate(run) || this.reason(run)) continue;
+      try { if (this.covered(run)) ready.push(id); }
+      catch { this.failed(id); }
+    }
+    try {
+      const result = this.archive.ensureMany(ready, this.directory());
+      for (const id of result.archived) this.failures.delete(id);
+      for (const id of result.failed) this.failed(id);
+    } catch {
+      for (const id of ready) this.failed(id);
+    }
+    this.arm();
   }
 
   private scheduleAll(): void {
     if (!this.roots.config.audit.enabled && !Object.values(this.roots.config.projects).some(p => p.audit === true)) return;
-    const runs = this.roots.store.db.prepare("SELECT * FROM runs").all() as RunRow[];
-    for (const run of runs) if (this.covered(run)) this.schedule(run.trace_id);
+    const runs = this.roots.store.db.prepare("SELECT * FROM runs WHERE trace_id > ? ORDER BY trace_id LIMIT 32").all(this.cursor) as RunRow[];
+    this.cursor = runs.length === 32 ? runs[31].trace_id : "";
+    for (const run of runs) if (this.candidate(run)) this.periodic.add(run.trace_id);
+    this.arm();
   }
 
   forgotten(ids: string[]): void {
     for (const id of ids) {
-      clearTimeout(this.timers.get(id));
-      this.timers.delete(id);
+      this.pending.delete(id);
+      this.periodic.delete(id);
       this.failures.delete(id);
     }
   }
@@ -140,7 +186,9 @@ export class AuditHold {
 
   close(): void {
     clearInterval(this.interval);
-    for (const timer of this.timers.values()) clearTimeout(timer);
+    clearTimeout(this.timer);
+    this.pending.clear();
+    this.periodic.clear();
     for (const off of this.unsubscribe) off();
   }
 }
