@@ -1,4 +1,5 @@
 import type { Roots } from "../core.js";
+import { parsePlannerOutput, type PlannerOutput } from "./planner.js";
 import type { TraceUpdate } from "../store/db.js";
 import type { LlmClient } from "../models/llm.js";
 import { LlmUnavailableError } from "../models/llm.js";
@@ -953,7 +954,7 @@ ${wrapRun(`System prompt: ${clip(goal.system ?? "(none)", 2500)}\nFirst user mes
 
 Library questions:
 ${library}`;
-    let out: { rationale?: string; checks?: { id: string; params?: Record<string, string> }[]; new_questions?: { id: string; ask: string; scope?: string; span_type?: string; guidance?: string }[] } | undefined;
+    let out: PlannerOutput | undefined;
     let model: string | null = null;
     try {
       const r = await this.llm.chat(
@@ -963,7 +964,7 @@ ${library}`;
         ],
         { schema: { name: "plan", schema: PLANNER_SCHEMA }, maxTokens: 900, priority: "high", timeoutSec: 90 },
       );
-      out = r.json as typeof out;
+      out = parsePlannerOutput(r.json);
       model = r.model;
     } catch (err) {
       log.warn(`planner failed, using default checks: ${(err as Error).message}`);
