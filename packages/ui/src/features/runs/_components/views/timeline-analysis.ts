@@ -1,8 +1,21 @@
 import type { Span } from "@/lib/api";
 
 type Interval = { start: number; end: number };
+
+function rawTimestamp(value: string): bigint | null {
+  // OTLP timestamps are uint64 decimal strings. Bound parsing and preserve nanosecond precision.
+  if (typeof value !== "string" || value.length === 0 || value.length > 20 || /[^0-9]/.test(value)) return null;
+  const timestamp = BigInt(value);
+  return timestamp <= 18_446_744_073_709_551_615n ? timestamp : null;
+}
+
 export function recordedInterval(span: Span): Interval | null {
-  if (span.end_ns === "0" || !Number.isFinite(span.start_ms) || !Number.isFinite(span.end_ms) || span.end_ms < span.start_ms || Math.abs(span.start_ms) > Number.MAX_SAFE_INTEGER || Math.abs(span.end_ms) > Number.MAX_SAFE_INTEGER) return null;
+  const rawStart = span.start_ns === undefined ? undefined : rawTimestamp(span.start_ns);
+  const rawEnd = span.end_ns === undefined ? undefined : rawTimestamp(span.end_ns);
+  // The store clamps reversed and unfinished intervals to zero milliseconds, retaining raw times.
+  if (rawStart === null || rawEnd === null || rawEnd === 0n ||
+      (rawStart !== undefined && rawEnd !== undefined && rawEnd < rawStart)) return null;
+  if (!Number.isFinite(span.start_ms) || !Number.isFinite(span.end_ms) || span.end_ms < span.start_ms || Math.abs(span.start_ms) > Number.MAX_SAFE_INTEGER || Math.abs(span.end_ms) > Number.MAX_SAFE_INTEGER) return null;
   return { start: span.start_ms, end: span.end_ms };
 }
 function union(intervals: Interval[]): Interval[] {

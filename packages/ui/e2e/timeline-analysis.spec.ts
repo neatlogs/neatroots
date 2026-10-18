@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { randomBytes } from "node:crypto";
 import type { Span } from "../src/lib/api";
 import { analyzeTiming } from "../src/features/runs/_components/views/timeline-analysis";
 import { open, state } from "./util";
@@ -18,6 +19,82 @@ test("gaps exclude enclosing spans; zero, missing and malformed evidence is expl
   expect(result.rows[3].outside).toBe(0);
   expect(result.rows.slice(4).every((row) => row.duration === null)).toBe(true);
   expect(result.rows.every((row) => row.outside === null || (Number.isFinite(row.outside) && row.outside >= 0))).toBe(true);
+});
+test("raw reversed timestamps remain unavailable after store normalization", () => {
+  const reversed = { ...span('reversed', 90, 90, 'root'), start_ns: '90000000', end_ns: '80000000' };
+  const result = analyzeTiming([span('root', 0, 100, null, 'WORKFLOW'), span('a', 10, 20, 'root'), reversed, span('b', 95, 100, 'root')]);
+  expect(result.rows[2].interval).toBeNull();
+  expect(result.rows[2].duration).toBeNull();
+  expect(result.rows[2].outside).toBeNull();
+  expect(result.rows[0].outside).toBeNull();
+  expect(result.gaps).toEqual([{ start: 20, end: 95 }]);
+  expect(result.incomplete).toBe(true);
+});
+
+test("raw timestamps preserve precision, genuine zero durations and missing-field compatibility", () => {
+  const zero = span('zero', 1_700_000_000_090, 1_700_000_000_090);
+  const start = '1700000000090000001';
+  expect(analyzeTiming([{ ...zero, start_ns: start, end_ns: start }]).rows[0].duration).toBe(0);
+  expect(analyzeTiming([{ ...zero, start_ns: start, end_ns: '1700000000090000000' }]).rows[0].duration).toBeNull();
+  expect(analyzeTiming([{ ...zero, start_ns: start, end_ns: '0' }]).rows[0].duration).toBeNull();
+  expect(analyzeTiming([{ ...zero, start_ns: start, end_ns: '000' }]).rows[0].duration).toBeNull();
+  expect(analyzeTiming([zero]).rows[0].duration).toBe(0);
+  expect(analyzeTiming([{ ...zero, start_ns: start }]).rows[0].duration).toBe(0);
+  expect(analyzeTiming([{ ...zero, end_ns: start }]).rows[0].duration).toBe(0);
+  for (const invalid of ['', '-1', '1.5', '1e9', ' 90 ', '90\n', 'garbage', '18446744073709551616', '9'.repeat(1000), 90, null]) {
+    for (const key of ['start_ns', 'end_ns']) {
+      const candidate = { ...zero, start_ns: start, end_ns: start, [key]: invalid } as Span;
+      expect(analyzeTiming([candidate]).rows[0].duration, `${key}: ${String(invalid)}`).toBeNull();
+    }
+  }
+});
+
+test("raw reversed timestamps survive the collector and show unavailable evidence", async ({ page, request }, testInfo) => {
+  const traceId = randomBytes(16).toString('hex');
+  const rootId = '0000000000000001';
+  const base = 1_700_000_000_000_000_000n;
+  const makeSpan = (id: string, name: string, start: number, end: number, root = false) => ({
+    traceId, spanId: id, parentSpanId: root ? '' : rootId, name, kind: 1,
+    startTimeUnixNano: String(base + BigInt(start) * 1_000_000n),
+    endTimeUnixNano: String(base + BigInt(end) * 1_000_000n),
+    attributes: [{ key: 'neatlogs.span.kind', value: { stringValue: root ? 'workflow' : 'tool' } }],
+    status: { code: 1 },
+  });
+  const response = await request.post(`${state().url}/v1/traces`, { data: {
+    resourceSpans: [{ resource: { attributes: [{ key: 'service.name', value: { stringValue: 'e2e-raw-timing' } }] }, scopeSpans: [{ spans: [
+      makeSpan(rootId, 'raw-timing-root', 0, 100, true),
+      makeSpan('0000000000000002', 'first-call', 10, 20),
+      makeSpan('0000000000000003', 'reversed-call', 90, 80),
+      makeSpan('0000000000000004', 'last-call', 95, 100),
+      makeSpan('0000000000000005', 'zero-call', 20, 20),
+    ] }] }],
+  } });
+  expect(response.ok()).toBe(true);
+  const detailResponse = await request.get(`${state().url}/api/runs/${traceId}`);
+  expect(detailResponse.ok()).toBe(true);
+  const detail = await detailResponse.json() as { spans: Span[] };
+  const reversed = detail.spans.find((item) => item.name === 'reversed-call')!;
+  expect(reversed.start_ns).toBe(String(base + 90_000_000n));
+  expect(reversed.end_ns).toBe(String(base + 80_000_000n));
+  expect(reversed.end_ms).toBe(reversed.start_ms);
+  expect(reversed.duration_ms).toBe(0);
+  const analysis = analyzeTiming(detail.spans);
+  expect(analysis.rows.find((row) => row.span.name === 'raw-timing-root')!.outside).toBeNull();
+  expect(analysis.rows.find((row) => row.span.name === 'zero-call')!.duration).toBe(0);
+  expect(analysis.gaps).toEqual([{ start: Number(base / 1_000_000n) + 20, end: Number(base / 1_000_000n) + 95 }]);
+  expect(analysis.incomplete).toBe(true);
+
+  await open(page, `runs/${traceId}?view=timeline`);
+  await page.getByTestId('run-views').getByRole('tab', { name: 'Timeline' }).click();
+  const breakdown = page.getByTestId('timing-breakdown');
+  await breakdown.locator('summary').click();
+  const reversedRow = breakdown.getByRole('row').filter({ hasText: 'reversed-call' });
+  await expect(reversedRow.getByRole('cell').nth(1)).toHaveText('Unavailable');
+  await expect(reversedRow.getByRole('cell').nth(3)).toHaveText('Unavailable timing');
+  await expect(breakdown.getByRole('row').filter({ hasText: 'raw-timing-root' }).getByRole('cell').nth(2)).toHaveText('Unavailable');
+  await expect(breakdown.getByText(/Incomplete timing may hide activity/)).toBeVisible();
+  await expect(breakdown.getByText('20 ms–95 ms: 75 ms', { exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('raw-timing.png'), fullPage: true });
 });
 for (const theme of ['light', 'dark', 'mobile'] as const) {
   test(`timing sorting, navigation and zoom (${theme})`, async ({ page }, testInfo) => {
