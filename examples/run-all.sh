@@ -41,6 +41,7 @@ for pair in $PAIRS; do
   before=$(count "$project")
   printf '%-24s ' "$ex"
   case "$ex" in
+    python-pydanticai) (cd "$ex" && MOCK_LLM_URL="$MOCK" uv run --frozen -q agent.py >/tmp/neatroots-example.log 2>&1) ;;
     python-*) (cd "$ex" && MOCK_LLM_URL="$MOCK" uv run -q agent.py >/tmp/neatroots-example.log 2>&1) ;;
     typescript-*) (cd "$ex" && { [ -d node_modules ] || npm install --silent --no-audit --no-fund; } && MOCK_LLM_URL="$MOCK" npm start --silent >/tmp/neatroots-example.log 2>&1) ;;
     http-api) (cd "$ex" && sh send.sh >/tmp/neatroots-example.log 2>&1) ;;

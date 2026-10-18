@@ -1,19 +1,19 @@
 # /// script
 # requires-python = ">=3.11"   # pydantic-ai 2.x needs 3.11+; uv downloads one if the system python is older
 # dependencies = [
-#   "pydantic-ai>=2.57,<3",
-#   "opentelemetry-sdk>=1.27",
-#   "opentelemetry-exporter-otlp-proto-http>=1.27",
-#   "opentelemetry-exporter-otlp-proto-grpc>=1.27",
+#   "pydantic-ai==2.57.0",
+#   "opentelemetry-sdk==1.44.0",
+#   "opentelemetry-exporter-otlp-proto-http==1.44.0",
+#   "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
 # ]
 # ///
 """A PydanticAI tool-calling agent traced by pydantic-ai's own OpenTelemetry instrumentation,
 exporting OTLP to neatroots. No Neatlogs SDK: this is the plain-OpenTelemetry path, the way
 pydantic-ai documents instrumentation.
 
-    uv run agent.py                                 # OTLP/HTTP to localhost:4100
-    OTLP_PROTOCOL=grpc uv run agent.py              # OTLP/gRPC to localhost:4317
-    MODEL=mock-sloppy uv run agent.py "Please refund order 4512"   # claims success after a failed tool
+    uv run --frozen agent.py                                 # OTLP/HTTP to localhost:4100
+    OTLP_PROTOCOL=grpc uv run --frozen agent.py              # OTLP/gRPC to localhost:4317
+    MODEL=mock-sloppy uv run --frozen agent.py "Please refund order 4512"   # claims success after a failed tool
 
 Runs against neatroots' mock LLM by default (start it with `neatroots mock-llm`); REAL_LLM=1
 uses OPENAI_API_KEY. Another neatroots? Set OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, or NEATLOGS_ENDPOINT
@@ -26,8 +26,8 @@ import sys
 from urllib.parse import urlparse
 
 if os.environ.get("REAL_LLM") != "1":  # neatroots' mock LLM (neatroots mock-llm); REAL_LLM=1 uses your own key
-    os.environ.setdefault("OPENAI_BASE_URL", os.environ.get("MOCK_LLM_URL", "http://127.0.0.1:4110/v1"))
-    os.environ.setdefault("OPENAI_API_KEY", "mock")
+    os.environ["OPENAI_BASE_URL"] = os.environ.get("MOCK_LLM_URL", "http://127.0.0.1:4110/v1")
+    os.environ["OPENAI_API_KEY"] = "mock"
 
 from opentelemetry import trace  # noqa: E402
 from opentelemetry.sdk.resources import Resource  # noqa: E402
@@ -51,7 +51,7 @@ else:
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or base.rstrip("/") + "/v1/traces"
     exporter = OTLPSpanExporter(endpoint=endpoint)
 
-provider = TracerProvider(resource=Resource.create({"service.name": "example-pydanticai"}))
+provider = TracerProvider(resource=Resource.create({"service.name": os.environ.get("PYDANTICAI_PROJECT", "example-pydanticai")}))
 provider.add_span_processor(BatchSpanProcessor(exporter))
 trace.set_tracer_provider(provider)
 
@@ -91,6 +91,8 @@ def issue_refund(order_id: str, amount: float) -> str:
 
 
 if __name__ == "__main__":
-    result = agent.run_sync(" ".join(sys.argv[1:]) or "Please refund order 1001")
-    print(result.output)
-    provider.shutdown()  # flush the spans before exiting
+    try:
+        result = agent.run_sync(" ".join(sys.argv[1:]) or "Please refund order 1001")
+        print(result.output)
+    finally:
+        provider.shutdown()  # also flush recorded failures before exiting
