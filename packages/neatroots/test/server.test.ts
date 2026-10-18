@@ -425,6 +425,20 @@ describe("server", () => {
     expect(ui.headers.get("content-type")).toMatch(/text\/html/);
   });
 
+  it("returns 404 for a snapshot of a run that does not exist, like the other run routes", async () => {
+    const tb = await served();
+    const origin = { headers: { origin: tb.url.replace("127.0.0.1", "localhost") } };
+    const missing = await fetch(`${tb.url}/api/runs/${hex(16)}/snapshot`, origin);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "run not found" });
+
+    const { t, batches } = sampleRun();
+    await fetch(`${tb.url}/v1/traces`, { method: "POST", headers: { "content-type": "application/x-protobuf" }, body: encodeTraceRequest(batches) });
+    const ok = await fetch(`${tb.url}/api/runs/${t}/snapshot`, origin);
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { spans: unknown[] }).spans.length).toBeGreaterThan(0);
+  });
+
   it("path traversal: a request that escapes uiDir into a sibling folder returns index.html, not the sibling file", async () => {
     // Use the same uiDir the server resolves at startup (exported so both agree).
     const uiDir = findUiDir();
