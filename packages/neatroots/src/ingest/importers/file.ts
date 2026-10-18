@@ -65,7 +65,17 @@ export function parseTraceFile(text: string, name: string, project?: string): Re
   for (const b of batches) {
     setImportSource(b, "file");
     if (project) setProject(b, project);
-    else if (!b.resource.attributes.some((a) => (a.key === "service.name" || a.key === "neatlogs.workflow_name") && a.value.stringValue)) setProject(b, "imported");
+    else if (
+      !b.resource.attributes.some(
+        (a) =>
+          (a.key === "service.name" || a.key === "neatlogs.workflow_name") &&
+          "stringValue" in a.value &&
+          typeof a.value.stringValue === "string" &&
+          a.value.stringValue.length > 0
+      )
+    ) {
+      setProject(b, "imported");
+    }
   }
   return batches;
 }
