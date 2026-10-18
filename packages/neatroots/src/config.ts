@@ -198,6 +198,8 @@ function deepMerge<T>(base: T, over: unknown, skipped: string[] = [], prefix = "
     } else if (Array.isArray(cur) && !Array.isArray(v)) {
       if (typeof v === "string") out[k] = [v];
       else skipped.push(key);
+    } else if (cur !== undefined && (typeof v !== typeof cur || (typeof v === "number" && !Number.isFinite(v)))) {
+      skipped.push(key);
     } else {
       out[k] = v;
     }

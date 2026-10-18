@@ -43,6 +43,18 @@ describe("loadConfig with a hand-edited value of the wrong shape", () => {
     expect(load("checkDirs: 3\n").checkDirs).toEqual([]);
   });
 
+  it("ignores primitive settings with the wrong type", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cfg = load('port: nope\nhost: 42\nllm:\n  enabled: "false"\nsteering:\n  gateWaitMs: .nan\n');
+    const defaults = defaultConfig();
+    expect(cfg.port).toBe(defaults.port);
+    expect(cfg.host).toBe(defaults.host);
+    expect(cfg.llm.enabled).toBe(defaults.llm.enabled);
+    expect(cfg.steering.gateWaitMs).toBe(defaults.steering.gateWaitMs);
+    const said = warn.mock.calls.map((c) => String(c[0])).join("\n");
+    for (const key of ["port", "host", "llm.enabled", "steering.gateWaitMs"]) expect(said).toContain(`ignoring ${key} `);
+  });
+
   it("still merges well-formed settings", () => {
     const cfg = load("retention:\n  days: 30\nllm:\n  model: qwen3\nrerun:\n  agent:\n    command: python agent.py\n");
     expect(cfg.retention).toEqual({ days: 30, maxGb: 5 });
