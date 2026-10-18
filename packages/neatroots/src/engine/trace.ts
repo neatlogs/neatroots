@@ -161,11 +161,16 @@ function replyText(output: Plain | undefined): string | undefined {
   return s && s !== "null" && s.trim() !== "" && s !== '""' ? s : undefined;
 }
 
+/** The empty text forms recognized by the output rules. */
+export function isEmptyOutput(output: string | undefined): boolean {
+  return !output || /^("?\s*"?|null|\{\}|\[\])$/.test(output.trim());
+}
+
 /** The run's final answer: the root output, or the text of the last LLM reply. Undefined when empty. */
 export function finalOutput(t: TraceSnapshot): string | undefined {
   const root = t.spans.find((s) => !s.parentId);
   const rootOut = textOf(root?.output);
-  if (rootOut && rootOut !== '""' && rootOut !== "null") return rootOut;
+  if (!isEmptyOutput(rootOut)) return rootOut;
   const llms = t.spans.filter((s) => s.kind === "LLM" && s.output !== undefined);
   const last = llms[llms.length - 1];
   const text = last ? replyText(last.output) : undefined;
