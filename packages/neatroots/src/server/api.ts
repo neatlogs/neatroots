@@ -1,3 +1,4 @@
+import { CHROMA_DEVICES, type ChromaDevice } from "../ambient/chroma-frames.js";
 import os from "node:os";
 import path from "node:path";
 import type { Hono } from "hono";
@@ -130,6 +131,7 @@ export function mountApi(app: Hono, roots: Roots): void {
       stats: roots.store.stats(),
       engine: status,
       tier: { ...tier, platform: `${os.platform()} ${os.arch()}` },
+      ambient: roots.ambient.status(),
       steering: { enabled: roots.config.steering.enabled, hooks_connected: roots.steering.listeners },
       mcp: { last_seen_ms: roots.mcpSeenMs },
       cloud: { endpoint: roots.relay.endpoint(), has_key: !!(await getCloudKey()), has_token: !!(await getCloudToken()), project_id: roots.config.cloud.projectId ?? null },
@@ -255,6 +257,12 @@ export function mountApi(app: Hono, roots: Roots): void {
       steering?: SteeringMode;
       forward?: boolean;
       steering_enabled?: boolean;
+      ambient_enabled?: boolean;
+      ambient_log_enabled?: boolean;
+      ambient_chroma_enabled?: boolean;
+      ambient_chroma_animation?: boolean;
+      ambient_chroma_devices?: ChromaDevice[];
+      ambient_chroma_retry?: boolean;
       llm_model?: string;
       llm_base_url?: string;
       classifier_backend?: "auto" | "laya" | "jev" | "jev-cloud" | "llm";
@@ -272,9 +280,15 @@ export function mountApi(app: Hono, roots: Roots): void {
     const inRange = (v: unknown, min: number, max: number, minOpen = false) => typeof v === "number" && Number.isFinite(v) && (minOpen ? v > min : v >= min) && v <= max;
     if (b.retention_days !== undefined && !inRange(b.retention_days, 1, 3650)) return err(c, 400, "Keep runs for must be between 1 and 3650 days");
     if (b.retention_max_gb !== undefined && !inRange(b.retention_max_gb, 0, 10_000, true)) return err(c, 400, "Size cap must be more than 0 GB and at most 10000 GB");
-    for (const field of ["forward", "steering_enabled", "jev_cloud_enabled", "laya_enabled"] as const) {
+    for (const field of ["forward", "steering_enabled", "jev_cloud_enabled", "laya_enabled", "ambient_enabled", "ambient_log_enabled", "ambient_chroma_enabled", "ambient_chroma_animation", "ambient_chroma_retry"] as const) {
       if (b[field] !== undefined && typeof b[field] !== "boolean") return err(c, 400, `${field} must be a boolean`);
     }
+    const ambientKeys = ["ambient_enabled", "ambient_log_enabled", "ambient_chroma_enabled", "ambient_chroma_animation", "ambient_chroma_devices", "ambient_chroma_retry"];
+    if (Object.keys(b).some(key => key.startsWith("ambient_") && !ambientKeys.includes(key))) return err(c, 400, "Unknown ambient option");
+    if (b.ambient_chroma_devices !== undefined && (!Array.isArray(b.ambient_chroma_devices) || !b.ambient_chroma_devices.length
+      || b.ambient_chroma_devices.length > CHROMA_DEVICES.length || b.ambient_chroma_devices.some(device => !CHROMA_DEVICES.includes(device)))) return err(c, 400, "Select documented Chroma devices");
+    if (b.ambient_chroma_retry && (!(b.ambient_enabled ?? roots.config.ambient.enabled)
+      || !(b.ambient_chroma_enabled ?? roots.config.ambient.outputs.chroma?.enabled))) return err(c, 400, "Enable Chroma before retrying");
     if (b.project && b.steering !== undefined && !STEERING_MODES.includes(b.steering)) return err(c, 400, `steering must be one of ${STEERING_MODES.join(", ")}`);
     if (b.classifier_backend && !["auto", "laya", "jev", "jev-cloud", "llm"].includes(b.classifier_backend)) return err(c, 400, "classifier_backend must be auto, laya, jev, jev-cloud or llm");
     if (b.cloud_endpoint && !allowedEndpoint(b.cloud_endpoint)) return err(c, 400, "cloud endpoint must be an https://*.neatlogs.com URL (or localhost for testing)");
@@ -305,6 +319,12 @@ export function mountApi(app: Hono, roots: Roots): void {
     }
     if (b.retention_days !== undefined) roots.config.retention.days = Math.round(b.retention_days);
     if (b.retention_max_gb !== undefined) roots.config.retention.maxGb = b.retention_max_gb;
+    if (b.ambient_enabled !== undefined) roots.config.ambient.enabled = b.ambient_enabled;
+    if (b.ambient_log_enabled !== undefined) roots.config.ambient.outputs.log.enabled = b.ambient_log_enabled;
+    const chroma = roots.config.ambient.outputs.chroma!;
+    if (b.ambient_chroma_enabled !== undefined) chroma.enabled = b.ambient_chroma_enabled;
+    if (b.ambient_chroma_animation !== undefined) chroma.animation = b.ambient_chroma_animation;
+    if (b.ambient_chroma_devices !== undefined) chroma.devices = [...new Set(b.ambient_chroma_devices)];
     if (b.steering_enabled !== undefined) roots.config.steering.enabled = b.steering_enabled;
     if (b.llm_model) roots.config.llm.model = b.llm_model;
     if (b.llm_base_url) roots.config.llm.baseUrl = b.llm_base_url;
@@ -325,6 +345,7 @@ export function mountApi(app: Hono, roots: Roots): void {
       roots.checks.reload();
     }
     roots.saveConfig();
+    if (b.ambient_chroma_retry) roots.ambient.retryChroma();
     if (b.llm_model || b.llm_base_url) await roots.llm.probe(true);
     roots.bus.emit("settings", { project: b.project });
     return c.json({ ok: true, projects: projects(roots) });

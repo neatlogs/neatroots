@@ -283,7 +283,22 @@ export interface AgentClient {
   skills?: boolean;
 }
 
+export type ChromaDevice = "chromalink" | "keyboard" | "mouse" | "mousepad" | "headset" | "keypad";
+export interface AmbientStatus {
+  state: "inactive" | "idle" | "live" | "checking" | "loop" | "error" | "interrupted" | "attention" | "incomplete" | "success";
+  trace_id: string | null;
+  project: string | null;
+  workflow: string | null;
+  active_runs: number;
+  enabled: boolean;
+  log_enabled: boolean;
+  chroma: { configured: boolean; enabled: boolean; animation: boolean; devices: ChromaDevice[]; phase: "inactive" | "connecting" | "ready" | "unavailable"; state: AmbientStatus["state"]; error: string | null };
+  subscribed: boolean;
+  output_error: boolean;
+}
+
 export interface Status {
+  ambient: AmbientStatus;
   version: string;
   port: number;
   home: string;

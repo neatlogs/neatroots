@@ -264,6 +264,7 @@ can read) and never in the database.
 
 - [Getting started](docs/getting-started.md): install, models, sending runs, reading them, replay,
   coding agents, privacy and troubleshooting.
+- [Ambient outputs](docs/ambient.md): opt-in local run-state signals and their controls.
 - [Tester guide](docs/tester-guide.md): a 45-minute session for people trying neatroots, and what to
   report.
 - [Use case](docs/use-case.md), [architecture](docs/architecture.md), [checks](docs/checks.md),

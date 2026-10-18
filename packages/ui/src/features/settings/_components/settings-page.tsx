@@ -1,3 +1,4 @@
+import { AmbientSection } from "./ambient-section";
 import { AiBrain01Icon, CloudIcon, CommandLineIcon, Folder01Icon, Settings01Icon, Target02Icon } from "@hugeicons/core-free-icons";
 import type { Status } from "@/lib/api";
 import { AgentsSection } from "./agents-section";
@@ -27,6 +28,7 @@ const GROUPS: SettingsNavGroup[] = [
     label: "Connections",
     items: [
       { id: "agents", label: "Coding agents", icon: CommandLineIcon },
+      { id: "ambient", label: "Ambient outputs", icon: Target02Icon },
       { id: "cloud", label: "Neatlogs Cloud", icon: CloudIcon },
     ],
   },
@@ -38,6 +40,7 @@ const PAGES: Record<string, { title: string; description: string }> = {
   models: { title: "LLM", description: "Plans which questions fit each agent, explains problems, writes notes for the agent and summarizes runs." },
   decisions: { title: "Decision model", description: "Answers each check's yes/no question with a probability." },
   agents: { title: "Coding agents", description: "Claude Code, Codex, Cursor and others read runs and findings, and add checks, over MCP." },
+  ambient: { title: "Ambient outputs", description: "A local signal for run state, with explicit controls for every output." },
   cloud: { title: "Neatlogs Cloud", description: "Keep or share runs, and bring production traces here to debug them." },
 };
 
@@ -58,6 +61,8 @@ export function SettingsPage({ status, tab: raw }: { status?: Status; tab?: stri
           <LlmSection status={status} />
         ) : tab === "decisions" ? (
           <DecisionSection status={status} />
+        ) : tab === "ambient" ? (
+          <AmbientSection status={status.ambient} />
         ) : tab === "agents" ? (
           <AgentsSection port={status.port} />
         ) : (

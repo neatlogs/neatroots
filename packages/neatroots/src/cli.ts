@@ -8,6 +8,7 @@ import { startGrpc } from "./ingest/grpc.js";
 import { VERSION } from "./version.js";
 import { rootsHome, loadConfig, saveConfig, type SteeringMode } from "./config.js";
 import { runStdioBridge } from "./mcp/stdio.js";
+import { createShutdown } from "./cli/shutdown.js";
 import { api, ask, port, running } from "./cli/util.js";
 import { registerModelCommands } from "./cli/models.js";
 import { doctorModels } from "./cli/doctor-models.js";
@@ -87,11 +88,7 @@ program
       log.info(status.decision.backend ? `decision model now: ${status.decision.backend}${status.decision.model ? ` (${status.decision.model})` : ""}${then}` : "decision model: none yet");
     }
     if (roots.checks.errors.length) log.warn(`${roots.checks.errors.length} check file problem(s); see the Checks page`);
-    const stop = () => {
-      log.info("stopping");
-      roots.close();
-      process.exit(0);
-    };
+    const stop = createShutdown(() => roots.close(), code => process.exit(code), message => log.info(message));
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
   });

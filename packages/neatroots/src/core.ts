@@ -1,3 +1,4 @@
+import { AmbientController } from "./ambient/controller.js";
 import path from "node:path";
 import { rootsHome, loadConfig, saveConfig, type RootsConfig } from "./config.js";
 import { Bus } from "./bus.js";
@@ -27,6 +28,7 @@ export interface RootsOptions {
 
 /** The running neatroots instance: config, store, models, checks, steering and the event bus every part shares. */
 export class Roots {
+  readonly ambient: AmbientController;
   readonly config: RootsConfig;
   readonly home: string;
   readonly store: Store;
@@ -45,6 +47,7 @@ export class Roots {
   readonly replayBatches: ReplayBatches;
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
+  private closing?: Promise<void>;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
   /** The run and span the app has in focus, for the MCP get_current_run tool. */
@@ -81,6 +84,16 @@ export class Roots {
       // Finish check work a previous process accepted but didn't complete (a restart or a crash).
       setTimeout(() => void resumeUnfinished(engine, this).catch((e: Error) => log.warn(`couldn't resume checks: ${e.message}`)), 1500).unref();
     }
+    this.ambient = new AmbientController(this.store, this.bus, (id) => {
+      if (!this.store.db.open || !this.engine || this.checks.errors.length || !this.store.getRun(id)) return "unknown";
+      if (this.checkCompletion.requiresRecheck(id) || this.engine.progress.state(id) === "interrupted") return "interrupted";
+      const receipt = this.checkCompletion.state(id);
+      // Failed work may leave stale pending counters; it cannot certify an outcome.
+      if (receipt === "failed") return "unknown";
+      if (this.engine.pending(id) > 0 || this.engine.progress.state(id) === "checking") return "checking";
+      return receipt === "settled" ? "settled" : "unknown";
+    });
+    this.ambient.configure(this.config.ambient);
   }
 
   ingest(batches: ResourceSpansBatch[]): TraceUpdate[] {
@@ -93,6 +106,7 @@ export class Roots {
   /** Saves to this instance's own home (the one it was opened with), never another one. */
   saveConfig(): void {
     saveConfig(this.config, path.join(this.home, "config.yaml"));
+    this.ambient.configure(this.config.ambient);
   }
 
   /** Applies retention now and every hour. */
@@ -117,12 +131,14 @@ export class Roots {
     void this.laya.ensure().then(() => this.decisions.reset());
   }
 
-  close(): void {
-    if (!this.store.db.open) return;
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
+    this.closing = this.ambient.close();
     clearInterval(this.sweeper);
     this.replayBatches.close();
     this.replays.close();
     this.laya.stop();
     this.store.close();
+    return this.closing;
   }
 }

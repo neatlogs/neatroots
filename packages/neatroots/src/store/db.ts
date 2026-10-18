@@ -412,6 +412,8 @@ export class Store {
   readonly blobs: BlobStore;
   private readonly searchIds: SearchIds;
   private seq = 0;
+  private trust?: import("../models/decision.js").TrustStore;
+  private flushTrust?: () => void;
   readonly dir: string;
   readonly file: string;
 
@@ -439,7 +441,8 @@ export class Store {
   }
 
   close(): void {
-    this.db.close();
+    if (!this.db.open) return;
+    try { this.flushTrust?.(); } finally { this.db.close(); }
   }
 
   /** Adds columns introduced after a database was first created. */
@@ -1445,16 +1448,28 @@ export class Store {
 
   /** Laya-vs-LLM agreement per question, persisted so trust survives restarts. */
   trustStore(): import("../models/decision.js").TrustStore {
-    let data: Record<string, { n: number; agree: number }> = json(this.getMeta("laya_trust"), {});
+    if (this.trust) return this.trust;
+    let data: Record<string, { n: number; agree: number }> = json(this.db.open ? this.getMeta("laya_trust") : undefined, {});
     let timer: NodeJS.Timeout | undefined;
+    let dirty = false;
+    const flush = () => {
+      clearTimeout(timer); timer = undefined;
+      if (!dirty || !this.db.open) return;
+      this.setMeta("laya_trust", JSON.stringify(data));
+      dirty = false;
+    };
+    this.flushTrust = flush;
     const persist = () => {
       clearTimeout(timer);
-      timer = setTimeout(() => this.setMeta("laya_trust", JSON.stringify(data)), 1000);
+      timer = setTimeout(flush, 1000);
       timer.unref();
     };
-    return {
+    return this.trust = {
       get: (q) => data[q] ?? { n: 0, agree: 0 },
       record: (q, agreed) => {
+        // In-flight shadow comparisons may finish after close; they cannot extend persistence.
+        if (!this.db.open) return;
+        dirty = true;
         const cur = data[q] ?? { n: 0, agree: 0 };
         data = { ...data, [q]: { n: cur.n + 1, agree: cur.agree + (agreed ? 1 : 0) } };
         persist();

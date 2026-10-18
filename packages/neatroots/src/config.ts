@@ -1,3 +1,5 @@
+import { normalizeAmbient } from "./ambient/config.js";
+import type { AmbientConfig } from "./ambient/types.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +15,7 @@ export interface ProjectSettings {
 }
 
 export interface RootsConfig {
+  ambient: AmbientConfig;
   port: number;
   host: string;
   /** OTLP over gRPC (what plain OpenTelemetry exporters send to Neatlogs). 0 turns it off. */
@@ -116,6 +119,7 @@ export const DEFAULT_PORT = 4100;
 
 export function defaultConfig(): RootsConfig {
   return {
+    ambient: normalizeAmbient(undefined),
     port: DEFAULT_PORT,
     host: "127.0.0.1",
     grpcPort: 4317,
@@ -234,6 +238,8 @@ export function loadConfig(): RootsConfig {
   cfg.retention.days = Math.min(Math.round(cfg.retention.days), 3650);
   if (!Number.isFinite(cfg.retention.maxGb) || cfg.retention.maxGb <= 0) cfg.retention.maxGb = 5;
   cfg.retention.maxGb = Math.min(cfg.retention.maxGb, 10_000);
+  // Opt-in is strict even for hand-edited YAML (the string "false" must never enable an output).
+  cfg.ambient = normalizeAmbient(cfg.ambient);
   return cfg;
 }
 
