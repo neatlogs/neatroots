@@ -279,6 +279,9 @@ export class Engine {
 
   private onTrace(u: TraceUpdate): void {
     if (this.closed) return;
+    // An idle-expiry notification has no new evidence. Let endIdle own initial
+    // allocation/restoration, while preserving any already-populated live run.
+    if (!u.spans.length && this.roots.store.liveness.inferred(u.traceId) && !this.live.has(u.traceId)) return;
     const run = this.liveRun(u.traceId);
     if (!run) return;
     if (run.doctor) {

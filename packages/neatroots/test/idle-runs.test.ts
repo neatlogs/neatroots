@@ -334,3 +334,49 @@ it.each([false, true])("withdraws pending inferred halts on recovery with noEngi
   expect(t.roots.store.getNote(other.id)).toEqual(other);
   expect(t.roots.store.getRun(id)).toMatchObject({ status: "ok", interrupted: 0, root_ended: 1 });
 });
+
+
+it.each([true, false])("restores idle answers without replacing populated live state (restart=%s)", async restart => {
+  const llm = await mockLlm({}); cleanup.push(llm.close);
+  const t = await makeRoots({ llmUrl: llm.url, config: c => { c.runIdleMinutes = 1; } }); cleanup.push(t.close);
+  const id = hex(16), parent = hex(8);
+  const checks = [
+    { id: "restore-trace", scope: "trace", ask: "Did restoration trace evidence fail?" },
+    { id: "restore-span", scope: "span", ask: "Did restoration span evidence fail?" },
+    { id: "restore-end", scope: "trace", when: "end", ask: "Did restoration end evidence fail?" },
+  ] as const;
+  for (const c of checks) t.roots.checks.save({ ...c, kind: "yes_no", title: c.id,
+    evidence: { spans: { type: ["llm"] }, fields: ["input", "output"] }, flag_at: 0.8 }, "user");
+  t.roots.ingest([batch([llmSpan(id, parent, { user: "Inspect this evidence", out: "Evidence processed." })])]);
+  await t.roots.engine!.waitIdle(id, 10_000);
+  if (!restart) {
+    t.roots.ingest([batch([llmSpan(id, parent, { user: "New evidence", out: "New evidence processed." })])]);
+    await t.roots.engine!.waitIdle(id, 10_000);
+  }
+  const before = t.roots.store.decisionsForTrace(id);
+  expect(before.filter(d => d.check_id === "restore-trace")).toHaveLength(restart ? 1 : 2);
+  expect(before.filter(d => d.check_id === "restore-span")).toHaveLength(restart ? 1 : 2);
+  expect(before.filter(d => d.check_id === "restore-end")).toHaveLength(0);
+  expect(t.roots.store.getRun(id)?.status).toBe("running");
+  if (restart) t.roots.close();
+  const reopened = restart ? new Roots({ home: t.roots.home, config: t.roots.config }) : t.roots;
+  if (restart) cleanup.push(() => reopened.close());
+  expect(await reopened.llm.isAvailable()).toBe(true);
+  const requestStart = llm.requests.length;
+  const received = reopened.store.db.prepare("SELECT received_ms FROM run_liveness WHERE trace_id=?").get(id) as { received_ms: number };
+  expect(reopened.checks.get("restore-end")).toBeDefined();
+  expect(reopened.config.runIdleMinutes).toBe(1);
+  expect(await reopened.idle.sweep(received.received_ms + 60_000)).toBe(1);
+  expect(reopened.store.getRun(id)?.status).toBe("interrupted");
+  await reopened.engine!.waitIdle(id, 10_000);
+  const after = reopened.store.decisionsForTrace(id);
+  for (const key of ["restore-trace", "restore-span"]) {
+    expect(after.filter(d => d.check_id === key)).toEqual(before.filter(d => d.check_id === key));
+  }
+  const requests = llm.requests.slice(requestStart).map(r => JSON.stringify(r));
+  expect(requests.filter(r => r.includes("Did restoration trace evidence fail?") || r.includes("Did restoration span evidence fail?"))).toEqual([]);
+  expect(after.filter(d => d.check_id === "restore-end")).toHaveLength(1);
+  expect(requests.some(r => r.includes("Did restoration end evidence fail?"))).toBe(true);
+  expect(reopened.store.getSummary(id)).toBeDefined();
+  expect((reopened.engine as any).live.has(id)).toBe(false);
+});
