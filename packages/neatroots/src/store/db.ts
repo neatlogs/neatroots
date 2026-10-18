@@ -1405,9 +1405,15 @@ export class Store {
     }
     const sleeper = new Int32Array(new SharedArrayBuffer(4));
     const segments = () => (this.db.prepare("SELECT COUNT(DISTINCT segid) AS n FROM span_fts_idx").get() as { n: number }).n;
-    // A negative merge budget makes every call advance the merge, while bounding each write lock.
-    while (segments() > 1) {
-      this.db.prepare("INSERT INTO span_fts(span_fts, rank) VALUES(?, ?)").run("merge", -16);
+    const changes = () => (this.db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+    const merge = this.db.prepare("INSERT INTO span_fts(span_fts, rank) VALUES(?, ?)");
+    const deadline = Date.now() + 60_000;
+    let budget = -16;
+    while (segments() > 1 && Date.now() < deadline) {
+      const before = changes();
+      merge.run("merge", budget);
+      if (changes() - before < 2) break;
+      budget = 16;
       Atomics.wait(sleeper, 0, 0, pauseMs);
     }
   }
@@ -1472,10 +1478,23 @@ export class Store {
     return updatedBefore === undefined ? tx() : tx.immediate();
   }
 
-  /** Reclaims retention payloads after its worker has committed the corresponding row deletes. */
-  reclaimBlobs(candidates: Iterable<string>): void {
+  /** Finds orphaned payloads once; later batches need only inspect spans written after this scan. */
+  prepareBlobReclamation(candidates: Iterable<string>): { candidates: string[]; afterSeq: number } {
     const shas = [...new Set(candidates)];
-    this.reclaimUnreferencedBlobs(shas);
+    const orphaned = this.unreferencedBlobs(shas);
+    const retained = new Set(orphaned);
+    this.forgetBlobCandidates(shas.filter((sha) => !retained.has(sha)));
+    return { candidates: orphaned, afterSeq: this.seq };
+  }
+
+  /** Reclaims retention payloads after its worker has committed the corresponding row deletes. */
+  reclaimBlobs(candidates: Iterable<string>, afterSeq = 0): void {
+    const shas = [...new Set(candidates)];
+    for (const sha of this.unreferencedBlobs(shas, afterSeq)) this.blobs.delete(sha);
+    this.forgetBlobCandidates(shas);
+  }
+
+  private forgetBlobCandidates(shas: Iterable<string>): void {
     const done = new Set(shas);
     const pending = json<string[]>(this.getMeta(RETENTION_BLOBS_META), []).filter((sha) => !done.has(sha));
     this.setMeta(RETENTION_BLOBS_META, JSON.stringify(pending));
@@ -1486,11 +1505,12 @@ export class Store {
     for (const sha of this.unreferencedBlobs(candidates)) this.blobs.delete(sha);
   }
 
-  private unreferencedBlobs(candidates: Iterable<string>): string[] {
+  private unreferencedBlobs(candidates: Iterable<string>, afterSeq?: number): string[] {
     const shas = [...new Set(candidates)];
     if (!shas.length) return [];
+    const newer = afterSeq === undefined ? "" : "AND spans.seq > ?";
     const used = new Set(
-      (this.db.prepare("SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.blobs IS NOT NULL AND j.value IN (SELECT value FROM json_each(?))").all(JSON.stringify(shas)) as { sha: string }[]).map((r) => r.sha),
+      (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.blobs IS NOT NULL ${newer} AND j.value IN (SELECT value FROM json_each(?))`).all(...(afterSeq === undefined ? [JSON.stringify(shas)] : [afterSeq, JSON.stringify(shas)])) as { sha: string }[]).map((r) => r.sha),
     );
     return shas.filter((sha) => !used.has(sha));
   }
