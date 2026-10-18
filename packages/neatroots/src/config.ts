@@ -209,13 +209,32 @@ function deepMerge<T>(base: T, over: unknown, skipped: string[] = [], prefix = "
   return out as T;
 }
 
+// Raw invalid values stay private and out of the typed runtime config. The fallback
+// array identity distinguishes an unrelated save from an explicitly assigned [].
+const invalidWebhooks = new WeakMap<RootsConfig, { raw: unknown; fallback: WebhookConfig[] }>();
+
+export function hasInvalidWebhooks(cfg: RootsConfig): boolean {
+  return invalidWebhooks.has(cfg);
+}
+
+/** Restore the saved runtime value without losing private raw input after a failed save. */
+export function restoreWebhooks(cfg: RootsConfig, saved: RootsConfig["webhooks"]): void {
+  cfg.webhooks = structuredClone(saved);
+  const invalid = invalidWebhooks.get(cfg);
+  if (invalid) invalid.fallback = cfg.webhooks ?? [];
+}
+
 export function loadConfig(): RootsConfig {
   const file = configPath();
   let cfg = defaultConfig();
+  let rawWebhooks: unknown;
   if (fs.existsSync(file)) {
     try {
       const skipped: string[] = [];
-      cfg = deepMerge(cfg, YAML.parse(fs.readFileSync(file, "utf8")), skipped);
+      const raw: unknown = YAML.parse(fs.readFileSync(file, "utf8"));
+      // Inspect before deepMerge can replace a malformed scalar/object with defaults.
+      if (isSection(raw)) rawWebhooks = raw.webhooks;
+      cfg = deepMerge(cfg, raw, skipped);
       for (const key of skipped) console.warn(`[neatroots] ignoring ${key} in ${file}: wrong shape, using the default`);
     } catch (err) {
       console.warn("[neatroots] could not read configuration; using defaults");
@@ -238,17 +257,27 @@ export function loadConfig(): RootsConfig {
   cfg.retention.days = Math.min(Math.round(cfg.retention.days), 3650);
   if (!Number.isFinite(cfg.retention.maxGb) || cfg.retention.maxGb <= 0) cfg.retention.maxGb = 5;
   cfg.retention.maxGb = Math.min(cfg.retention.maxGb, 10_000);
-  try { cfg.webhooks = parseWebhooks(cfg.webhooks); }
-  catch { cfg.webhooks = []; console.warn("[neatroots] ignoring invalid webhooks configuration"); }
+  try { cfg.webhooks = parseWebhooks(rawWebhooks); }
+  catch {
+    cfg.webhooks = [];
+    invalidWebhooks.set(cfg, { raw: rawWebhooks, fallback: cfg.webhooks });
+    console.warn("[neatroots] ignoring invalid webhooks configuration");
+  }
   return cfg;
 }
 
 export function saveConfig(cfg: RootsConfig, file = configPath()): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const webhooks = parseWebhooks(cfg.webhooks);
+  const parsed = parseWebhooks(cfg.webhooks);
+  const invalid = invalidWebhooks.get(cfg);
+  const preserve = invalid && (cfg.webhooks === undefined ||
+    (cfg.webhooks === invalid.fallback && cfg.webhooks.length === 0));
+  const webhooks = preserve ? invalid.raw : parsed;
   if (process.platform !== "win32" && fs.existsSync(file)) fs.chmodSync(file, 0o600);
   fs.writeFileSync(file, YAML.stringify({ ...cfg, webhooks }), { encoding: "utf8", mode: 0o600 });
   if (process.platform !== "win32") fs.chmodSync(file, 0o600);
+  // Retire raw input only after the explicit replacement was persisted successfully.
+  if (!preserve) invalidWebhooks.delete(cfg);
 }
 
 export function projectSettings(cfg: RootsConfig, project: string): ProjectSettings {

@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { loadConfig, saveConfig } from "../config.js";
+import { loadConfig, saveConfig, hasInvalidWebhooks } from "../config.js";
 import { api, running } from "./util.js";
 import { maskedWebhookUrl, parseWebhooks } from "../webhook/config.js";
 import { postWebhook } from "../webhook/payload.js";
@@ -15,6 +15,7 @@ export function registerWebhookCommands(program: Command): void {
     .option("--format <format>", "json, slack or discord", "json")
     .action(async (url: string, opts: { events: string; format: string }) => {
       const cfg = loadConfig();
+      if (hasInvalidWebhooks(cfg)) throw new Error("Existing webhooks configuration is invalid; repair webhooks in config.yaml or explicitly set it to [] before adding a destination");
       const hooks = parseWebhooks([...(cfg.webhooks ?? []), { url, events: opts.events.split(","), format: opts.format }]);
       if (await running(cfg.port)) {
         try { await api(cfg.port, "/api/settings", { method: "POST", body: JSON.stringify({ webhooks: hooks }) }); }

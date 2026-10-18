@@ -1,6 +1,6 @@
 import { WebhookDispatcher } from "./webhook/dispatcher.js";
 import path from "node:path";
-import { rootsHome, loadConfig, saveConfig, type RootsConfig } from "./config.js";
+import { rootsHome, loadConfig, saveConfig, restoreWebhooks, type RootsConfig } from "./config.js";
 import { Bus } from "./bus.js";
 import { Store, type TraceUpdate } from "./store/db.js";
 import type { ResourceSpansBatch } from "./otlp/types.js";
@@ -91,7 +91,7 @@ export class Roots {
   /** Saves to this instance's own home (the one it was opened with), never another one. */
   saveConfig(): void {
     try { saveConfig(this.config, path.join(this.home, "config.yaml")); }
-    catch (error) { this.config.webhooks = structuredClone(this.savedWebhooks); throw error; }
+    catch (error) { restoreWebhooks(this.config, this.savedWebhooks); throw error; }
     this.savedWebhooks = structuredClone(this.config.webhooks);
     this.webhooks.reconcile();
   }

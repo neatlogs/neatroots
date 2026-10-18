@@ -22,7 +22,10 @@ Equivalent config.yaml:
 Formats are json, slack and discord. URLs must be HTTP(S), without userinfo or fragments;
 path/query credentials are supported and treated as private. Up to 16 unique destinations are
 allowed. Duplicate destinations/events and unknown fields/formats/events are rejected. Invalid
-hand-edited webhook configuration fails closed (no delivery). Configuration saves use private
+hand-edited webhook configuration fails closed (no delivery). Its original value is preserved
+on unrelated saves until an explicit valid replacement, including an empty list, is saved.
+CLI add refuses invalid existing configuration; repair it in config.yaml before adding.
+Configuration saves use private
 0600 permissions on POSIX; Windows access control remains the operator's responsibility.
 
 CLI add updates the running instance through the existing local settings endpoint, or saves
@@ -60,11 +63,11 @@ increments dropped; status reports accepted, sent, failed, dropped, retried and 
 plus pending/in_flight. Check these counters when notifications are missing.
 
 Each request has a five-second deadline. At most three attempts are made for network failures,
-timeouts, HTTP429 and5xx, with250ms then500ms backoff. Other HTTP failures (including redirects)
+timeouts, HTTP 429 and 5xx, with 250 ms then 500 ms backoff. Other HTTP failures (including redirects)
 are permanent failures. Redirects are never followed; response bodies are discarded. Retried
 requests can be received more than once: consumers should deduplicate by event/identity/state.
 
-At most4096 recent per-destination event identities are retained; after oldest-entry eviction
+At most 4096 recent per-destination event identities are retained; after oldest-entry eviction
 or restart, an old event may notify again. Configuration changes cancel queued/inflight requests
 and retry timers, clear deduplication, and detach the old event handlers. Disabling or closing
 Roots does the same. Cancellation cannot undo a request already received remotely. Process
