@@ -433,6 +433,24 @@ describe("server", () => {
     expect(tb.roots.config.retention).toEqual({ days: 30, maxGb: 2.5 });
   });
 
+  it("refuses redact_patterns that is not an array of strings, and saves and clears the array form", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const save = (b: unknown) => fetch(`${tb.url}/api/settings`, { method: "POST", headers, body: JSON.stringify(b) });
+    // A string used to iterate character by character and persist, so every letter redacted everything.
+    for (const bad of [{ redact_patterns: "ab" }, { redact_patterns: 123 }, { redact_patterns: [42] }, { redact_patterns: ["["] }]) {
+      const r = await save(bad);
+      expect(r.status, JSON.stringify(bad)).toBe(400); // was 200 for "ab", 500 for 123
+    }
+    expect(tb.roots.config.cloud.redactPatterns).toEqual([]);
+    expect((await save({ redact_patterns: ["cust_[0-9]+"] })).status).toBe(200);
+    expect(tb.roots.config.cloud.redactPatterns).toEqual(["cust_[0-9]+"]);
+    const status = (await (await fetch(`${tb.url}/api/status`, { headers })).json()) as { cloud: { redact_patterns: string[] } };
+    expect(status.cloud.redact_patterns).toEqual(["cust_[0-9]+"]);
+    expect((await save({ redact_patterns: [] })).status).toBe(200);
+    expect(tb.roots.config.cloud.redactPatterns).toEqual([]);
+  });
+
   it("refuses non-boolean settings before applying any of them", async () => {
     const tb = await served();
     tb.roots.config.steering.enabled = false;
