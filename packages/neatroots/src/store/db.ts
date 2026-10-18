@@ -112,6 +112,16 @@ CREATE INDEX IF NOT EXISTS spans_seq ON spans (seq);
 -- Covers the kind:, tool: and model: run filters, so they scan this instead of the wide span rows.
 CREATE INDEX IF NOT EXISTS spans_filter ON spans (span_kind, tool_name, model, is_marker, trace_id, span_id);
 
+-- Indexed ownership for payload files. The lossless JSON list stays on spans for compatibility;
+-- this narrow table keeps replacement and deletion from expanding every list in the store.
+CREATE TABLE IF NOT EXISTS span_blobs (
+  trace_id TEXT NOT NULL,
+  span_id TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  PRIMARY KEY (trace_id, span_id, sha)
+);
+CREATE INDEX IF NOT EXISTS span_blobs_sha ON span_blobs (sha);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS span_fts USING fts5 (
   trace_id UNINDEXED, span_id UNINDEXED, name, tool_name, body, tokenize = 'porter unicode61'
 );
@@ -379,6 +389,7 @@ export function currentRequest(v: Parameters<typeof preview>[0]): string | undef
 /** Search covers this much of each input, output and error: the start and the end of long values. */
 export const SEARCH_LIMIT = { head: 150_000, tail: 50_000 };
 const SEARCH_INDEX_VERSION = 2;
+const BLOB_REFS_VERSION = 1;
 /** A store over its size cap is trimmed to this share of the cap, so it isn't trimmed every hour. */
 export const RETENTION_LOW_WATER = 0.9;
 
@@ -447,6 +458,20 @@ export class Store {
       if (!cols.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     };
     ensure("plans", "body", "TEXT");
+    if (this.getMeta("blob_refs") !== String(BLOB_REFS_VERSION)) {
+      this.db.transaction(() => {
+        this.db.prepare("DELETE FROM span_blobs").run();
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO span_blobs (trace_id, span_id, sha)
+             SELECT s.trace_id, s.span_id, j.value
+             FROM spans s, json_each(CASE WHEN json_valid(s.blobs) THEN s.blobs ELSE '[]' END) AS j
+             WHERE s.blobs IS NOT NULL AND typeof(j.value) = 'text' AND length(j.value) = 64 AND j.value NOT GLOB '*[^0-9a-f]*'`,
+          )
+          .run();
+        this.setMeta("blob_refs", String(BLOB_REFS_VERSION));
+      })();
+    }
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
     this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
@@ -585,6 +610,12 @@ export class Store {
         extra: JSON.stringify(extra),
         blobs: used.size ? JSON.stringify([...used]) : null,
       });
+    this.db.prepare("DELETE FROM span_blobs WHERE trace_id = ? AND span_id = ?").run(span.traceId, span.spanId);
+    if (used.size) {
+      this.db
+        .prepare("INSERT INTO span_blobs (trace_id, span_id, sha) SELECT ?, ?, value FROM json_each(?)")
+        .run(span.traceId, span.spanId, JSON.stringify([...used]));
+    }
     if (!view.isMarker) {
       this.indexSpan(span.traceId, span.spanId, span.name, view, !isNew);
     }
@@ -1408,10 +1439,10 @@ export class Store {
     if (!traceIds.length) return;
     const ids = JSON.stringify(traceIds);
     const inIds = "trace_id IN (SELECT value FROM json_each(?))";
-    const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
+    const shas = (this.db.prepare(`SELECT DISTINCT sha FROM span_blobs WHERE ${inIds}`).all(ids) as { sha: string }[]).map((r) => r.sha);
     const tx = this.db.transaction(() => {
       this.searchIds.deleteRuns(ids);
-      for (const t of ["spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
+      for (const t of ["span_blobs", "spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
         this.db.prepare(`DELETE FROM ${t} WHERE ${inIds}`).run(ids);
       }
       this.db.prepare(`DELETE FROM runs WHERE ${inIds}`).run(ids);
@@ -1420,12 +1451,12 @@ export class Store {
     this.reclaimUnreferencedBlobs(shas);
   }
 
-  /** Deletes candidate payloads only after checking every remaining span reference. */
+  /** Deletes candidate payloads only after an indexed check of remaining span references. */
   private reclaimUnreferencedBlobs(candidates: Iterable<string>): void {
     const shas = [...new Set(candidates)];
     if (!shas.length) return;
     const used = new Set(
-      (this.db.prepare("SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.blobs IS NOT NULL AND j.value IN (SELECT value FROM json_each(?))").all(JSON.stringify(shas)) as { sha: string }[]).map((r) => r.sha),
+      (this.db.prepare("SELECT DISTINCT sha FROM span_blobs WHERE sha IN (SELECT value FROM json_each(?))").all(JSON.stringify(shas)) as { sha: string }[]).map((r) => r.sha),
     );
     for (const sha of shas) if (!used.has(sha)) this.blobs.delete(sha);
   }
