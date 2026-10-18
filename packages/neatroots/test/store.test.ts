@@ -98,7 +98,7 @@ describe("store", () => {
     expect(st.blobs.size()).toBe(0);
   });
 
-  it("reclaims unreferenced and temporary blob files when the store opens", () => {
+  it("reclaims unreferenced and temporary blob files during explicit owner recovery", () => {
     const home = tmpHome();
     homes.push(home);
     const dir = path.join(home, "data");
@@ -113,12 +113,13 @@ describe("store", () => {
     const orphanDir = path.join(dir, "blobs", orphan.slice(0, 2));
     fs.mkdirSync(orphanDir, { recursive: true });
     fs.writeFileSync(path.join(orphanDir, orphan.slice(2)), "orphan");
-    fs.writeFileSync(path.join(orphanDir, `${orphan.slice(2)}.123.tmp`), "partial");
+    fs.writeFileSync(path.join(orphanDir, `${orphan.slice(2)}.123.abcdef12.tmp`), "partial");
 
     const reopened = trackedStore(dir);
+    expect(reopened.recoverBlobs()).toBe(2);
     expect(reopened.blobs.get(kept)).toBe("kept".repeat(10_000));
     expect(reopened.blobs.sizeOf(orphan)).toBe(0);
-    expect(fs.existsSync(path.join(orphanDir, `${orphan.slice(2)}.123.tmp`))).toBe(false);
+    expect(fs.existsSync(path.join(orphanDir, `${orphan.slice(2)}.123.abcdef12.tmp`))).toBe(false);
   });
 
   it("reclaims superseded payloads through repeated updates and run deletion", () => {
