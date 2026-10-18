@@ -155,6 +155,10 @@ describe("file import source and Neatlogs export span fields", () => {
     expect(t.roots.store.getRun(ingested[0].traceId)?.project).toBe("existing-workflow");
     expect(importSource(t.roots, ingested[1].traceId)).toBe("file");
     expect(t.roots.store.getRun(ingested[1].traceId)?.project).toBe("span-workflow");
+
+    const explicitBatches = parseTraceFile(otlpWithAliases, "aliases.json", "override-project");
+    expect(buildView(explicitBatches[0].spans[0], explicitBatches[0].resource.attributes).workflow).toBe("override-project");
+    expect(buildView(explicitBatches[1].spans[0], explicitBatches[1].resource.attributes).workflow).toBe("override-project");
   });
 });
 

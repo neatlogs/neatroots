@@ -94,6 +94,9 @@ function setImportSource(b: ResourceSpansBatch, source: string): void {
 /** An explicit project wins over the project named in the file. */
 function setProject(b: ResourceSpansBatch, project: string): void {
   const rest = b.resource.attributes.filter((a) => !WORKFLOW_RESOURCE_KEYS.has(a.key));
+  for (const span of b.spans) {
+    span.attributes = span.attributes.filter((a) => !WORKFLOW_SPAN_KEYS.has(a.key));
+  }
   b.resource.attributes = [{ key: "service.name", value: { stringValue: project } }, { key: "neatlogs.workflow_name", value: { stringValue: project } }, ...rest];
 }
 
