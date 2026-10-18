@@ -39,7 +39,8 @@ it("re-derives findings when a just-deleted run is imported again in the same se
     body: JSON.stringify({ name: "trace.json", content: JSON.stringify({ resourceSpans: [{ resource: source.resource, scopeSpans: [{ scope: source.scope, spans: source.spans }] }] }) }),
   });
   expect(response.ok).toBe(true);
-  await new Promise((r) => setTimeout(r, 1200));
+  await until(() => t!.roots.store.findingsForTrace(traceId).some((f) =>
+    f.check_id === "run-failed" && before.every((previous) => previous.id !== f.id)));
   const after = t.roots.store.findingsForTrace(traceId);
   expect(after.some((f) => f.check_id === "run-failed")).toBe(true);
   expect(after.every((f) => before.every((previous) => previous.id !== f.id))).toBe(true);
