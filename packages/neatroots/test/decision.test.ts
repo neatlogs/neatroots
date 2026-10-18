@@ -149,7 +149,7 @@ describe("Laya trust", () => {
     expect(first.backend).toBe("llm");
     for (let i = 0; i < 50 && trust.get("bad-check").n < 1; i++) await new Promise((r) => setTimeout(r, 20));
     expect(trust.get("bad-check")).toEqual({ n: 1, agree: 1 });
-    for (let i = 1; i < TRUST_MIN_SAMPLES; i++) trust.record("bad-check", true);
+    for (let i = 1; i < TRUST_MIN_SAMPLES; i++) trust.record(q[0], true);
     expect(dm.trusted(q)).toBe(true);
     const before = layaCalls;
     const promoted = await dm.decide("state two", q);

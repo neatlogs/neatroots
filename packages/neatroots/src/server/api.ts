@@ -6,7 +6,7 @@ import type { Roots } from "../core.js";
 import { kvToPlain } from "../otlp/types.js";
 import { buildView } from "../semantics/view.js";
 import { hardwareTier, llmErrorMessage } from "../models/llm.js";
-import { TRUST_MIN_SAMPLES, TRUST_MIN_AGREEMENT } from "../models/decision.js";
+import { TRUST_MIN_SAMPLES, TRUST_MIN_AGREEMENT, questionSignature } from "../models/decision.js";
 import { regexProblem } from "../util/regex.js";
 import { allowedEndpoint } from "../relay/endpoint.js";
 import { RedactionPatternError } from "../relay/redact.js";
@@ -138,16 +138,16 @@ export function mountApi(app: Hono, roots: Roots): void {
       cloud: { endpoint: roots.relay.endpoint(), has_key: !!(await getCloudKey()), has_token: !!(await getCloudToken()), project_id: roots.config.cloud.projectId ?? null },
       classifier: {
         laya: { ...roots.laya.state, consent: roots.config.classifier.laya.consent ?? null },
-        trust: Object.entries(roots.decisions.trust.all())
-          .map(([question, t]) => {
-            const lc = roots.checks.get(question);
-            const curQ = lc && isQuestion(lc.check) ? toQuestion(lc.check, lc.check.params ?? {}) : undefined;
-            if (curQ) roots.decisions.trust.activate?.(curQ);
-            const stats = curQ ? roots.decisions.trust.get(curQ) : t;
-            const trusted = stats.n >= TRUST_MIN_SAMPLES && stats.agree / stats.n >= TRUST_MIN_AGREEMENT;
-            return { question, n: stats.n, agreement: stats.n ? stats.agree / stats.n : null, trusted };
-          })
-          .sort((a, b) => b.n - a.n),
+        // Settings reports current registered defaults, never the last runtime plan's variant.
+        // Reads must not activate a definition or write calibration state.
+        trust: roots.checks.all().flatMap(({ check }) => {
+          if (!isQuestion(check)) return [];
+          const q = toQuestion(check, check.params ?? {});
+          const t = roots.decisions.trust.get(q);
+          return [{ question: q.name, n: t.n, agreement: t.n ? t.agree / t.n : null,
+            trusted: t.n >= TRUST_MIN_SAMPLES && t.agree / t.n >= TRUST_MIN_AGREEMENT,
+            definition_scope: "check_defaults", definition_signature: questionSignature(q) }];
+        }).sort((a, b) => b.n - a.n),
         jev_cloud: { enabled: roots.config.classifier.jevCloud.enabled, has_key: !!(await getSecret("jev-api-key")) },
       },
       check_errors: roots.checks.errors,

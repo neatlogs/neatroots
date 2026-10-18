@@ -20,7 +20,7 @@ import type {
   SpanRow,
 } from "../types.js";
 import type { OtlpLogRecord } from "../otlp/codec.js";
-import { createTrustStore, type TrustStore } from "../models/decision.js";
+import { createTrustStore, type TrustStore, type StoredTrustRecord } from "../models/trust.js";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -411,7 +411,8 @@ export class Store {
   readonly blobs: BlobStore;
   private readonly searchIds: SearchIds;
   private seq = 0;
-  private readonly trustFlushes = new Set<() => void>();
+  private sharedTrust?: TrustStore;
+  private flushTrust?: () => void;
   readonly dir: string;
   readonly file: string;
 
@@ -439,8 +440,7 @@ export class Store {
   }
 
   close(): void {
-    for (const flush of this.trustFlushes) flush();
-    this.trustFlushes.clear();
+    this.flushTrust?.();
     this.db.close();
   }
 
@@ -1446,49 +1446,27 @@ export class Store {
 
   /** Laya-vs-LLM agreement per question definition, persisted so trust survives restarts. */
   trustStore(): TrustStore {
-    for (const flush of this.trustFlushes) flush();
+    if (this.sharedTrust) return this.sharedTrust;
     const initial = json<Record<string, unknown>>(this.getMeta("laya_trust"), {});
     let timer: NodeJS.Timeout | undefined;
-    let pending: unknown;
+    let pending: Record<string, StoredTrustRecord> | undefined;
     const writeNow = () => {
-      if (timer) {
-        clearTimeout(timer);
-        timer = undefined;
-      }
-      if (pending !== undefined && this.db.open) {
-        const existing = json<Record<string, Record<string, unknown>>>(this.getMeta("laya_trust"), {});
-        const updated = pending as Record<string, Record<string, unknown>>;
-        const merged: Record<string, unknown> = { ...existing };
-        for (const [k, v] of Object.entries(updated)) {
-          if (!merged[k]) {
-            merged[k] = v;
-          } else {
-            const m = merged[k] as Record<string, unknown>;
-            const existingDefs = (m.defs ?? {}) as Record<string, { n: number; agree: number }>;
-            const newDefs = (v.defs ?? {}) as Record<string, { n: number; agree: number }>;
-            const combinedDefs = { ...existingDefs };
-            for (const [sig, st] of Object.entries(newDefs)) {
-              const cur = combinedDefs[sig] ?? { n: 0, agree: 0 };
-              combinedDefs[sig] = { n: Math.max(cur.n, st.n), agree: Math.max(cur.agree, st.agree) };
-            }
-            merged[k] = {
-              ...m,
-              activeSig: v.activeSig ?? m.activeSig,
-              defs: combinedDefs,
-            };
-          }
-        }
-        this.setMeta("laya_trust", JSON.stringify(merged));
+      clearTimeout(timer);
+      timer = undefined;
+      if (pending && this.db.open) {
+        this.setMeta("laya_trust", JSON.stringify(pending));
         pending = undefined;
       }
     };
-    this.trustFlushes.add(writeNow);
-    return createTrustStore(initial, (data) => {
+    this.flushTrust = writeNow;
+    this.sharedTrust = createTrustStore(initial, data => {
+      if (!this.db.open) return;
       pending = data;
       clearTimeout(timer);
       timer = setTimeout(writeNow, 1000);
       timer.unref();
     });
+    return this.sharedTrust;
   }
 
   /** Full-text index for a span: its input, output and error, as much as SEARCH_LIMIT allows. */

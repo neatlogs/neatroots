@@ -19,7 +19,7 @@ describe("Laya definition-scoped trust (#305)", () => {
     };
 
     for (let i = 0; i < TRUST_MIN_SAMPLES; i++) {
-      trust.record(original.name, true);
+      trust.record(original, true);
     }
 
     const editedAsk: DecisionQuestion = {
@@ -165,7 +165,7 @@ describe("Laya definition-scoped trust (#305)", () => {
       expect((await tb.roots.decisions.decide("state", [originalQ])).backend).toBe("laya");
 
       let status = await (await fetch(`${tb.url}/api/status`)).json();
-      expect(status.classifier.trust.find((t: { question: string }) => t.question === "custom-check")).toEqual({
+      expect(status.classifier.trust.find((t: { question: string }) => t.question === "custom-check")).toMatchObject({
         question: "custom-check",
         n: TRUST_MIN_SAMPLES,
         agreement: 1,
@@ -187,7 +187,7 @@ describe("Laya definition-scoped trust (#305)", () => {
       const editedQ: DecisionQuestion = { name: "custom-check", type: "yes_no", ask: "Is this bad approval handling?" };
       expect(tb.roots.decisions.trusted([editedQ])).toBe(false);
       status = await (await fetch(`${tb.url}/api/status`)).json();
-      expect(status.classifier.trust.find((t: { question: string }) => t.question === "custom-check")).toEqual({
+      expect(status.classifier.trust.find((t: { question: string }) => t.question === "custom-check")).toMatchObject({
         question: "custom-check",
         n: 0,
         agreement: null,
@@ -196,7 +196,7 @@ describe("Laya definition-scoped trust (#305)", () => {
 
       expect((await tb.roots.decisions.decide("state", [editedQ])).backend).toBe("llm");
 
-      // Reload trustStore from SQLite to verify restart persistence.
+      // All callers share the same authoritative counters; actual reopen is covered separately.
       const reloadedTrust = tb.roots.store.trustStore();
       expect(reloadedTrust.get(originalQ)).toEqual({ n: TRUST_MIN_SAMPLES, agree: TRUST_MIN_SAMPLES });
       expect(reloadedTrust.get(editedQ).n).toBeLessThan(TRUST_MIN_SAMPLES);

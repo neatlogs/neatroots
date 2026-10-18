@@ -37,7 +37,7 @@ function LayaTrust({ trust }: { trust: { question: string; n: number; agreement:
   return (
     <div className="flex flex-col gap-1.5 border-t border-border pt-4">
       <span className="text-xs text-muted-foreground">
-        Laya answers {trusted} of {trust.length} questions on its own
+        Laya has earned {trusted} of {trust.length} default question definitions. Runtime parameters calibrate separately.
       </span>
       <ul className="flex max-h-48 flex-col overflow-y-auto rounded-lg border border-border">
         {trust.map((t) => (

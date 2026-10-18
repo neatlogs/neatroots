@@ -108,6 +108,16 @@ Checks are yes/no questions, so neatroots uses a decision model built for them. 
 - **Laya** (local): an open 421M-parameter model on this machine. Free and private; a one-time download of about 1.4 GB. It starts in shadow mode and takes over each question once it agrees with your LLM on 90% of 30 answers. `neatroots laya install` downloads it now; `neatroots laya skip` records that you don't want it.
 - **Jev cloud** (hosted, opt-in): TypeSafe's typed-decision API. The span content a question needs is sent to TypeSafe. Credentials are removed first, as for a hosted LLM (`llm.external.redact`); a Jev server on this machine gets the original text.
 
+Trust belongs to each effective question definition: its type, exact rendered text, choice options and
+ordered score levels. Editing a definition starts its calibration again; unchanged definitions retain
+their counts across restarts. Runtime parameter substitutions calibrate separately when they change
+the rendered question. Legacy counters without a definition and earlier normalized signature
+formats are not used to promote Laya; they require calibration under the exact-definition format.
+Settings and `/api/status` report the current registered checks with their default parameters, not
+all runtime plan variants; status rows identify this scope and the definition signature. Reading
+status never changes routing or calibration. Explicit backend choices and the no-LLM fallback are
+unchanged.
+
 Without either, your LLM answers every question, which works but is slower. To use Jev cloud:
 
 ```bash
