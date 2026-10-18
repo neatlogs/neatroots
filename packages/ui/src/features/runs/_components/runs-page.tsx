@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { CodeLine } from "@/components/code-line";
 import { ListPageLayout } from "@/components/list-page/list-page-layout";
 import { Button } from "@/components/ui/button";
+import { PendingButton } from "@/components/pending-button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
@@ -21,6 +22,12 @@ function fromQuery(q: URLSearchParams): Partial<RunListParams> {
   return { project: q.get("project") ?? "", check: q.get("check") ?? undefined, label: q.get("label") ?? undefined };
 }
 
+/** "3 of 120 runs"; with filters, "12 matching of 120 runs" (and how many are shown, when not all). */
+function footerCount(shown: number, matching: number | null, total: number): string {
+  if (matching === null) return `${shown} of ${total} runs`;
+  return `${matching} matching of ${total} runs${shown < matching ? `, newest ${shown} shown` : ""}`;
+}
+
 /** Every run neatroots recorded, as a full-bleed table like the Neatlogs traces page. */
 export function RunsPage({ status, query }: { status?: Status; query: URLSearchParams }) {
   const [params, setParams] = useState<RunListParams>(() => ({ q: "", status: "", hasFinding: false, project: "", ...fromQuery(query) }));
@@ -29,7 +36,7 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
     const q = new URLSearchParams(qs);
     if (q.has("project") || q.has("check")) setParams((p) => ({ ...p, ...fromQuery(q) }));
   }, [qs]);
-  const { data, isLoading } = useRuns(params);
+  const { data, isLoading, hasMore, loadMore, loadingMore } = useRuns(params);
   const { data: known } = useProjects();
   const runs = data?.runs ?? [];
   const projects = [...new Set([...(known?.projects ?? []).map((p) => p.project), params.project].filter(Boolean))] as string[];
@@ -106,7 +113,7 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
               </button>
             </span>
           )}
-          <span className="ml-auto text-xs text-muted-foreground tabular-nums">{data ? `${runs.length}${filtered ? " matching" : ""} of ${data.total} runs` : ""}</span>
+          <span className="ml-auto text-xs text-muted-foreground tabular-nums">{data ? footerCount(runs.length, filtered ? (data.matching ?? runs.length) : null, data.total) : ""}</span>
         </div>
       }
     >
@@ -115,7 +122,16 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
           <EmptyState state="no-results" variant="inline" title="No runs match these filters" description="Clear the filters to see every run neatroots has recorded." action={<Button variant="outline" onClick={clear}>Clear filters</Button>} />
         </div>
       ) : (
-        <RunsTable runs={runs} loading={isLoading} />
+        <>
+          <RunsTable runs={runs} loading={isLoading} />
+          {hasMore && (
+            <div className="flex justify-center border-t border-border py-3">
+              <PendingButton variant="ghost" size="sm" pending={loadingMore} onClick={loadMore}>
+                Load more runs
+              </PendingButton>
+            </div>
+          )}
+        </>
       )}
     </ListPageLayout>
   );

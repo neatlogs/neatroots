@@ -53,6 +53,12 @@ const TRIAGE_LEVELS = [
 /** With the LLM standing in for a classifier, a span-scope question is asked about at most this many spans per run. */
 const SLOW_SPAN_CHECKS_PER_RUN = 4;
 
+/**
+ * How long a live requires_before rule waits for a late prerequisite span (another exporter's
+ * batch) before it raises. Shorter than the 300 ms gate wait, so a halt still reaches the next call.
+ */
+const RULE_GRACE_MS = 250;
+
 /** Triage at or above this expected level gets an LLM investigation. */
 const INVESTIGATE_AT = 2.5;
 
@@ -69,17 +75,23 @@ interface LiveRun {
   spanQueue: Map<string, string[]>;
   spanBusy: Set<string>;
   spanAsked: Map<string, number>;
+  /** Per span-scope check: spans whose model call failed live; run end asks them once more. */
+  retrySpans: Map<string, Set<string>>;
   /** Per question: flags the second look turned down; after a few, the question stops raising. */
   rejected: Map<string, number>;
   traceEvidence: Map<string, string>;
   dirty: Set<string>;
   debounce?: NodeJS.Timeout;
   endTimer?: NodeJS.Timeout;
+  /** Rules waiting out RULE_GRACE_MS before raising: false while waiting, true once it is up. */
+  ruleGrace: Map<string, boolean>;
   ended: boolean;
   endHandled: boolean;
   doctor: boolean;
   /** Resuming after a restart: answers already stored are not asked again. */
   answered?: { traceChecks: Set<string>; toolSpans: Set<string> };
+  /** Checks re-run on a stored run: steering never had a chance, so nothing counts as missed. */
+  rechecked?: boolean;
 }
 
 export interface EngineStatus {
@@ -119,6 +131,27 @@ export function flagged(c: QuestionCheck, r: DecisionResult): { flagged: boolean
  * model. The local LLM is called only to plan, investigate when triage says it is worth
  * it, write notes for the agent and summarize, within per-run budgets.
  */
+/** Thrown when a span id given to judge matches no span, or more than one, in the run. */
+export class UnknownSpanError extends Error {}
+
+/**
+ * The spans named by ids or unique prefixes (any case), in run order. An id that matches nothing or
+ * more than one span throws, so a question is never judged over less evidence than was asked for.
+ */
+function pickSpans<S extends { id: string }>(spans: S[], ids: string[], traceId: string): S[] {
+  const picked = new Set<string>();
+  for (const raw of ids) {
+    const id = String(raw ?? "").trim().toLowerCase();
+    if (!id) throw new UnknownSpanError(`an empty span id was given for run ${traceId}`);
+    const exact = spans.find((s) => s.id === id);
+    const hits = exact ? [exact] : spans.filter((s) => s.id.startsWith(id));
+    if (!hits.length) throw new UnknownSpanError(`no span ${raw} in run ${traceId}`);
+    if (hits.length > 1) throw new UnknownSpanError(`span id ${raw} matches more than one span in run ${traceId}; use more characters`);
+    picked.add(hits[0].id);
+  }
+  return spans.filter((s) => picked.has(s.id));
+}
+
 export class Engine {
   private live = new Map<string, LiveRun>();
   private workflowPlanning = new Map<string, Promise<PlanRow | undefined>>();
@@ -154,6 +187,8 @@ export class Engine {
         if (n <= 0) {
           this.jobs.delete(traceId);
           if (this.live.get(traceId)?.endHandled) this.progress.done(traceId);
+          // A debounced trace question still counts as pending; its flush wakes the waiters.
+          if (this.pending(traceId)) return;
           for (const fn of this.idleWaiters.get(traceId) ?? []) fn();
           this.idleWaiters.delete(traceId);
         } else this.jobs.set(traceId, n);
@@ -171,13 +206,27 @@ export class Engine {
   waitIdle(traceId: string, timeoutMs: number): Promise<boolean> {
     if (!this.pending(traceId)) return Promise.resolve(true);
     return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(false), timeoutMs);
-      const list = this.idleWaiters.get(traceId) ?? [];
-      list.push(() => {
+      let cb: (() => void) | undefined;
+      const timer = setTimeout(() => {
+        if (cb) {
+          const list = this.idleWaiters.get(traceId);
+          if (list) {
+            const idx = list.indexOf(cb);
+            if (idx >= 0) list.splice(idx, 1);
+            if (!list.length) this.idleWaiters.delete(traceId);
+          }
+        }
+        resolve(false);
+      }, timeoutMs);
+      cb = () => {
         clearTimeout(timer);
         resolve(true);
-      });
+      };
+      const list = this.idleWaiters.get(traceId) ?? [];
+      list.push(cb);
       this.idleWaiters.set(traceId, list);
+      const run = this.live.get(traceId);
+      if (run?.dirty.size) this.scheduleFlush(run);
     });
   }
 
@@ -208,9 +257,11 @@ export class Engine {
       spanQueue: new Map(),
       spanBusy: new Set(),
       spanAsked: new Map(),
+      retrySpans: new Map(),
       rejected: new Map(),
       traceEvidence: new Map(),
       dirty: new Set(),
+      ruleGrace: new Map(),
       ended: false,
       endHandled: false,
       doctor: row.doctor === 1,
@@ -271,7 +322,7 @@ export class Engine {
   private async handleSpans(run: LiveRun, spanIds: string[]): Promise<void> {
     const snap = loadTrace(this.roots.store, run.traceId);
     const fresh = snap.spans.filter((s) => spanIds.includes(s.id));
-    this.applyRules(run, snap, false);
+    this.applyRules(run, snap, false, new Set(spanIds));
     this.ensurePlan(run, snap);
     for (const s of fresh) if ((s.kind === "TOOL" || s.kind === "MCP_TOOL") && !run.answered?.toolSpans.has(s.id)) void this.track(run.traceId, this.labelTool(run, s, snap));
     if (run.plan) this.scheduleQuestions(run, snap, fresh);
@@ -295,10 +346,14 @@ export class Engine {
         run.dirty.add(check.id);
       }
     }
-    if (run.dirty.size) {
-      clearTimeout(run.debounce);
-      run.debounce = setTimeout(() => void this.track(run.traceId, this.flushDirty(run)), 300);
-    }
+    if (run.dirty.size) this.scheduleFlush(run);
+  }
+
+  /** Trace questions are debounced, unless a gate-mode claim is waiting on the run: then they run now. */
+  private scheduleFlush(run: LiveRun): void {
+    clearTimeout(run.debounce);
+    const delay = this.idleWaiters.has(run.traceId) ? 0 : 300;
+    run.debounce = setTimeout(() => void this.track(run.traceId, this.flushDirty(run)), delay);
   }
 
   /**
@@ -330,6 +385,22 @@ export class Engine {
     }
   }
 
+  /** One more try for spans whose model call failed live, still within the slow-mode cap on attempts. */
+  private async retryFailedSpans(run: LiveRun, check: QuestionCheck, params: Record<string, string>): Promise<void> {
+    const retry = run.retrySpans.get(check.id);
+    if (!retry?.size) return;
+    run.retrySpans.delete(check.id);
+    const slow = await this.decisions.isSlow([toQuestion(check, params)]);
+    for (const spanId of retry) {
+      if (slow) {
+        const asked = run.spanAsked.get(check.id) ?? 0;
+        if (asked >= SLOW_SPAN_CHECKS_PER_RUN) break;
+        run.spanAsked.set(check.id, asked + 1);
+      }
+      await this.askSpan(run, check, params, spanId);
+    }
+  }
+
   private async flushDirty(run: LiveRun): Promise<void> {
     const ids = [...run.dirty];
     run.dirty.clear();
@@ -342,19 +413,21 @@ export class Engine {
 
   // ----------------------------------------------------------------- rules
 
-  private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean): void {
+  private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>): void {
     for (const lc of this.registry.rules()) {
       const rule = lc.check as RuleCheck;
       if (!this.appliesTo(rule, run)) continue;
       if (rule.rule.type === "run_end" && !atEnd) continue;
       let hit: RuleHit | null;
       try {
-        hit = evaluateRule(rule, snap, atEnd);
+        hit = evaluateRule(rule, snap, atEnd, fresh, lc.source !== "library");
       } catch (err) {
         log.warn(`rule ${rule.id} failed: ${(err as Error).message}`);
         continue;
       }
       const open = this.roots.store.openFindingFor(run.traceId, rule.id);
+      if (!hit?.firing) run.ruleGrace.delete(rule.id);
+      else if (!open && !atEnd && rule.rule.type === "requires_before" && this.waitForLateSpans(run, rule.id)) continue;
       if (hit?.firing) {
         if (open) {
           const changed = JSON.stringify(open.evidence_span_ids) !== JSON.stringify(hit.evidenceSpanIds);
@@ -381,14 +454,40 @@ export class Engine {
           if (status === "raised") this.onFindingRaised(run, f, lc, hit.params, snap);
         }
       } else if (open && hit && !hit.firing) {
-        this.resolve(open);
+        // A streak that ended still happened, so its halt stands. A requires_before whose earlier
+        // call arrived late never happened at all, so its halt is withdrawn too.
+        this.resolve(open, { keepHalts: rule.rule.type !== "requires_before" });
       }
     }
   }
 
-  private resolve(f: Finding): void {
+  /**
+   * True while a rule should hold off raising. The first time it would raise, starts a short
+   * wait (tracked, so gate-mode claims wait for it) and checks the rules again afterwards.
+   */
+  private waitForLateSpans(run: LiveRun, ruleId: string): boolean {
+    const due = run.ruleGrace.get(ruleId);
+    if (due) {
+      run.ruleGrace.delete(ruleId);
+      return false;
+    }
+    if (due === undefined) {
+      run.ruleGrace.set(ruleId, false);
+      const recheck = new Promise((r) => setTimeout(r, RULE_GRACE_MS)).then(() => {
+        if (!run.ruleGrace.has(ruleId)) return;
+        run.ruleGrace.set(ruleId, true);
+        // At run end the rules are applied without waiting, so there is nothing left to do.
+        if (!run.endHandled) this.applyRules(run, loadTrace(this.roots.store, run.traceId), false);
+      });
+      void this.track(run.traceId, recheck);
+    }
+    return true;
+  }
+
+  private resolve(f: Finding, opts: { keepHalts?: boolean } = { keepHalts: true }): void {
     const next = this.roots.store.updateFinding(f.id, { status: "resolved" });
-    this.steering.withdraw(f.id);
+    // By default the agent moving on doesn't undo a halt the user's rule asked for.
+    this.steering.withdraw(f.id, opts);
     if (next) this.roots.bus.emit("finding", next);
   }
 
@@ -399,7 +498,13 @@ export class Engine {
     const span = snap.spans.find((s) => s.id === spanId);
     if (!span) return;
     const ev = buildEvidence(snap, check.evidence, { focus: span });
-    await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, spanId);
+    const outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, spanId);
+    // The model call failed (a timeout or dropped connection lands here too): run end tries once more.
+    if (outcome === "unavailable" && !run.endHandled) {
+      const retry = run.retrySpans.get(check.id) ?? new Set<string>();
+      retry.add(spanId);
+      run.retrySpans.set(check.id, retry);
+    }
   }
 
   private async askTrace(run: LiveRun, check: QuestionCheck, params: Record<string, string>, snap: TraceSnapshot): Promise<void> {
@@ -409,7 +514,9 @@ export class Engine {
     const key = ev.spanIds.join(",") + (check.evidence?.final_output ? `|${finalOutput(snap) ?? ""}` : "");
     if (run.traceEvidence.get(check.id) === key) return;
     run.traceEvidence.set(check.id, key);
-    await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null);
+    const outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null);
+    // Not asked after all, so the run-end pass asks again; unless an overlapping pass cached newer evidence.
+    if (outcome === "unavailable" && run.traceEvidence.get(check.id) === key) run.traceEvidence.delete(check.id);
   }
 
   private async decideAndApply(
@@ -420,7 +527,7 @@ export class Engine {
     spanIds: string[],
     snap: TraceSnapshot,
     spanId: string | null,
-  ): Promise<void> {
+  ): Promise<"unavailable" | void> {
     let result: DecisionResult;
     try {
       result = await this.decisions.decide(evidence, [toQuestion(check, params)]);
@@ -429,7 +536,7 @@ export class Engine {
       if (err instanceof DecisionUnavailableError || err instanceof LlmUnavailableError) {
         if (!this.decisionDown) log.warn(`questions skipped: ${(err as Error).message}`);
         this.decisionDown = true;
-        return;
+        return "unavailable";
       }
       // A model error or timeout is a failed check, never a "no".
       const existing = this.roots.store.latestFindingFor(run.traceId, check.id);
@@ -587,23 +694,42 @@ export class Engine {
     // Only rules the user wrote may stop a run.
     if (isRule(c) && c.action === "halt" && (lc.source === "user" || lc.source === "project") && !run.ended) {
       this.steering.push({ traceId: run.traceId, findingId: f.id, kind: "halt", text: this.renderGuidance(c, params, f.title) });
-    } else if (!run.ended && this.steering.mode(run.project) !== "off" && !this.overlapsNotedFinding(run.traceId, f)) {
+    } else if (!run.ended && this.steering.mode(run.project) !== "off" && !this.overlapsNotedFinding(run.traceId, f) && this.roots.store.getRun(run.traceId)?.status === "running") {
       const template = this.steering.push({ traceId: run.traceId, findingId: f.id, kind: "template", text: this.renderGuidance(c, params, f.title) });
       if (template && run.used.notes < this.roots.config.budgets.notesPerRun) {
         run.used.notes++;
         void this.track(run.traceId, this.writeNote(run, f, template));
       }
+    } else if (!run.endHandled && !run.rechecked && this.steering.mode(run.project) !== "off" && !this.overlapsNotedFinding(run.traceId, f, true)) {
+      // A live check raised this, but the run was already over (the agent finished before the
+      // check did, common on very fast runs), so the note could never reach the agent. Keep it as
+      // not sent so the user sees it instead of it vanishing. Checks that only run at the end, and
+      // Re-run checks, could never have been steered, so they don't get here.
+      const note = this.roots.store.insertNote({
+        trace_id: run.traceId,
+        finding_id: f.id,
+        kind: "template",
+        text: this.renderGuidance(c, params, f.title),
+        status: "expired",
+        checks: null,
+      });
+      this.roots.bus.emit("note", note);
     }
     void this.track(run.traceId, this.triage(run, f));
     void snap;
   }
 
-  /** True when a note already went out (or is queued) for a finding about mostly the same spans. */
-  private overlapsNotedFinding(traceId: string, f: Finding): boolean {
+  /**
+   * True when a note already went out (or is queued) for a finding about mostly the same spans.
+   * With `notSent`, a note kept as not sent counts too, so a run that ended too soon shows the
+   * same single note a live run would have been sent.
+   */
+  private overlapsNotedFinding(traceId: string, f: Finding, notSent = false): boolean {
     if (!f.evidence_span_ids.length) return false;
     const mine = new Set(f.evidence_span_ids);
     for (const n of this.roots.store.notesForTrace(traceId)) {
-      if (!n.finding_id || n.finding_id === f.id || (n.status !== "pending" && n.status !== "delivered")) continue;
+      const counts = n.status === "pending" || n.status === "delivered" || (notSent && n.status === "expired");
+      if (!n.finding_id || n.finding_id === f.id || !counts) continue;
       const other = this.roots.store.getFinding(n.finding_id);
       if (!other) continue;
       const shared = other.evidence_span_ids.filter((id) => mine.has(id)).length;
@@ -912,6 +1038,7 @@ ${library}`;
         }
         run.spanQueue.set(check.id, queue);
         await this.drainSpanQueue(run, check, params);
+        await this.retryFailedSpans(run, check, params);
       } else {
         await this.askTrace(run, check, params, snap);
       }
@@ -1017,7 +1144,7 @@ ${library}`;
     let text: string;
     let spanIds: string[];
     if (opts.spanIds?.length) {
-      const spans = snap.spans.filter((s) => opts.spanIds!.includes(s.id) || opts.spanIds!.some((id) => s.id.startsWith(id)));
+      const spans = pickSpans(snap.spans, opts.spanIds, traceId);
       const g = runGoal(snap);
       text = [g.user ? `User request: ${clip(g.user, 600)}` : "", "Spans:", ...spans.map((s) => describeSpan(s, ["input", "output", "status", "error"]))].filter(Boolean).join("\n");
       spanIds = spans.map((s) => s.id);
@@ -1037,7 +1164,14 @@ ${library}`;
     total: number;
     truncated: boolean;
   }> {
-    const runs = this.roots.store.listRuns({ workflow: opts.workflow, project: opts.project, limit: opts.limit ?? 50 }).filter((r) => r.status !== "running");
+    const limit = opts.limit ?? 50;
+    // Only runs the check would watch: the engine skips runs outside its applies_to, so a preview
+    // over them would report hits the check can never raise. Look further back to still fill `limit`.
+    const runs = this.roots.store
+      .listRuns({ workflow: opts.workflow, project: opts.project, limit: check.applies_to ? 500 : limit })
+      .filter((r) => r.status !== "running")
+      .filter((r) => this.appliesTo(check, { project: r.project ?? "unknown", workflow: r.workflow ?? r.project ?? "unknown" }))
+      .slice(0, limit);
     const deadline = Date.now() + (opts.timeBudgetMs ?? 90_000);
     const hits: { trace_id: string; probability: number | null; evidence_span_ids: string[]; root_name: string | null }[] = [];
     let checked = 0;
@@ -1046,7 +1180,8 @@ ${library}`;
       const snap = loadTrace(this.roots.store, r.trace_id);
       checked++;
       if (isRule(check)) {
-        const hit = evaluateRule(check, snap, true);
+        // A previewed check is a draft someone (or a coding agent) wrote, so its pattern is timed.
+        const hit = evaluateRule(check, snap, true, undefined, true);
         if (hit) hits.push({ trace_id: r.trace_id, probability: null, evidence_span_ids: hit.evidenceSpanIds, root_name: r.root_name });
         continue;
       }
@@ -1077,6 +1212,7 @@ ${library}`;
     this.live.delete(traceId);
     const run = this.liveRun(traceId)!;
     run.ended = row.status !== "running";
+    run.rechecked = true;
     if (opts.resume) {
       const done = this.roots.store.decisionsForTrace(traceId);
       for (const d of done) if (d.span_id) run.spanDone.add(`${d.check_id}:${d.span_id}`);

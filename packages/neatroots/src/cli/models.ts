@@ -4,7 +4,7 @@ import { rootsHome, loadConfig, saveConfig } from "../config.js";
 import { hardwareTier, LlmClient } from "../models/llm.js";
 import { DecisionModel } from "../models/decision.js";
 import { LAYA_DOWNLOAD_MB, LayaManager } from "../models/laya.js";
-import { askForLaya, layaNextSteps, shouldAskForLaya, type LayaConsent } from "../models/laya-consent.js";
+import { askForLaya, layaAllowed, layaNextSteps, shouldAskForLaya, type LayaConsent } from "../models/laya-consent.js";
 import { getSecret, setSecret, deleteSecret } from "../relay/keychain.js";
 import { api, ask, port, running } from "./util.js";
 import { registerLlmCommands } from "./llm.js";
@@ -62,7 +62,7 @@ export function registerModelCommands(program: Command): void {
     // A running neatroots takes the answer now (a yes starts the download in the background).
     const p = port();
     const live = (await running(p)) && (await api(p, "/api/classifier/laya", { method: "POST", body: JSON.stringify({ action: consent === "yes" ? "install" : "skip" }) }).then(() => true, () => false));
-    console.log(consent === "yes" && live ? "✓ Laya is downloading in the background; Settings → Decision model shows progress." : layaNextSteps(consent));
+    console.log(consent === "yes" ? layaAllowed(new LayaManager(rootsHome(), cfg.classifier).installed(), live) : layaNextSteps(consent));
   };
 
   laya

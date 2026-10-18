@@ -15,7 +15,7 @@ function fromDoc(doc: unknown, project: string): ResourceSpansBatch[] {
   if (Array.isArray(o.resourceSpans) || Array.isArray(o.resource_spans)) return decodeTraceJson(o);
   const exp = (o.data && typeof o.data === "object" ? o.data : o) as Record<string, unknown>;
   if (Array.isArray(exp.spans) && exp.trace && typeof exp.trace === "object") return fromNeatlogsExport(exp, project);
-  if (typeof o.name === "string") return httpTraceToBatches(o, project).batches;
+  if (typeof o.name === "string") return httpTraceToBatches(o, project, { stableIds: true }).batches;
   throw new ImportError("not OTLP JSON, a Neatlogs trace export or a Neatlogs HTTP trace");
 }
 
@@ -62,21 +62,32 @@ function setProject(b: ResourceSpansBatch, project: string): void {
 function readBatches(text: string, name: string, project: string): ResourceSpansBatch[] {
   const trimmed = text.trim();
   if (!trimmed) throw new ImportError(`${name} is empty`);
-  if (/\.(jsonl|ndjson)$/i.test(name) || (!trimmed.startsWith("[") && trimmed.includes("\n{"))) {
-    const out: ResourceSpansBatch[] = [];
-    trimmed.split(/\r?\n/).forEach((line, i) => {
-      if (!line.trim()) return;
+  const explicitLines = /\.(jsonl|ndjson)$/i.test(name);
+  if (!explicitLines) {
+    let doc: unknown;
+    let parsed = false;
+    try {
+      doc = JSON.parse(trimmed);
+      parsed = true;
+    } catch (err) {
+      if (trimmed.startsWith("[") || !trimmed.includes("\n{")) throw new ImportError(`${name}: ${(err as Error).message}`);
+    }
+    if (parsed) {
       try {
-        out.push(...fromDoc(JSON.parse(line), project));
+        return fromDoc(doc, project);
       } catch (err) {
-        throw new ImportError(`${name} line ${i + 1}: ${(err as Error).message}`);
+        throw new ImportError(`${name}: ${(err as Error).message}`);
       }
-    });
-    return out;
+    }
   }
-  try {
-    return fromDoc(JSON.parse(trimmed), project);
-  } catch (err) {
-    throw new ImportError(`${name}: ${(err as Error).message}`);
-  }
+  const out: ResourceSpansBatch[] = [];
+  trimmed.split(/\r?\n/).forEach((line, i) => {
+    if (!line.trim()) return;
+    try {
+      out.push(...fromDoc(JSON.parse(line), project));
+    } catch (err) {
+      throw new ImportError(`${name} line ${i + 1}: ${(err as Error).message}`);
+    }
+  });
+  return out;
 }

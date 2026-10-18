@@ -13,10 +13,15 @@ export function ago(ms: number | null | undefined): string {
 export function dur(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return "—";
   if (ms < 1) return "<1 ms";
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`;
-  const m = Math.floor(ms / 60_000);
-  return `${m} m ${Math.round((ms % 60_000) / 1000)} s`;
+  // Round first, then pick the unit, so a value just under a boundary reads as the next unit
+  // ("1 m 0 s", not "60.0 s"; "2 m 0 s", not "1 m 60 s").
+  if (Math.round(ms) < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60_000) {
+    const s = (ms / 1000).toFixed(ms < 10_000 ? 2 : 1);
+    if (Number(s) < 60) return `${s} s`;
+  }
+  const total = Math.round(ms / 1000);
+  return `${Math.floor(total / 60)} m ${total % 60} s`;
 }
 
 export function num(n: number | null | undefined): string {

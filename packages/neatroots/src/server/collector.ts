@@ -15,15 +15,26 @@ import { log } from "../util/log.js";
 
 const MAX_BODY = 64 * 1024 * 1024;
 
+function gunzipCapped(raw: Buffer): Buffer {
+  try {
+    return zlib.gunzipSync(raw, { maxOutputLength: MAX_BODY * 4 });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ERR_BUFFER_TOO_LARGE") {
+      throw Object.assign(new Error("payload too large after decompression"), { status: 413 });
+    }
+    throw err;
+  }
+}
+
 async function readBody(c: Context): Promise<Buffer> {
   const raw = Buffer.from(await c.req.arrayBuffer());
   if (raw.length > MAX_BODY) throw Object.assign(new Error("payload too large"), { status: 413 });
   const enc = (c.req.header("content-encoding") ?? "").toLowerCase();
-  if (enc === "gzip" || enc === "x-gzip") return zlib.gunzipSync(raw, { maxOutputLength: MAX_BODY * 4 });
+  if (enc === "gzip" || enc === "x-gzip") return gunzipCapped(raw);
   if (enc === "deflate") return zlib.inflateSync(raw, { maxOutputLength: MAX_BODY * 4 });
   if (enc === "br") return zlib.brotliDecompressSync(raw, { maxOutputLength: MAX_BODY * 4 });
   // Some exporters gzip without the header; sniff the magic bytes.
-  if (raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b) return zlib.gunzipSync(raw);
+  if (raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b) return gunzipCapped(raw);
   return raw;
 }
 

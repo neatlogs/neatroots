@@ -1,8 +1,8 @@
 # samples
 
-Seven scripted support-agent runs, each with a known failure for neatroots' checks to find:
-a lookup loop on a 404, an ignored tool error, a prompt injection in tool output, a personal-data
-leak, a contradiction, a leaked secret, and one clean run.
+Eight scripted support-agent scenarios: six failures and two healthy controls.
+Failures cover a lookup loop on a 404, an ignored tool error, a prompt injection in tool output, a personal-data
+leak, a contradiction, and a leaked secret. The healthy controls are `happy` and `long-request`.
 
 ```bash
 uv run run_samples.py                 # all of them

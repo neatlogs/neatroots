@@ -12,21 +12,21 @@ const homes: string[] = [];
 afterEach(() => {
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
-function store(): Store {
+function run(calls: Array<{ input: string; output?: string; error?: string }>) {
   const h = tmpHome();
   homes.push(h);
-  return new Store(path.join(h, "data"));
+  const st = new Store(path.join(h, "data"));
+  try {
+    const t = hex(16);
+    const root = hex(8);
+    st.ingest([batch(calls.map((c) => toolSpan(t, root, "search", c.input, c.output, c.error)))]);
+    return evaluateRule(rule, loadTrace(st, t), false);
+  } finally {
+    st.close();
+  }
 }
 const lib = parseChecks(fs.readFileSync(new URL("../library/rules.yaml", import.meta.url), "utf8")).checks as RuleCheck[];
 const rule = lib.find((c) => c.id === "repeated-tool-call")!;
-
-function run(calls: Array<{ input: string; output?: string; error?: string }>) {
-  const st = store();
-  const t = hex(16);
-  const root = hex(8);
-  st.ingest([batch(calls.map((c) => toolSpan(t, root, "search", c.input, c.output, c.error)))]);
-  return evaluateRule(rule, loadTrace(st, t), false);
-}
 
 describe("repeated-tool-call compares the result", () => {
   it("fires when the same call returns the same result three times", () => {

@@ -45,6 +45,15 @@ export class BlobStore {
     }
   }
 
+  /** Bytes of one blob on disk, 0 when it's missing. */
+  sizeOf(sha: string): number {
+    try {
+      return fs.statSync(this.file(sha)).size;
+    } catch {
+      return 0;
+    }
+  }
+
   /** Total bytes on disk, for retention. */
   size(): number {
     let total = 0;

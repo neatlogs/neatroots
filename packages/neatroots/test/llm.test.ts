@@ -175,6 +175,15 @@ describe("Anthropic provider", () => {
     await expect(llm.chat([{ role: "user", content: "hi" }])).rejects.toThrow(/declined.*cyber/);
   });
 
+  it("an answer that can't be read fails the check instead of counting as yes (#23.18)", async () => {
+    const srv = await mock(() => ({ json: claudeReply("Yes, I think the agent probably did.") }));
+    closers.push(srv.close);
+    const llm = new LlmClient(cfgWith((c) => Object.assign(c.external, { enabled: true, provider: "anthropic", baseUrl: srv.url, model: "claude-opus-5-5" })), {
+      secret: async () => "sk-ant-test-key-0000000000000000",
+    });
+    await expect(new LlmDecisionBackend(llm).decide("evidence", [{ name: "q", type: "yes_no", ask: "Did it fail?" }])).rejects.toThrow(/couldn't be read/);
+  });
+
   it("decisions ask Claude for a confidence, since it gives no logprobs", async () => {
     const srv = await mock(() => ({ json: claudeReply('{"answer": "yes", "confidence": 0.95}') }));
     closers.push(srv.close);
@@ -196,8 +205,10 @@ describe("applyExternalLlm", () => {
     expect(applyExternalLlm(e, { provider: "nope" })).toMatch(/provider must be/);
     expect(applyExternalLlm(e, { redact: "some" })).toMatch(/redact/);
     const c = defaultConfig().llm.external;
+    const before = { ...c };
     expect(applyExternalLlm(c, { provider: "custom", model: "m", enabled: true })).toMatch(/base URL/);
-    expect(applyExternalLlm(c, { base_url: "http://localhost:8080/v1", enabled: true })).toBeUndefined();
+    expect(c).toEqual(before);
+    expect(applyExternalLlm(c, { provider: "custom", model: "m", base_url: "http://localhost:8080/v1", enabled: true })).toBeUndefined();
   });
 });
 

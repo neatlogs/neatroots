@@ -1,5 +1,5 @@
 import type { Store } from "../store/db.js";
-import { buildView, preview, type SpanKind } from "../semantics/view.js";
+import { buildView, isSystemRole, preview, type SpanKind } from "../semantics/view.js";
 import type { Plain } from "../otlp/types.js";
 import type { Evidence, EvidenceField, SpanSelector } from "../checks/types.js";
 import type { RunRow, SpanRow } from "../types.js";
@@ -117,7 +117,9 @@ export function matchesSelector(s: SpanInfo, sel: SpanSelector | undefined): boo
   if (names && !names.includes(s.name.toLowerCase()) && !(s.toolName && names.includes(s.toolName.toLowerCase()))) return false;
   const tools = asList(sel.tool);
   if (tools && !(s.toolName && tools.includes(s.toolName.toLowerCase()))) return false;
-  if (sel.status && sel.status !== "any" && s.status !== sel.status) return false;
+  if (sel.status && sel.status !== "any") {
+    if (sel.status === "ok" ? s.status === "error" : s.status !== sel.status) return false;
+  }
   return true;
 }
 
@@ -138,7 +140,7 @@ export function runGoal(t: TraceSnapshot): { system?: string; user?: string; roo
   if (firstLlm && Array.isArray(firstLlm.input)) {
     for (const m of firstLlm.input as Record<string, Plain>[]) {
       if (!m || typeof m !== "object") continue;
-      if (m.role === "system" && !goal.system) goal.system = textOf(m.content);
+      if (isSystemRole(m.role) && !goal.system) goal.system = textOf(m.content);
       if (m.role === "user" && !goal.user) goal.user = textOf(m.content);
     }
   }
@@ -187,7 +189,7 @@ function clip(s: string, n: number): string {
  */
 export function latestMessages(input: Plain | undefined, max: number): string | undefined {
   if (!Array.isArray(input) || !input.every((m) => m && typeof m === "object" && "role" in (m as object))) return undefined;
-  const msgs = (input as Record<string, Plain>[]).filter((m) => m.role !== "system");
+  const msgs = (input as Record<string, Plain>[]).filter((m) => !isSystemRole(m.role));
   const lines: string[] = [];
   let size = 0;
   for (let i = msgs.length - 1; i >= 0; i--) {

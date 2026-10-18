@@ -30,6 +30,8 @@ export interface ImportOptions {
 export interface ImportedTrace {
   sourceId: string;
   batches: ResourceSpansBatch[];
+  /** Set when this one trace couldn't be read; the import counts it as failed and carries on. */
+  error?: string;
 }
 
 export interface ImportSource {

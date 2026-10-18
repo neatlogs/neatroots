@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -16,6 +17,7 @@ class StubRoots:
         self.mode = mode
         self.claims = []
         self.checks = []
+        self.slow = []  # seconds to hold the next claim replies (a busy neatroots)
         stub = self
 
         class H(BaseHTTPRequestHandler):
@@ -32,6 +34,8 @@ class StubRoots:
                     stub.claims.append(body)
                     note = stub.notes.pop(0) if stub.notes else None
                     out = {"mode": stub.mode, "note": note}
+                    if stub.slow:
+                        time.sleep(stub.slow.pop(0))
                 elif self.path == "/api/steer/check":
                     stub.checks.append(body)
                     out = {"probability": 0.9, "answer": "yes", "evidence_span_ids": ["abc"]}
@@ -109,10 +113,139 @@ def test_wrap_injects_into_chat_completions(stub):
     neatroots_steer.wrap(c)
 
 
+def test_wrap_covers_stream_and_parse(stub):
+    """stream() and parse() don't go through create, so a halt must reach them on its own."""
+    calls = []
+
+    class Messages:
+        def create(self, **kw):
+            calls.append("create")
+
+        def stream(self, **kw):
+            calls.append("stream")
+
+        def parse(self, **kw):
+            calls.append("parse")
+
+    class Client:
+        messages = Messages()
+
+    stub.notes[:] = [{"id": "h", "kind": "halt", "text": "Your rule says stop.", "finding_id": None}] * 3
+    client = neatroots_steer.wrap(Client())
+    for method in (client.messages.create, client.messages.stream, client.messages.parse):
+        with pytest.raises(neatroots_steer.NeatrootsHalt):
+            method(messages=[{"role": "user", "content": "q"}])
+    assert calls == []  # the model was never reached
+
+
+def test_wrap_covers_parse_but_leaves_openai_stream_to_create(stub):
+    calls = []
+
+    class Completions:
+        def create(self, **kw):
+            calls.append(kw)
+
+        def parse(self, **kw):
+            calls.append(kw)
+
+        def stream(self, **kw):
+            self.create(**kw)  # the SDK's stream() goes through create
+
+    class Chat:
+        completions = Completions()
+
+    class Responses:
+        def create(self, **kw):
+            calls.append(kw)
+
+        def parse(self, **kw):
+            calls.append(kw)
+
+    class Client:
+        chat = Chat()
+        responses = Responses()
+
+    halt = {"id": "h", "kind": "halt", "text": "Your rule says stop.", "finding_id": None}
+    stub.notes[:] = [halt] * 3
+    client = neatroots_steer.wrap(Client())
+    with pytest.raises(neatroots_steer.NeatrootsHalt):
+        client.chat.completions.parse(messages=[{"role": "user", "content": "q"}])
+    with pytest.raises(neatroots_steer.NeatrootsHalt):
+        client.responses.parse(input="q")
+    assert calls == []
+    # stream() is not wrapped on its own, or the claim would run twice
+    before = len(stub.claims)
+    stub.notes[:] = [{"id": "n", "kind": "template", "text": "Stop retrying.", "finding_id": None}]
+    client.chat.completions.stream(messages=[{"role": "user", "content": "q"}])
+    assert len(stub.claims) == before + 1
+    assert "<neatroots-guidance>" in calls[-1]["messages"][-1]["content"]
+
+
+def test_wrap_covers_clients_from_with_options_and_copy(stub):
+    calls = []
+
+    def make_client():
+        class Completions:
+            def create(self, **kw):
+                calls.append(kw)
+
+        class Chat:
+            completions = Completions()
+
+        class Client:
+            chat = Chat()
+
+            def with_options(self, **kw):
+                return make_client()
+
+            def copy(self, **kw):
+                return make_client()
+
+        return Client()
+
+    stub.notes[:] = [{"id": "h", "kind": "halt", "text": "Your rule says stop.", "finding_id": None}] * 2
+    client = neatroots_steer.wrap(make_client())
+    for derived in (client.with_options(timeout=5), client.copy()):
+        with pytest.raises(neatroots_steer.NeatrootsHalt):
+            derived.chat.completions.create(messages=[{"role": "user", "content": "q"}])
+    assert calls == []
+    stub.notes[:] = [{"id": "n", "kind": "template", "text": "Check the order.", "finding_id": None}]
+    client.with_options().chat.completions.create(messages=[{"role": "user", "content": "q"}])
+    assert "<neatroots-guidance>" in calls[-1]["messages"][-1]["content"]
+
+
 def test_halt_note_raises(stub):
     stub.notes[:] = [{"id": "h", "kind": "halt", "text": "Your rule says stop.", "finding_id": None}]
     with pytest.raises(neatroots_steer.NeatrootsHalt):
         neatroots_steer.apply([{"role": "user", "content": "q"}])
+
+
+def test_note_ignored_when_steering_off(stub):
+    stub.mode = "off"
+    stub.notes[:] = [{"id": "h", "kind": "halt", "text": "Your rule says stop.", "finding_id": None}]
+    msgs = [{"role": "user", "content": "q"}]
+    assert neatroots_steer.apply(msgs) == msgs
+
+
+def test_one_slow_reply_does_not_hold_back_a_halt(stub):
+    stub.notes[:] = []
+    stub.slow[:] = [1.2]  # longer than the hook waits
+    msgs = [{"role": "user", "content": "q"}]
+    assert neatroots_steer.apply(msgs) is msgs
+    stub.notes[:] = [{"id": "h", "kind": "halt", "text": "Your rule says stop.", "finding_id": None}]
+    # was: every call for the next 5 s skipped neatroots, so the halt never arrived
+    with pytest.raises(neatroots_steer.NeatrootsHalt):
+        neatroots_steer.apply([{"role": "user", "content": "again"}])
+
+
+def test_backs_off_after_a_few_slow_replies_in_a_row(stub):
+    stub.notes[:] = []
+    stub.slow[:] = [1.2, 1.2, 1.2]
+    for _ in range(3):
+        neatroots_steer.apply([{"role": "user", "content": "q"}])
+    sent = len(stub.claims)
+    neatroots_steer.apply([{"role": "user", "content": "q"}])
+    assert len(stub.claims) == sent  # skipped: neatroots is treated as stuck for a while
 
 
 def test_check_my_work_and_tool_call(stub):

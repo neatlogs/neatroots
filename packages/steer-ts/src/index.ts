@@ -12,6 +12,8 @@
  *   const model = wrapLanguageModel({ model: openai("gpt-4o"), middleware: rootsMiddleware() });
  */
 
+import { SteeredRequest } from "./request.js";
+
 export const GUIDANCE_OPEN = "<neatroots-guidance>";
 export const GUIDANCE_CLOSE = "</neatroots-guidance>";
 
@@ -54,7 +56,10 @@ interface State {
   disabled: boolean;
   mode: string;
   modeCheckedAt: number;
+  modeTraceId?: string;
   downUntil: number;
+  /** Requests in a row that timed out: neatroots is busy, not stopped, until there are a few. */
+  timeouts: number;
 }
 
 const state: State = {
@@ -63,6 +68,7 @@ const state: State = {
   mode: "unknown",
   modeCheckedAt: 0,
   downUntil: 0,
+  timeouts: 0,
 };
 
 /**
@@ -78,7 +84,9 @@ export function configure(opts: { url?: string; disabled?: boolean; traceId?: ()
   if (opts.disabled !== undefined) state.disabled = opts.disabled;
   state.mode = "unknown";
   state.modeCheckedAt = 0;
+  state.modeTraceId = undefined;
   state.downUntil = 0;
+  state.timeouts = 0;
 }
 
 const DEBUG = typeof process !== "undefined" && !!process.env.NEATROOTS_STEER_DEBUG;
@@ -86,6 +94,9 @@ const DEBUG = typeof process !== "undefined" && !!process.env.NEATROOTS_STEER_DE
 function debug(...args: unknown[]): void {
   if (DEBUG) console.error("[neatroots-steer]", ...args);
 }
+
+/** Timed-out requests in a row before the hook backs off as if neatroots were stopped. */
+const SLOW_REPLIES_BEFORE_BACKOFF = 3;
 
 async function post<T>(path: string, body: unknown, timeoutMs: number): Promise<T | undefined> {
   if (state.disabled || Date.now() < state.downUntil) {
@@ -104,11 +115,16 @@ async function post<T>(path: string, body: unknown, timeoutMs: number): Promise<
       return undefined;
     }
     const out = (await res.json()) as T;
+    state.timeouts = 0;
     debug(path, JSON.stringify(body), "->", JSON.stringify(out));
     return out;
   } catch (err) {
     debug(path, "failed:", (err as Error).message);
-    // A stopped neatroots costs nothing per call for a while.
+    // A slow answer means neatroots is busy, not stopped: ask again on the next call, so a halt
+    // isn't held back. Only a few timeouts in a row, or a neatroots that can't be reached, back
+    // off, so a stopped (or stuck) neatroots costs nothing per call for a while.
+    if ((err as Error).name === "TimeoutError" && ++state.timeouts < SLOW_REPLIES_BEFORE_BACKOFF) return undefined;
+    state.timeouts = 0;
     state.downUntil = Date.now() + 5000;
     return undefined;
   }
@@ -215,9 +231,11 @@ export async function guidance(traceId?: string): Promise<Note | undefined> {
     debug("no active trace; pass configure({ neatlogs }) if the SDK is initialized");
     return undefined;
   }
-  if (state.mode === "off" && Date.now() - state.modeCheckedAt < 10_000) return undefined;
+  // A cached mode belongs only to the trace that supplied it. New runs must flush and ask.
+  const mode = state.modeTraceId === traceId ? state.mode : "unknown";
+  if (mode === "off" && Date.now() - state.modeCheckedAt < 10_000) return undefined;
   let gateMs: number | undefined;
-  if (state.mode === "gate" || state.mode === "unknown") {
+  if (mode === "gate" || mode === "unknown") {
     await flushSdk();
     gateMs = 300;
   }
@@ -225,7 +243,9 @@ export async function guidance(traceId?: string): Promise<Note | undefined> {
   if (!res) return undefined;
   state.mode = res.mode || "unknown";
   state.modeCheckedAt = Date.now();
-  if (!res.note) return undefined;
+  state.modeTraceId = traceId;
+  // A note that arrives with steering off (an older neatroots) is not used.
+  if (!res.note || state.mode === "off") return undefined;
   await record(res.note);
   if (res.note.kind === "halt") throw new NeatrootsHalt(res.note.text);
   return res.note;
@@ -313,23 +333,39 @@ function wrapMethod(
   if (!owner) return;
   const original = owner[name] as ((...a: unknown[]) => unknown) & { __neatroots?: boolean };
   if (typeof original !== "function" || original.__neatroots) return;
-  const wrapped = async function (this: unknown, ...args: unknown[]) {
-    const o = replayOverrides();
-    const params = o.model || o.system ? override((args[0] ?? {}) as Record<string, unknown>, o) : ((args[0] ?? {}) as Record<string, unknown>);
-    let next = params;
-    try {
-      const note = await guidance();
-      if (note) next = transform({ ...params }, note);
-    } catch (err) {
-      if (err instanceof NeatrootsHalt) throw err;
-    }
-    return original.apply(owner, [next, ...args.slice(1)]);
+  const wrapped = function (this: unknown, ...args: unknown[]) {
+    const request = (async () => {
+      const o = replayOverrides();
+      const params = o.model || o.system ? override((args[0] ?? {}) as Record<string, unknown>, o) : ((args[0] ?? {}) as Record<string, unknown>);
+      let next = params;
+      try {
+        const note = await guidance();
+        if (note) next = transform({ ...params }, note);
+      } catch (err) {
+        if (err instanceof NeatrootsHalt) throw err;
+      }
+      // Box the SDK promise so awaiting guidance does not parse the provider response.
+      return { value: original.apply(owner, [next, ...args.slice(1)]) };
+    })();
+    return new SteeredRequest(request);
   } as typeof original;
   wrapped.__neatroots = true;
   owner[name] = wrapped;
 }
 
-/** Adds neatroots guidance to an OpenAI client (chat.completions.create and responses.create), in place. */
+/** Wraps a method that builds a new client (`withOptions`) so the copy is wrapped too. */
+function wrapFactory(owner: Record<string, unknown> | undefined, name: string, wrap: (next: object) => unknown): void {
+  if (!owner) return;
+  const original = owner[name] as ((...a: unknown[]) => unknown) & { __neatroots?: boolean };
+  if (typeof original !== "function" || original.__neatroots) return;
+  const wrapped = function (this: unknown, ...args: unknown[]) {
+    return wrap(original.apply(owner, args) as object);
+  } as typeof original;
+  wrapped.__neatroots = true;
+  owner[name] = wrapped;
+}
+
+/** Adds neatroots guidance to an OpenAI client (chat.completions.create/parse, responses.create/parse and withOptions), in place. */
 export function wrapOpenAI<T extends object>(client: T): T {
   const c = client as unknown as { chat?: { completions?: Record<string, unknown> }; responses?: Record<string, unknown> };
   wrapMethod(c.chat?.completions, "create", (p, note) => {
@@ -344,10 +380,11 @@ export function wrapOpenAI<T extends object>(client: T): T {
     if (Array.isArray(input)) return { ...p, input: [...input, { role: "user", content: guidanceBlock(note) }] };
     return p;
   }, overrideResponses);
+  wrapFactory(client as unknown as Record<string, unknown>, "withOptions", (next) => wrapOpenAI(next));
   return client;
 }
 
-/** Adds neatroots guidance to an Anthropic client (messages.create), in place. */
+/** Adds neatroots guidance to an Anthropic client (messages.create and withOptions), in place. */
 export function wrapAnthropic<T extends object>(client: T): T {
   const c = client as unknown as { messages?: Record<string, unknown> };
   wrapMethod(c.messages, "create", (p, note) => {
@@ -356,6 +393,7 @@ export function wrapAnthropic<T extends object>(client: T): T {
     const next = last?.role === "user" ? [...msgs.slice(0, -1), appendText(last, guidanceBlock(note))] : [...msgs, { role: "user", content: [{ type: "text", text: guidanceBlock(note) }] }];
     return { ...p, messages: next };
   }, overrideAnthropic);
+  wrapFactory(client as unknown as Record<string, unknown>, "withOptions", (next) => wrapAnthropic(next));
   return client;
 }
 

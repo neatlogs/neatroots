@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import threading
 import time
 import urllib.error
@@ -16,6 +17,9 @@ from typing import Any, Dict, Optional, Set
 from urllib.parse import urlparse
 
 logger = logging.getLogger("neatroots_steer")
+
+# Timed-out requests in a row before the hook backs off as if neatroots were stopped.
+_SLOW_REPLIES_BEFORE_BACKOFF = 3
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
@@ -53,9 +57,12 @@ class RootsClient:
         self.disabled = os.environ.get("NEATROOTS_STEER", "").lower() in {"0", "off", "false", "no"}
         self._mode = "unknown"
         self._mode_checked = 0.0
+        self._mode_trace_id: Optional[str] = None
+        self._globally_off = False
         self._pending: Set[str] = set()
         self._sse_connected = False
         self._down_until = 0.0
+        self._timeouts = 0
         self._lock = threading.Lock()
         self._listener: Optional[threading.Thread] = None
         if listen and not self.disabled:
@@ -72,13 +79,23 @@ class RootsClient:
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8") or "{}")
+                out = json.loads(resp.read().decode("utf-8") or "{}")
+            self._timeouts = 0
+            return out
         except urllib.error.HTTPError as exc:
             logger.debug("neatroots %s -> HTTP %s", path, exc.code)
             return None
         except Exception as exc:  # noqa: BLE001 - never break the agent
             logger.debug("neatroots unreachable at %s: %s", self.url, exc)
-            # Back off so a stopped neatroots costs nothing per LLM call.
+            # A slow answer means neatroots is busy, not stopped: ask again on the next call, so a
+            # halt isn't held back. Only a few timeouts in a row, or a neatroots that can't be
+            # reached, back off, so a stopped (or stuck) neatroots costs nothing per LLM call.
+            timed_out = isinstance(exc, socket.timeout) or isinstance(getattr(exc, "reason", None), socket.timeout)
+            if timed_out:
+                self._timeouts += 1
+                if self._timeouts < _SLOW_REPLIES_BEFORE_BACKOFF:
+                    return None
+            self._timeouts = 0
             self._down_until = time.monotonic() + 5.0
             return None
 
@@ -122,9 +139,13 @@ class RootsClient:
                 self._pending.add(payload["trace_id"])
             elif event == "mode":
                 self._mode_checked = 0.0
+                self._mode_trace_id = None
+                self._globally_off = False
             elif event == "hello" and payload.get("enabled") is False:
                 self._mode = "off"
                 self._mode_checked = time.monotonic()
+                self._mode_trace_id = None
+                self._globally_off = True
 
     # ---------------------------------------------------------------- notes
 
@@ -132,15 +153,23 @@ class RootsClient:
     def mode(self) -> str:
         return self._mode
 
+    def mode_for(self, trace_id: str) -> str:
+        """The last mode belongs only to its trace; a new run must flush and ask."""
+        with self._lock:
+            if self._globally_off and time.monotonic() - self._mode_checked < 10.0:
+                return "off"
+            return self._mode if self._mode_trace_id == trace_id else "unknown"
+
     def _should_claim(self, trace_id: str) -> bool:
         if self.disabled:
             return False
         now = time.monotonic()
         with self._lock:
+            mode = self._mode if self._mode_trace_id == trace_id or self._globally_off else "unknown"
             # A project with steering off is re-checked every 10 s rather than on every call.
-            if self._mode == "off" and now - self._mode_checked < 10.0 and trace_id not in self._pending:
+            if mode == "off" and now - self._mode_checked < 10.0 and trace_id not in self._pending:
                 return False
-            if self._mode in {"advisory", "self-check"} and self._sse_connected and trace_id not in self._pending:
+            if mode in {"advisory", "self-check"} and self._sse_connected and trace_id not in self._pending:
                 # Nothing pending for this run; skip the round trip.
                 return now - self._mode_checked > 10.0
         return True
@@ -161,8 +190,11 @@ class RootsClient:
         with self._lock:
             self._mode = res.get("mode") or "unknown"
             self._mode_checked = time.monotonic()
+            self._mode_trace_id = trace_id
+            self._globally_off = False
             note = res.get("note")
-            if not note:
+            # A note that arrives with steering off (an older neatroots) is not used.
+            if not note or self._mode == "off":
                 self._pending.discard(trace_id)
                 return None
         return Note(note.get("id", ""), note.get("kind", "template"), note.get("text", ""), note.get("finding_id"))

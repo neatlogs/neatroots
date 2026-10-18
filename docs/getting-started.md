@@ -93,7 +93,7 @@ neatroots llm local                                    # back to this machine on
 You can also do this in the app under **Settings → Models**.
 
 - **Providers:** Anthropic, OpenAI, OpenRouter, Google Gemini, Groq, Mistral, Together AI, and any OpenAI-compatible server (`neatroots llm use custom --base-url https://…/v1 --model …`). `neatroots llm providers` lists them, and `neatroots llm models <provider>` lists a provider's models.
-- **What is sent:** when a hosted LLM is on, the run content each LLM task needs is sent to that provider. Keys, tokens and private keys are removed first. `--redact all` also removes emails and phone numbers, though that can stop the personal-data check from seeing a leak. Rules, stored runs and the app stay on your machine.
+- **What is sent:** when a hosted LLM is on, the run content each LLM task needs is sent to that provider. Credentials are removed first: API keys, bearer tokens, JWTs, `Basic` authorization, AWS secret keys, passwords in URLs and private keys (the full list is in [cloud.md](cloud.md)). `--redact all` also removes emails and phone numbers, though that can stop the personal-data check from seeing a leak. Rules, stored runs and the app stay on your machine.
 - **Fallback:** if the provider fails or has no key, neatroots falls back to the local LLM. Turn this off with `--no-fallback`.
 - **Cost:** neatroots asks the LLM a few questions per run while Laya is learning, and more when it investigates a problem. Pick a smaller model, such as `claude-haiku-5-5`, if your agent runs a lot.
 
@@ -106,7 +106,7 @@ Rules are instant. Questions take as long as the model answering them: with a lo
 Checks are yes/no questions, so neatroots uses a decision model built for them. Pick one:
 
 - **Laya** (local): an open 421M-parameter model on this machine. Free and private; a one-time download of about 1.4 GB. It starts in shadow mode and takes over each question once it agrees with your LLM on 90% of 30 answers. `neatroots laya install` downloads it now; `neatroots laya skip` records that you don't want it.
-- **Jev cloud** (hosted, opt-in): TypeSafe's typed-decision API. The span content a question needs is sent to TypeSafe.
+- **Jev cloud** (hosted, opt-in): TypeSafe's typed-decision API. The span content a question needs is sent to TypeSafe. Credentials are removed first, as for a hosted LLM (`llm.external.redact`); a Jev server on this machine gets the original text.
 
 Without either, your LLM answers every question, which works but is slower. To use Jev cloud:
 
@@ -158,7 +158,7 @@ const client = neatlogs.wrapOpenAI(new OpenAI()); // use this client for your ca
 - `flush_interval=0.5` (`flushInterval` in TypeScript) sends spans every half second, so neatroots can check a run while it is still going.
 - In production, unset `NEATLOGS_ENDPOINT` and the same code sends to Neatlogs Cloud.
 
-In your agent's repository, `neatroots init --project refund-agent --write-env` writes the two variables to `.env` and adds a `.neatroots/checks/` folder for checks your team shares. To check the path end to end with the SDK's own doctor: `python -m neatlogs doctor --probe`.
+In your agent's repository, `neatroots init --project refund-agent --write-env` writes the two variables to `.env` and adds a `.neatroots/checks/` folder for checks your team shares. The SDKs read the environment, not `.env`, so load it when you start the agent: `set -a; . ./.env; set +a` in the shell, `dotenv run -- python agent.py` (or `load_dotenv()` before `neatlogs.init`), or `node --env-file=.env agent.js`. Without that the agent runs normally and neatroots records nothing. To check the path end to end with the SDK's own doctor: `python -m neatlogs doctor --probe`.
 
 ### Other ways in
 
@@ -170,6 +170,13 @@ In your agent's repository, `neatroots init --project refund-agent --write-env` 
 | Neatlogs HTTP trace API | `POST http://localhost:4100/v1/trace` with one JSON tree per trace; `children` sets the hierarchy and neatroots makes the ids. See `examples/http-api` |
 | OpenTelemetry over HTTP | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4100/v1/traces` (protobuf or JSON) |
 | OpenTelemetry over gRPC | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317`, `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc` |
+
+Browser traces are accepted from pages served on this machine (`localhost`, `127.0.0.1`, `[::1]`, any port). To send from a page on another origin, such as a staging site, list it in `config.yaml`, so no other website you have open can write runs that your coding agent then reads:
+
+```yaml
+ingest:
+  allowedOrigins: ["https://staging.example.com"]   # "*" accepts every website
+```
 
 With OpenTelemetry, `OTEL_SERVICE_NAME` becomes the project. neatroots reads Neatlogs, OpenInference, OpenLLMetry (`traceloop.*`), GenAI semantic-convention and Vercel AI SDK attributes, so LLM messages, tool calls, models and tokens show up whichever instrumentation you use.
 
@@ -272,7 +279,7 @@ For TypeScript, run `npm install ~/.neatroots/app/steer/ts` and see [steering.md
 
 Limits:
 - At most one note per LLM call and three per run.
-- Only rules you write with `action: halt` can stop a run.
+- Only rules you write with `action: halt` can stop a run, and only while steering is on for the project.
 - `neatroots steering stop` turns steering off everywhere at once. The sidebar switch does the same.
 
 ## 9. Coding agents
@@ -327,7 +334,7 @@ Importing goes the other way and needs a different credential: a Neatlogs servic
 | --- | --- | --- |
 | Collector, rules, Laya, local LLM, storage, app, MCP | On | Nothing; all local |
 | Hosted LLM | Off | Run content each LLM task needs, minus secrets, to the provider you choose |
-| Jev cloud | Off | Span content a question needs, to api.typesafe.ai |
+| Jev cloud | Off | Span content a question needs, credentials removed, to api.typesafe.ai |
 | Neatlogs Cloud forward | Off | Runs you send or a project you forward, redacted first, to ingest.neatlogs.com |
 | Neatlogs Cloud import | Off | Requests to app.neatlogs.com with your service-account token |
 | Coding agents in the app | Off | Whatever Claude Code or Codex sends to their providers, as when you run them yourself |
@@ -352,7 +359,7 @@ neatroots listens on 127.0.0.1 only. API keys live in the macOS Keychain (on Lin
 | `neatroots models`, `neatroots laya install / skip / status`, `neatroots jev login / on / off` | Decision models: Laya (local) or Jev cloud |
 | `neatroots steering <mode> --project <name>`, `neatroots steering stop` | Steering |
 | `neatroots checks list`, `neatroots checks validate <file>` | Checks |
-| `neatroots check <files...>` | Rule checks over saved traces, exit 1 if any fires (`--only`, `--checks`, `--json`) |
+| `neatroots check <files...>` | Rule checks over saved traces: exit 0 when clean, 1 if a rule fires, 2 for invalid input or check configuration (`--only`, `--checks`, `--json`) |
 | `neatroots cloud login / forward / auto` | Neatlogs Cloud: send runs |
 | `neatroots cloud token`, `neatroots cloud project` | Neatlogs Cloud: the service-account token and project imports read from |
 | `neatroots connect` | Give coding agents neatroots' MCP tools |
@@ -379,7 +386,7 @@ Uninstalling keeps `~/.neatroots`, which holds your runs, settings and Laya. Del
 | Runs appear only at the end | Set `flush_interval=0.5` in `neatlogs.init` |
 | An example fails with a connection error | Start the mock LLM (`neatroots mock-llm`) in another terminal |
 | "No LLM" in the sidebar | Start Ollama (`ollama serve`) and pull a model, or turn on a hosted LLM. Rules still run without one |
-| Laya failed to install | Run `neatroots laya install` to see the error (it needs `uv` or Python 3.10+). neatroots works without Laya: the LLM answers instead |
+| Laya failed to install | Run `neatroots laya install` to see the error. It needs `uv`, or Python 3.10+ with its matching `python3.x-venv` package on Ubuntu/Debian. Fix the prerequisite and retry; neatroots removes an incomplete environment automatically. neatroots works without Laya: the LLM answers instead |
 | Hosted LLM errors | `neatroots llm` shows the error. "Rejected the key": run `neatroots llm login <provider>` again. "Model not found": check `neatroots llm models <provider>` |
 | Replay says it doesn't know how to start the agent | Register a command or endpoint: `neatroots rerun add <project> "<command>"`, or Settings → Projects |
 | A file won't import | It must be OTLP JSON, a Neatlogs trace export or Neatlogs HTTP traces (one per line in .jsonl); the error says what didn't parse |
@@ -389,3 +396,4 @@ Uninstalling keeps `~/.neatroots`, which holds your runs, settings and Laya. Del
 | Claude Desktop shows "Not connected" after connecting | Claude Desktop rewrites its settings while it runs. Quit it (⌘Q), run `neatroots connect claude-desktop`, then reopen it |
 | Steering notes never arrive | Turn steering on for the project, install the hook, and set `NEATROOTS_STEER_DEBUG=1` in the agent to see what the hook does |
 | Where are the logs? | The terminal running `neatroots start`, or `~/.neatroots/logs/neatroots.log` for the background service. `NEATROOTS_DEBUG=1` adds detail |
+| `~/.neatroots` doesn't get smaller after old runs are removed | That's expected. Past the size cap (Settings → Storage), the oldest unpinned runs are removed until the data is back to 90% of the cap, but the database file keeps its size and reuses the freed space for new runs. So the cap stops it growing; lowering the cap doesn't shrink the folder, and "On disk" can read above the cap |

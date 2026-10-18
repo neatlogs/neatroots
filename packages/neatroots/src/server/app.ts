@@ -10,10 +10,11 @@ import { mountApi } from "./api.js";
 import { mountMcpHttp } from "../mcp/http.js";
 import { log } from "../util/log.js";
 import { VERSION } from "../version.js";
+import { ingestAllowOriginHeader, ingestOriginAllowed } from "./ingest-guard.js";
 
 export { VERSION };
 
-function findUiDir(): string | undefined {
+export function findUiDir(): string | undefined {
   let dir = path.dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 6; i++) {
     for (const candidate of [path.join(dir, "ui"), path.join(dir, "dist", "ui"), path.join(dir, "..", "ui", "dist")]) {
@@ -38,7 +39,9 @@ const MIME: Record<string, string> = {
 /**
  * neatroots listens on loopback only. The Host check blocks DNS-rebinding pages, and the
  * Origin check stops other websites from calling the app API from a browser. The OTLP
- * routes stay open to any origin so browser SDKs can send traces.
+ * routes take browser traces from pages on this machine, and from other sites only when
+ * they are listed in ingest.allowedOrigins, so a website can't plant runs that coding
+ * agents read over MCP.
  */
 function securityMiddleware(roots: Roots) {
   return async (c: import("hono").Context, next: () => Promise<void>) => {
@@ -49,11 +52,17 @@ function securityMiddleware(roots: Roots) {
     const origin = c.req.header("origin");
     const isOtlp = c.req.path.startsWith("/v1/");
     if (isOtlp) {
+      const { allowedOrigins } = roots.config.ingest;
+      if (!ingestOriginAllowed(origin, allowedOrigins)) {
+        return c.json({ error: `traces from ${origin} are not accepted; add this origin to ingest.allowedOrigins in config.yaml to send from that page` }, 403);
+      }
+      const allowOrigin = ingestAllowOriginHeader(origin, allowedOrigins);
       if (c.req.method === "OPTIONS") {
         return new Response(null, {
           status: 204,
           headers: {
-            "access-control-allow-origin": "*",
+            "access-control-allow-origin": allowOrigin,
+            vary: "origin",
             "access-control-allow-methods": "POST, OPTIONS",
             "access-control-allow-headers": "content-type, content-encoding, authorization, x-api-key, x-neatlogs-doctor",
             "access-control-max-age": "86400",
@@ -61,7 +70,8 @@ function securityMiddleware(roots: Roots) {
         });
       }
       await next();
-      c.res.headers.set("access-control-allow-origin", "*");
+      c.res.headers.set("access-control-allow-origin", allowOrigin);
+      c.res.headers.append("vary", "origin");
       return;
     }
     if (origin) {
@@ -73,8 +83,24 @@ function securityMiddleware(roots: Roots) {
   };
 }
 
+/**
+ * No other site may frame the app: a hidden frame could click through actions such as starting
+ * a coding-agent chat with shell commands. Set on every response, refusals included.
+ */
+async function frameHeaders(c: import("hono").Context, next: () => Promise<void>) {
+  await next();
+  try {
+    c.res.headers.set("content-security-policy", "frame-ancestors 'none'");
+    c.res.headers.set("x-frame-options", "DENY");
+    c.res.headers.set("x-content-type-options", "nosniff");
+  } catch {
+    /* a response with immutable headers (none today) keeps its own */
+  }
+}
+
 export function createApp(roots: Roots): Hono {
   const app = new Hono();
+  app.use("*", frameHeaders);
   app.use("*", securityMiddleware(roots));
   // Errors answer as JSON like every other API error: a bad request with its message, anything
   // unexpected as a 500 (logged, never with a stack in the response).
@@ -102,9 +128,16 @@ export function createApp(roots: Roots): Hono {
         `<!doctype html><title>neatroots</title><body style="font-family:system-ui;padding:2rem"><h1>neatroots is running</h1><p>The app UI is not built. Run <code>pnpm build</code> in the neatroots repo.</p><p>Collector: <code>POST /v1/traces</code></p></body>`,
       );
     }
-    const rel = decodeURIComponent(c.req.path).replace(/^\/+/, "");
+    let rel = "";
+    try {
+      rel = decodeURIComponent(c.req.path).replace(/^\/+/, "");
+    } catch {
+      // A malformed percent-escape is an unknown path, not a server error: the fallback below serves the app shell.
+    }
     let file = path.join(uiDir, rel);
-    if (!file.startsWith(uiDir) || !rel || !fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(uiDir, "index.html");
+    // Append path.sep before the prefix check so a sibling directory whose name starts
+    // with the same string as uiDir (e.g. ui-x/) cannot be reached via path traversal.
+    if (!file.startsWith(uiDir + path.sep) || !rel || !fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(uiDir, "index.html");
     const ext = path.extname(file);
     const headers: Record<string, string> = { "content-type": MIME[ext] ?? "application/octet-stream" };
     if (rel.startsWith("assets/")) headers["cache-control"] = "public, max-age=31536000, immutable";
@@ -113,10 +146,18 @@ export function createApp(roots: Roots): Hono {
   return app;
 }
 
+function isLoopback(host: string): boolean {
+  return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(host.toLowerCase()) || host.startsWith("127.");
+}
+
 export function startServer(roots: Roots, app: Hono): Promise<ServerType> {
   return new Promise((resolve, reject) => {
     const server = serve({ fetch: app.fetch, port: roots.config.port, hostname: roots.config.host }, (info) => {
       log.info(`listening on http://localhost:${info.port}`);
+      if (!isLoopback(roots.config.host)) {
+        // The API has no login: anyone who can reach this address can read runs and start agent chats.
+        log.warn(`host is ${roots.config.host}, so neatroots is reachable from other machines on ${roots.config.host}:${info.port} with no login. Set host: 127.0.0.1 in config.yaml unless you mean this.`);
+      }
       resolve(server);
     });
     server.on("error", reject);

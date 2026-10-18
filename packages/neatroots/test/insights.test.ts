@@ -4,15 +4,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Store } from "../src/store/db.js";
 import { computeInsights } from "../src/store/insights.js";
 import { digestData, groundedNumbers } from "../src/engine/digest.js";
-import { batch, hex, llmSpan, span, tmpHome, toolSpan } from "./helpers.js";
+import { batch, closeTrackedStores, hex, llmSpan, span, tmpHome, toolSpan, trackedStore } from "./helpers.js";
 
 const homes: string[] = [];
 function store(): Store {
   const h = tmpHome();
   homes.push(h);
-  return new Store(path.join(h, "data"));
+  return trackedStore(path.join(h, "data"));
 }
 afterEach(() => {
+  closeTrackedStores();
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 
@@ -72,6 +73,31 @@ describe("insights", () => {
 
     // Runs filtered by a problem's check.
     expect(st.listRuns({ checkId: "ignored-tool-error" }).map((r) => r.trace_id).sort()).toEqual([runs[0], runs[1]].sort());
+  });
+
+  it("leaves quiet findings out of the problems list, the trend and the clean lists", () => {
+    const st = store();
+    const runs = [run(st, "refund-agent", true), run(st, "refund-agent", true), run(st, "refund-agent", true)];
+    const base = { check_kind: "question" as const, probability: 0.9, evidence_span_ids: [], detail: {}, model: null, triage_score: 3, explanation_id: null };
+    const title = "Carried on after a failed tool call";
+    st.insertFinding({ ...base, trace_id: runs[0], check_id: "ignored-tool-error", title, status: "raised" });
+    st.insertFinding({ ...base, trace_id: runs[1], check_id: "ignored-tool-error", title, status: "quiet" });
+    st.insertFinding({ ...base, trace_id: runs[2], check_id: "ignored-tool-error", title, status: "quiet" });
+
+    const i = computeInsights(st.db, "7d", CHECKS);
+    expect(i.problems).toHaveLength(1);
+    expect(i.problems[0]).toMatchObject({ check_id: "ignored-tool-error", runs: 1, dismissed: 0 });
+    expect(i.totals.with_problems).toBe(1);
+
+    // A check whose findings all went quiet is not a problem, and it isn't one that found nothing either.
+    const quietOnly = store();
+    for (const t of [run(quietOnly, "refund-agent", true), run(quietOnly, "refund-agent", true)]) {
+      quietOnly.insertFinding({ ...base, trace_id: t, check_id: "ignored-tool-error", title, status: "quiet" });
+    }
+    const q = computeInsights(quietOnly.db, "7d", CHECKS);
+    expect(q.problems).toHaveLength(0);
+    expect(q.totals.with_problems).toBe(0);
+    expect(q.passing.map((p) => p.check_id)).not.toContain("ignored-tool-error");
   });
 
   it("lets the digest quote only numbers that are in the data", () => {

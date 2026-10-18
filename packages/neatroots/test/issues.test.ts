@@ -20,8 +20,8 @@ async function served(): Promise<TestRoots> {
 
 const post = (url: string, path: string, body: string) => fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body });
 
-describe("spans whose parents point at each other (#11)", () => {
-  it("still serve the conversation and the outline, with every span listed once", async () => {
+describe("spans whose parents point at each other (#11, #228)", () => {
+  it("still serve the conversation, outline, and span context with each span listed once", async () => {
     const tb = await served();
     const t = hex(16);
     const [a, b] = [hex(8), hex(8)];
@@ -34,6 +34,19 @@ describe("spans whose parents point at each other (#11)", () => {
     const r = (await client.callTool({ name: "get_run_outline", arguments: { trace_id: t } })) as { content: { text: string }[] };
     const outline = JSON.parse(r.content[0].text).outline as string;
     expect(outline.split("\n").filter((l) => l.includes("agent-a") || l.includes("tool-b"))).toHaveLength(2);
+
+    const ctxA = (await client.callTool({ name: "get_span_context", arguments: { trace_id: t, span_id: a } })) as { content: { text: string }[] };
+    const parsedCtxA = JSON.parse(ctxA.content[0].text) as { span: { name: string }; ancestors: { name: string }[] };
+    expect(parsedCtxA.span.name).toBe("agent-a");
+    expect(parsedCtxA.ancestors).toHaveLength(1);
+    expect(parsedCtxA.ancestors[0].name).toBe("tool-b");
+
+    const ctxB = (await client.callTool({ name: "get_span_context", arguments: { trace_id: t, span_id: b } })) as { content: { text: string }[] };
+    const parsedCtxB = JSON.parse(ctxB.content[0].text) as { span: { name: string }; ancestors: { name: string }[] };
+    expect(parsedCtxB.span.name).toBe("tool-b");
+    expect(parsedCtxB.ancestors).toHaveLength(1);
+    expect(parsedCtxB.ancestors[0].name).toBe("agent-a");
+
     await client.close();
   });
 });

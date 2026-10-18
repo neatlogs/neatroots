@@ -1,4 +1,5 @@
 import type { RootsConfig } from "../config.js";
+import { TRUST_MIN_AGREEMENT, TRUST_MIN_SAMPLES } from "./decision.js";
 import { LAYA_DOWNLOAD_MB } from "./laya.js";
 
 // Laya is a download of about 1.4 GB, so neatroots asks before fetching it and says why it exists.
@@ -26,6 +27,17 @@ export function layaNextSteps(consent: LayaConsent): string {
   return consent === "yes"
     ? "✓ Laya downloads in the background the first time neatroots starts (neatroots laya install does it now)."
     : "Skipped Laya. Set up Jev cloud for check answers: neatroots jev login && neatroots jev on. Change your mind any time: neatroots laya install, or Settings → Decision model.";
+}
+
+/** How Laya takes over from the LLM (the trust thresholds in decision.ts). */
+export function layaTakeover(): string {
+  return `takes over each question once it agrees with your LLM on ${Math.round(TRUST_MIN_AGREEMENT * 100)}% of ${TRUST_MIN_SAMPLES} answers`;
+}
+
+/** What `neatroots laya allow` reports. `live`: a running neatroots took the answer. */
+export function layaAllowed(installed: boolean, live: boolean): string {
+  if (!installed) return live ? "✓ Laya is downloading in the background; Settings → Decision model shows progress." : layaNextSteps("yes");
+  return `✓ Laya is installed and ${live ? "on" : "starts with neatroots"}. It ${layaTakeover()} (Settings → Decision model shows how far it is).`;
 }
 
 /** Whether neatroots should ask: Laya is on, not installed, and the person hasn't answered yet. */

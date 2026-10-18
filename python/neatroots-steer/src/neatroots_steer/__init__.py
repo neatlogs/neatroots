@@ -47,7 +47,7 @@ __all__ = [
     "replay_overrides",
 ]
 
-__version__ = "0.2.8"
+__version__ = "0.2.9"
 
 logger = logging.getLogger("neatroots_steer")
 
@@ -156,7 +156,7 @@ def guidance(trace_id: Optional[str] = None) -> Optional[Note]:
     if not trace_id:
         return None
     gate_ms = None
-    if client.mode in ("gate", "unknown"):
+    if client.mode_for(trace_id) in ("gate", "unknown"):
         # Push finished spans to neatroots first so it can check the latest step (and, the
         # first time, learn which project this run belongs to). neatroots only waits in gate mode.
         _flush_sdk()
@@ -329,24 +329,54 @@ def _wrap_method(
         setattr(owner, name, wrapper)
 
 
+def _wrap_factory(owner: Any, name: str) -> None:
+    """Wrap a method that builds a new client (``with_options``, ``copy``) so the copy is wrapped too."""
+    original = getattr(owner, name, None)
+    if original is None or getattr(original, "__neatroots_wrapped__", False):
+        return
+
+    @functools.wraps(original)
+    def factory(*args: Any, **kwargs: Any) -> Any:
+        return wrap(original(*args, **kwargs))
+
+    factory.__neatroots_wrapped__ = True  # type: ignore[attr-defined]
+    setattr(owner, name, factory)
+
+
 def wrap(client: Any) -> Any:
     """Adds neatroots guidance to an OpenAI or Anthropic client (sync or async), in place, and returns it.
 
     During a neatroots replay it also applies the model and system prompt the replay asked for.
 
-    Covers chat.completions.create, responses.create (OpenAI) and messages.create (Anthropic).
+    Covers chat.completions.create/parse and responses.create/parse (OpenAI) and
+    messages.create/stream/parse (Anthropic), plus the client that ``with_options`` or ``copy``
+    returns. OpenAI's ``stream()`` goes through ``create``, so it is not wrapped on its own.
     Wrap the client you pass to your agent; tracing by the Neatlogs SDK still records the call.
     """
     chat = getattr(client, "chat", None)
     completions = getattr(chat, "completions", None) if chat is not None else None
+    recognized = False
     if completions is not None:
-        _wrap_method(completions, "create", lambda kw, note: {**kw, "messages": apply(list(kw.get("messages") or []), note)}, _override_chat)
+        recognized = True
+        apply_chat = lambda kw, note: {**kw, "messages": apply(list(kw.get("messages") or []), note)}  # noqa: E731
+        _wrap_method(completions, "create", apply_chat, _override_chat)
+        _wrap_method(completions, "parse", apply_chat, _override_chat)
     responses = getattr(client, "responses", None)
     if responses is not None and hasattr(responses, "create"):
-        _wrap_method(responses, "create", lambda kw, note: {**kw, "input": _apply_responses_input(kw.get("input"), note)}, _override_responses)
+        recognized = True
+        apply_responses = lambda kw, note: {**kw, "input": _apply_responses_input(kw.get("input"), note)}  # noqa: E731
+        _wrap_method(responses, "create", apply_responses, _override_responses)
+        _wrap_method(responses, "parse", apply_responses, _override_responses)
     messages = getattr(client, "messages", None)
     if messages is not None and hasattr(messages, "create") and completions is None:
-        _wrap_method(messages, "create", lambda kw, note: {**kw, "messages": apply_anthropic(copy.copy(list(kw.get("messages") or [])), note)}, _override_anthropic)
+        recognized = True
+        apply_messages = lambda kw, note: {**kw, "messages": apply_anthropic(copy.copy(list(kw.get("messages") or [])), note)}  # noqa: E731
+        _wrap_method(messages, "create", apply_messages, _override_anthropic)
+        _wrap_method(messages, "stream", apply_messages, _override_anthropic)
+        _wrap_method(messages, "parse", apply_messages, _override_anthropic)
+    if recognized:
+        _wrap_factory(client, "with_options")
+        _wrap_factory(client, "copy")
     return client
 
 

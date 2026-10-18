@@ -49,7 +49,7 @@ describe("engine", () => {
     expect(tb.roots.store.notesForTrace(t)).toEqual([]);
   });
 
-  it("stops delivering a queued note once steering is turned off (but still halts)", async () => {
+  it("delivers nothing once steering is turned off, a halt included", async () => {
     const { tb } = await setup();
     tb.roots.steering.setMode("test-agent", "advisory");
     const { t, root } = startRun(tb);
@@ -58,9 +58,9 @@ describe("engine", () => {
     // user turns steering off while the note is still pending
     tb.roots.steering.setMode("test-agent", "off");
     expect(tb.roots.steering.claim(t, null)).toBeUndefined();
-    // a halt note still gets through
-    tb.roots.steering.push({ traceId: t, findingId: null, kind: "halt", text: "stop" });
-    expect(tb.roots.steering.claim(t, null)?.kind).toBe("halt");
+    // off means off (docs/steering.md): no halt is queued or delivered either
+    expect(tb.roots.steering.push({ traceId: t, findingId: null, kind: "halt", text: "stop" })).toBeUndefined();
+    expect(tb.roots.steering.claim(t, null)).toBeUndefined();
   });
 
   it("plans, asks questions, triages and summarizes at run end", async () => {
@@ -106,6 +106,80 @@ describe("engine", () => {
     const exp = await tb.roots.engine!.explainRun(t, { force: true });
     expect(exp?.cause).toContain("order id");
     expect(exp?.grounding).not.toBeNull();
+  });
+
+  it("keeps a steering note the run ended too soon to get, as not sent", async () => {
+    const { tb } = await setup();
+    tb.roots.steering.setMode("test-agent", "advisory");
+    const emitted: { status: string; finding_id: string | null }[] = [];
+    tb.roots.bus.on("note", (n) => emitted.push(n));
+    const { t, root } = startRun(tb);
+    // End the run FIRST (fast run), then the repeated-tool-call finding fires late.
+    tb.roots.ingest([batch([span({ traceId: t, spanId: root, name: "refund", kind: "workflow" }), markerSpan(t, root)])]);
+    for (let i = 0; i < 3; i++) tb.roots.ingest([batch([toolSpan(t, root, "lookup_order", '{"order_id":"4512"}', undefined, "404")])]);
+    const f = await until(() => tb.roots.store.findingsForTrace(t).find((x) => x.check_id === "repeated-tool-call"));
+    expect(f.status).toBe("raised");
+    // The guidance is not silently lost: it's kept as a not-sent note, and the app is told.
+    const note = await until(() => tb.roots.store.notesForTrace(t).find((n) => n.finding_id === f.id));
+    expect(note.status).toBe("expired");
+    expect(note.kind).toBe("template");
+    expect(emitted.some((n) => n.finding_id === f.id && n.status === "expired")).toBe(true);
+    expect(tb.roots.store.notesForTrace(t).some((n) => n.status === "delivered")).toBe(false);
+  });
+
+  it("keeps the note when a whole fast run arrives in one batch", async () => {
+    const { tb } = await setup();
+    tb.roots.steering.setMode("test-agent", "advisory");
+    const t = hex(16);
+    const root = hex(8);
+    const call = () => toolSpan(t, root, "lookup_order", '{"order_id":"4512"}', undefined, "404: not found");
+    tb.roots.ingest([
+      batch([
+        llmSpan(t, root, { system: "You are a refund agent.", user: "Refund order 4512", toolCalls: [{ name: "lookup_order", args: '{"order_id":"4512"}' }], tools: ["lookup_order"] }),
+        call(),
+        call(),
+        call(),
+        span({ traceId: t, spanId: root, name: "refund", kind: "workflow" }),
+        markerSpan(t, root),
+      ]),
+    ]);
+    const f = await until(() => tb.roots.store.findingsForTrace(t).find((x) => x.check_id === "repeated-tool-call"));
+    const note = await until(() => tb.roots.store.notesForTrace(t).find((n) => n.finding_id === f.id));
+    expect(note.status).toBe("expired"); // was: no note at all (push() refused a run that wasn't running)
+    await tb.roots.engine!.waitIdle(t, 5000);
+    // tool-error-streak is about the same calls; a live run would get one note, so this keeps one
+    expect(tb.roots.store.findingsForTrace(t).some((x) => x.check_id === "tool-error-streak")).toBe(true);
+    expect(tb.roots.store.notesForTrace(t)).toHaveLength(1);
+  });
+
+  it("doesn't show end-of-run checks or Re-run checks as missed steering", async () => {
+    const { tb } = await setup();
+    tb.roots.steering.setMode("test-agent", "advisory");
+    const { t, root } = startRun(tb);
+    for (let i = 0; i < 3; i++) tb.roots.ingest([batch([toolSpan(t, root, "lookup_order", '{"order_id":"4512"}', undefined, "404: not found")])]);
+    await until(() => tb.roots.store.notesForTrace(t, "pending").length > 0); // steered while running
+    // ends with an empty final answer: the run_end rule fires in the end-of-run pass
+    tb.roots.ingest([batch([llmSpan(t, root, { user: "continue", out: "" }), span({ traceId: t, spanId: root, name: "refund", kind: "workflow" }), markerSpan(t, root)])]);
+    const endOnly = await until(() => tb.roots.store.findingsForTrace(t).find((x) => x.check_id === "empty-final-answer"));
+    await tb.roots.engine!.waitIdle(t, 5000);
+    const noteFor = (id: string) => tb.roots.store.notesForTrace(t).filter((n) => n.finding_id === id);
+    expect(noteFor(endOnly.id)).toEqual([]); // could never have been steered
+    // Re-run checks on the finished run: nothing new shows as not sent
+    const before = tb.roots.store.notesForTrace(t).length;
+    await tb.roots.engine!.recheck(t);
+    await tb.roots.engine!.waitIdle(t, 5000);
+    expect(tb.roots.store.notesForTrace(t).length).toBe(before);
+  });
+
+  it("stays silent when steering is off and the run ended (no missed-note record)", async () => {
+    const { tb } = await setup();
+    // steering NOT enabled for this project
+    const { t, root } = startRun(tb);
+    tb.roots.ingest([batch([span({ traceId: t, spanId: root, name: "refund", kind: "workflow" }), markerSpan(t, root)])]);
+    for (let i = 0; i < 3; i++) tb.roots.ingest([batch([toolSpan(t, root, "lookup_order", '{"order_id":"4512"}', undefined, "404")])]);
+    await until(() => tb.roots.store.findingsForTrace(t).find((x) => x.check_id === "repeated-tool-call"));
+    await tb.roots.engine!.waitIdle(t, 5000);
+    expect(tb.roots.store.notesForTrace(t)).toEqual([]);
   });
 });
 

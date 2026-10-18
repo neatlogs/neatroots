@@ -106,4 +106,38 @@ describe("OTLP codec", () => {
     // a valid (possibly empty) array is still fine
     expect(decodeTraceJson({ resourceSpans: [] } as any)).toEqual([]);
   });
+
+  it("normalizes non-string status.message to string without dropping or throwing", () => {
+    const traceId = hex(16);
+    const spanId = hex(8);
+    const body = {
+      resourceSpans: [
+        {
+          resource: { attributes: [] },
+          scopeSpans: [
+            {
+              scope: { name: "x" },
+              spans: [
+                {
+                  traceId,
+                  spanId,
+                  name: "obj-msg",
+                  status: { code: 2, message: { text: "boom" } },
+                },
+                {
+                  traceId,
+                  spanId: hex(8),
+                  name: "num-msg",
+                  status: { code: 2, message: 500 },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const [b] = decodeTraceJson(body);
+    expect(b.spans[0].status.message).toBe('{"text":"boom"}');
+    expect(b.spans[1].status.message).toBe("500");
+  });
 });

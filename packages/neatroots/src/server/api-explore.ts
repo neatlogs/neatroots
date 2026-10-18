@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import type { Hono } from "hono";
 import type { Roots } from "../core.js";
 import { loadTrace } from "../engine/trace.js";
@@ -6,8 +7,10 @@ import { listCloudProjects, listCloudTraces, NO_CLOUD_TOKEN } from "../ingest/im
 import { cloudImportAuth, cloudImportBase, ImportError, parseTraceFile } from "../ingest/importers/index.js";
 import { deleteCloudToken, getCloudToken, setCloudToken } from "../relay/keychain.js";
 import { buildChat } from "../semantics/chat-view.js";
-import { body, err, isTraceIds } from "./util.js";
+import { body, clampInt, err, isTraceIds } from "./util.js";
 import { runSummary } from "./api.js";
+import { bodyLimit } from "hono/body-limit";
+import type { RunFilter } from "../store/db.js";
 
 // Run views (chat, conversation), search, imports, cloud import, replays and the in-app coding
 // agent. Everything here is local; the cloud and import routes call out only when the user asks.
@@ -21,13 +24,16 @@ export function importSource(roots: Roots, traceId: string): string | null {
   return v && "stringValue" in v && v.stringValue !== "http" && v.stringValue !== "replay" ? v.stringValue : null;
 }
 
+/** The filters search understands. Any other word:value (a URL, host:port) is text to find. */
+const FILTERS = new Set(["project", "status", "kind", "tool", "model", "check", "since", "session", "has"]);
+
 /** `project:x status:failed kind:tool tool:lookup model:gpt has:problems check:id since:7d free text` */
 export function parseSearch(q: string): { text: string; filters: Record<string, string> } {
   const filters: Record<string, string> = {};
   const words: string[] = [];
   for (const m of q.matchAll(/(\w+):("([^"]*)"|\S+)|"([^"]*)"|(\S+)/g)) {
-    if (m[1]) filters[m[1].toLowerCase()] = m[3] ?? m[2];
-    else words.push(m[4] ?? m[5]);
+    if (m[1] && FILTERS.has(m[1].toLowerCase())) filters[m[1].toLowerCase()] = m[3] ?? m[2];
+    else words.push(m[1] ? m[0] : (m[4] ?? m[5]));
   }
   return { text: words.join(" ").trim(), filters };
 }
@@ -63,9 +69,26 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
 
   app.get("/api/search/runs", (c) => {
     const { text, filters } = parseSearch(c.req.query("q") ?? "");
-    const limit = Math.min(100, Number(c.req.query("limit") ?? 50));
+    const limit = clampInt(c.req.query("limit"), 50, 1, 100);
+    const offset = clampInt(c.req.query("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const kind = filters.kind?.toUpperCase();
-    const hits = text ? roots.store.searchSpans(text, 1000) : [];
+    // The store matches every filter and the text in SQL, so the total and the page cover all runs.
+    const filter: RunFilter = {
+      text: text || undefined,
+      project: filters.project,
+      status: filters.status && (STATUS[filters.status.toLowerCase()] ?? filters.status),
+      sessionId: filters.session,
+      checkId: filters.check,
+      hasOpenFinding: filters.has === "problems",
+      sinceMs: sinceMs(filters.since),
+      spanKind: kind,
+      tool: filters.tool,
+      model: filters.model,
+    };
+    const runs = roots.store.listRuns({ ...filter, limit, offset });
+    // Snippets only for the runs on this page, at most five each.
+    // One run with over 1000 matching spans can crowd out the rest of the page's snippets.
+    const hits = text && runs.length ? roots.store.searchSpans(text, 1000, runs.map((r) => r.trace_id)) : [];
     const byRun = new Map<string, { span_id: string; name: string; snippet: string; kind?: string }[]>();
     const kinds = new Map<string, string>();
     if (hits.length && (kind || filters.tool || filters.model)) {
@@ -83,24 +106,7 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
       if (list.length < 5) list.push({ span_id: h.span_id, name: h.name, snippet: h.snippet, kind: kinds.get(`${h.trace_id}:${h.span_id}`) });
       byRun.set(h.trace_id, list);
     }
-    let runs = text
-      ? [...byRun.keys()].map((id) => roots.store.getRun(id)).filter((r): r is NonNullable<typeof r> => !!r)
-      : roots.store.listRuns({ limit: 500, sinceMs: sinceMs(filters.since) });
-    runs = runs.filter((r) => {
-      if (filters.project && r.project !== filters.project) return false;
-      if (filters.status && r.status !== (STATUS[filters.status.toLowerCase()] ?? filters.status)) return false;
-      if (filters.session && r.session_id !== filters.session) return false;
-      if (filters.has === "problems" && !r.open_finding_count) return false;
-      if (filters.since && (r.started_ms ?? 0) < (sinceMs(filters.since) ?? 0)) return false;
-      if (filters.check && !roots.store.listFindings({ traceId: r.trace_id, checkId: filters.check }).length) return false;
-      if (!text && (kind || filters.tool || filters.model)) {
-        const spans = roots.store.getSpans(r.trace_id);
-        return spans.some((s) => (!kind || s.span_kind === kind) && (!filters.tool || (s.tool_name ?? "").includes(filters.tool)) && (!filters.model || (s.model ?? "").includes(filters.model)));
-      }
-      return true;
-    });
-    runs.sort((a, b) => (b.started_ms ?? 0) - (a.started_ms ?? 0));
-    return c.json({ query: { text, filters }, total: runs.length, runs: runs.slice(0, limit).map((r) => ({ ...runSummary(roots, r), hits: byRun.get(r.trace_id) ?? [] })) });
+    return c.json({ query: { text, filters }, total: roots.store.countMatchingRuns(filter), runs: runs.map((r) => ({ ...runSummary(roots, r), hits: byRun.get(r.trace_id) ?? [] })) });
   });
 
   // --------------------------------------------------------------- imports
@@ -116,7 +122,9 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
     }
   });
   app.post("/api/imports/:id/cancel", (c) => (roots.imports.cancel(c.req.param("id")) ? c.json({ ok: true }) : err(c, 404, "no running import with that id")));
-  app.post("/api/imports/file", async (c) => {
+  // Same cap as the collector: a bigger body is refused before it is read into memory.
+  const importLimit = bodyLimit({ maxSize: 64 * 1024 * 1024, onError: (c) => err(c, 413, "the file is larger than 64 MB; split it, or send it to /v1/traces in parts") });
+  app.post("/api/imports/file", importLimit, async (c) => {
     const b = await body<{ name?: string; content?: string; project?: string }>(c);
     if (!b.content) return err(c, 400, "content is required");
     try {
@@ -215,8 +223,10 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
     const command = b.command?.trim() || undefined;
     const url = b.url?.trim() || undefined;
     if (url && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//.test(url)) return err(c, 400, "the replay endpoint must be on this machine (http://localhost:…/)");
+    const cwd = b.cwd?.trim() || undefined;
+    if (command && cwd && !(fs.existsSync(cwd) && fs.statSync(cwd).isDirectory())) return err(c, 400, `no such folder: ${cwd}`);
     if (!command && !url) delete roots.config.rerun[project];
-    else roots.config.rerun[project] = { command, cwd: b.cwd?.trim() || undefined, url };
+    else roots.config.rerun[project] = { command, cwd, url };
     roots.saveConfig();
     return c.json({ project, rerun: roots.config.rerun[project] ?? null });
   });
@@ -236,7 +246,7 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   });
   app.get("/api/chat/sessions/:id", (c) => {
     const s = roots.chats.get(c.req.param("id"));
-    return s ? c.json({ session: s, events: roots.chats.events(s.id, Number(c.req.query("after") ?? 0)) }) : err(c, 404, "no such chat");
+    return s ? c.json({ session: s, events: roots.chats.events(s.id, clampInt(c.req.query("after"), 0, 0, Number.MAX_SAFE_INTEGER)) }) : err(c, 404, "no such chat");
   });
   app.patch("/api/chat/sessions/:id", async (c) => {
     const b = await body<{ allow_edits?: boolean; allow_commands?: boolean; title?: string }>(c);
@@ -253,7 +263,7 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   app.post("/api/chat/sessions/:id/messages", async (c) => {
     const id = c.req.param("id");
     const b = await body<{ text: string }>(c);
-    if (!b.text?.trim()) return err(c, 400, "text is required");
+    if (typeof b.text !== "string" || !b.text.trim()) return err(c, 400, "text is required");
     const s = roots.chats.get(id);
     if (!s) return err(c, 404, "no such chat");
     if (s.state === "running") return err(c, 409, "the agent is still answering");

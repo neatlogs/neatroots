@@ -177,12 +177,24 @@ function readJson(file: string): { ok: true; data: Record<string, unknown> } | {
 }
 
 function writeFileSafely(file: string, text: string): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // A config linked from a dotfiles repo is edited where the link points, so the link stays.
+  // The new file keeps the old one's permissions: these files can hold other servers' tokens.
+  let target = file;
+  let mode: number | undefined;
+  try {
+    target = fs.realpathSync(file);
+    mode = fs.statSync(target).mode & 0o777;
+  } catch {
+    /* a new file */
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
   const backup = `${file}.neatroots-backup`;
-  if (fs.existsSync(file) && !fs.existsSync(backup)) fs.copyFileSync(file, backup);
-  const tmp = `${file}.neatroots-tmp`;
-  fs.writeFileSync(tmp, text);
-  fs.renameSync(tmp, file);
+  if (mode !== undefined && !fs.existsSync(backup)) fs.copyFileSync(target, backup);
+  const tmp = `${target}.neatroots-tmp`;
+  fs.rmSync(tmp, { force: true });
+  fs.writeFileSync(tmp, text, { mode: mode ?? 0o666 });
+  if (mode !== undefined) fs.chmodSync(tmp, mode);
+  fs.renameSync(tmp, target);
 }
 
 const KEY: Record<Shape, string> = { mcpServers: "mcpServers", amp: "amp.mcpServers", opencode: "mcp", vscode: "servers" };

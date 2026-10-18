@@ -21,11 +21,13 @@ import { checkFiles } from "./checks/offline.js";
 import { hardwareTier } from "./models/llm.js";
 import { setCloudKey, deleteCloudKey, getCloudKey, getCloudToken } from "./relay/keychain.js";
 import { LAYA_DOWNLOAD_MB } from "./models/laya.js";
-import { askForLaya, layaNextSteps, shouldAskForLaya } from "./models/laya-consent.js";
+import { askForLaya, layaNextSteps, layaTakeover, shouldAskForLaya } from "./models/laya-consent.js";
 import { log } from "./util/log.js";
 
 const program = new Command();
 program.name("neatroots").description("neatroots: local, private checks for AI agents while they run").version(VERSION);
+// Root options only before the command, so `neatroots update --version <tag>` reaches update.
+program.enablePositionalOptions();
 
 // ------------------------------------------------------------------- start
 
@@ -81,7 +83,7 @@ program
       const where = status.llm.where && status.llm.where !== "local" ? `${status.llm.where} (hosted, opt-in)` : `local at ${roots.config.llm.baseUrl}`;
       log.info(status.llm.ok ? `LLM: ${status.llm.model}, ${where}` : `LLM: not available (${status.llm.error}). Rules still run; start Ollama or LM Studio, or turn on a hosted model (neatroots llm use), for questions and explanations.`);
       const layaComing = roots.laya.installed() || roots.config.classifier.laya.consent === "yes";
-      const then = status.decision.backend !== "llm" ? "" : layaComing ? "; Laya takes over when it is ready" : "; Laya or Jev cloud takes over once one is set up";
+      const then = status.decision.backend !== "llm" ? "" : layaComing ? `; Laya ${layaTakeover()}` : "; Laya or Jev cloud takes over once one is set up";
       log.info(status.decision.backend ? `decision model now: ${status.decision.backend}${status.decision.model ? ` (${status.decision.model})` : ""}${then}` : "decision model: none yet");
     }
     if (roots.checks.errors.length) log.warn(`${roots.checks.errors.length} check file problem(s); see the Checks page`);
@@ -155,6 +157,13 @@ program
       set("NEATLOGS_API_KEY", "neatroots-local", true);
       fs.writeFileSync(envPath, text);
       console.log(`✓ .env points the Neatlogs SDK at neatroots`);
+      // The SDKs read the environment, not .env, so without one of these the agent sends nothing (#49).
+      console.log(
+        `→ the SDK doesn't read .env on its own; load it when you start the agent:\n` +
+          `    set -a; . ./.env; set +a          # then run it as usual\n` +
+          `    dotenv run -- python agent.py     # or python-dotenv's load_dotenv() before neatlogs.init\n` +
+          `    node --env-file=.env agent.js`,
+      );
     } else {
       console.log(`→ point the Neatlogs SDK at neatroots (or rerun with --write-env):\n    ${envLines.join("\n    ")}`);
     }
@@ -398,7 +407,7 @@ program
         }
         console.log(`\n${r.runs.length} run${r.runs.length === 1 ? "" : "s"}, ${failed.length} with findings, ${r.rules.length} rules`);
       }
-      process.exit(failed.length ? 1 : 0);
+      process.exit(r.errors.length ? 2 : failed.length ? 1 : 0);
     } catch (e) {
       console.error(`✗ ${(e as Error).message}`);
       process.exit(2);

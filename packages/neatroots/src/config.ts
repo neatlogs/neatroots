@@ -91,8 +91,19 @@ export interface RootsConfig {
     apiBase?: string;
     /** The Neatlogs Cloud project imports read from (x-project-id), for a service account that sees several. */
     projectId?: string;
+    /** Send keys to a cloud endpoint outside *.neatlogs.com (https only), e.g. a self-hosted Neatlogs. */
+    trustEndpoint?: boolean;
     /** User regexes to redact before forwarding, in addition to the built-ins. */
     redactPatterns: string[];
+  };
+  /** Who may write runs to the /v1 collector routes. */
+  ingest: {
+    /**
+     * Web pages allowed to send traces from a browser, as origins (https://staging.example.com).
+     * Pages on this machine (localhost, 127.0.0.1, [::1]) and requests with no Origin (SDKs,
+     * exporters, curl) are always allowed. "*" allows every website.
+     */
+    allowedOrigins: string[];
   };
   /** How to re-run each project's agent (MCP rerun tool, replays): a command, or an HTTP replay endpoint. */
   rerun: Record<string, { command?: string; cwd?: string; url?: string }>;
@@ -141,6 +152,7 @@ export function defaultConfig(): RootsConfig {
     retention: { days: 14, maxGb: 5 },
     steering: { enabled: true, maxNotesPerRun: 3, gateWaitMs: 300 },
     cloud: { endpoint: "https://ingest.neatlogs.com", appUrl: "https://app.neatlogs.com", redactPatterns: [] },
+    ingest: { allowedOrigins: [] },
     rerun: {},
     checkDirs: [],
     projects: {},
@@ -163,14 +175,30 @@ export function configPath(): string {
   return path.join(rootsHome(), "config.yaml");
 }
 
-function deepMerge<T>(base: T, over: unknown): T {
-  if (!over || typeof over !== "object" || Array.isArray(over)) return base;
+const isSection = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * Lays a parsed config.yaml over the defaults. A hand-edited value of the wrong shape is skipped
+ * and its key recorded in `skipped`, so the default stays: a section written as a scalar
+ * (`retention: 5`, `llm: ollama`) would otherwise replace the whole section and crash startup or a
+ * later read. A list setting given as one string (`checkDirs: ./checks`) becomes a one-item list.
+ */
+function deepMerge<T>(base: T, over: unknown, skipped: string[] = [], prefix = ""): T {
+  if (!isSection(over)) return base;
   const out: Record<string, unknown> = { ...(base as Record<string, unknown>) };
-  for (const [k, v] of Object.entries(over as Record<string, unknown>)) {
+  for (const [k, v] of Object.entries(over)) {
+    if (v === undefined || v === null) continue;
+    // No setting has these names; assigning them would change the object's prototype.
+    if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
     const cur = out[k];
-    if (cur && typeof cur === "object" && !Array.isArray(cur) && v && typeof v === "object" && !Array.isArray(v)) {
-      out[k] = deepMerge(cur, v);
-    } else if (v !== undefined && v !== null) {
+    const key = prefix + k;
+    if (isSection(cur)) {
+      if (isSection(v)) out[k] = deepMerge(cur, v, skipped, `${key}.`);
+      else skipped.push(key);
+    } else if (Array.isArray(cur) && !Array.isArray(v)) {
+      if (typeof v === "string") out[k] = [v];
+      else skipped.push(key);
+    } else {
       out[k] = v;
     }
   }
@@ -182,7 +210,9 @@ export function loadConfig(): RootsConfig {
   let cfg = defaultConfig();
   if (fs.existsSync(file)) {
     try {
-      cfg = deepMerge(cfg, YAML.parse(fs.readFileSync(file, "utf8")));
+      const skipped: string[] = [];
+      cfg = deepMerge(cfg, YAML.parse(fs.readFileSync(file, "utf8")), skipped);
+      for (const key of skipped) console.warn(`[neatroots] ignoring ${key} in ${file}: wrong shape, using the default`);
     } catch (err) {
       console.warn(`[neatroots] could not read ${file}: ${(err as Error).message}`);
     }
@@ -194,6 +224,10 @@ export function loadConfig(): RootsConfig {
   if (process.env.NEATROOTS_CLASSIFIER_BACKEND) {
     cfg.classifier.backend = process.env.NEATROOTS_CLASSIFIER_BACKEND as RootsConfig["classifier"]["backend"];
   }
+  // A hand edit may put an origin straight under ingest, or make allowedOrigins a single string.
+  if (!cfg.ingest || typeof cfg.ingest !== "object" || Array.isArray(cfg.ingest)) cfg.ingest = { allowedOrigins: [] };
+  const origins: unknown = cfg.ingest.allowedOrigins;
+  cfg.ingest.allowedOrigins = (Array.isArray(origins) ? origins : typeof origins === "string" ? [origins] : []).filter((o): o is string => typeof o === "string");
   // Clamp retention to the same range the settings API enforces, so a stray
   // value in config.yaml (e.g. days: 0) can't delete every unpinned run.
   if (!Number.isFinite(cfg.retention.days) || cfg.retention.days < 1) cfg.retention.days = 14;
