@@ -97,7 +97,7 @@ test("shows a stale-target error, refreshes identity, and requires a new click",
   });
   await open(page, "home");
   await row(page, "alpha").getByRole("button").click();
-  await expect(row(page, "alpha").getByRole("alert")).toContainText("The newest open finding changed.");
+  await expect(row(page, "alpha").getByRole("alert")).toContainText("Review the refreshed Home row and try again.");
   await expect(row(page, "alpha")).toContainText("1 of 3 dismissals");
   expect(requests).toHaveLength(1);
   await row(page, "alpha").getByRole("button").click();
@@ -116,7 +116,7 @@ test("keeps failures actionable and handles no open findings and empty problem l
   await open(page, "home");
   await expect(row(page, "beta").getByRole("button")).toBeDisabled();
   await row(page, "alpha").getByRole("button").click();
-  await expect(row(page, "alpha").getByRole("alert")).toHaveText("Local store temporarily unavailable");
+  await expect(row(page, "alpha").getByRole("alert")).toHaveText("Could not dismiss this finding. Review the refreshed Home row and try again.");
   await expect(row(page, "alpha").getByRole("button")).toBeEnabled();
   await expect(row(page, "alpha")).toContainText("1 of 3 dismissals");
   expect(requests).toBe(1);
@@ -144,3 +144,31 @@ test("preserves actionable error feedback when the target disappears during refr
   await expect(feedback).not.toContainText("PRIVATE");
   expect(requests).toBe(1);
 });
+
+
+for (const theme of ["light", "dark"] as const) {
+  for (const width of [1440, 390]) {
+    test(`keeps mounted-row server errors private, ${theme} ${width}px`, async ({ page }, info) => {
+      await page.setViewportSize({ width, height: 960 });
+      await page.addInitScript(theme => localStorage.setItem("neatroots-theme", theme), theme);
+      await fixture(page);
+      let requests = 0;
+      const privateMarker = "PRIVATE_SERVER_ERROR_7f9e";
+      await page.route("**/api/insights/dismiss", async route => {
+        requests++;
+        await route.fulfill({ status: 503, json: { error: privateMarker } });
+      });
+      await page.goto(`${state().url}/#/home`);
+      const alpha = row(page, "alpha");
+      await alpha.getByRole("button").click();
+      await expect(alpha.getByRole("alert")).toHaveText("Could not dismiss this finding. Review the refreshed Home row and try again.");
+      await expect(alpha.getByRole("button")).toBeEnabled();
+      await expect(page.locator("body")).not.toContainText(privateMarker);
+      await expect(alpha).toContainText("1 of 3 dismissals");
+      expect(requests).toBe(1);
+      await alpha.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: info.outputPath(`safe-error-${theme}-${width}.png`), fullPage: true });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    });
+  }
+}

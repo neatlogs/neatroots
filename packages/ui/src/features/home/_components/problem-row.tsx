@@ -20,8 +20,8 @@ export function ProblemRow({ problem, project, threshold }: { problem: Problem; 
     setMessage(undefined);
     try {
       await dismiss.mutateAsync({ finding_id: id!, check_id: problem.check_id, project: project.project!, check_title: problem.title, project_name: project.name });
-    } catch (error) {
-      setMessage({ error: true, text: (error as Error).message });
+    } catch {
+      setMessage({ error: true, text: "Could not dismiss this finding. Review the refreshed Home row and try again." });
     } finally {
       busy.current = false;
     }
