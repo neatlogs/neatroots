@@ -24,7 +24,7 @@ export function CloudSection({ status }: { status: Status }) {
   useEffect(() => {
     setDraft((current) => current.dirty || (current.endpoint === status.cloud.endpoint && current.patterns === savedPatterns)
       ? current
-      : { ...current, endpoint: status.cloud.endpoint, patterns: savedPatterns });
+      : { ...current, endpoint: status.cloud.endpoint, patterns: savedPatterns, revision: current.revision + 1 });
   }, [status.cloud.endpoint, savedPatterns]);
   const edit = (value: Partial<Pick<typeof draft, "endpoint" | "patterns">>) => {
     setDraft((current) => ({ ...current, ...value, revision: current.revision + 1, dirty: true }));
