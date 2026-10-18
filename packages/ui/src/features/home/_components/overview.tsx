@@ -82,7 +82,7 @@ export function Activity({ data }: { data: Insights }) {
               with problems
             </span>
             <span className="inline-flex items-center gap-1.5">
-              <span aria-hidden className="size-2 rounded-xs bg-chart-bar" />
+              <span aria-hidden className="size-2 rounded-xs bg-chart-foreground-muted" />
               no problems
             </span>
           </span>
@@ -99,7 +99,7 @@ export function Activity({ data }: { data: Insights }) {
                 title={`${bucketLabel(b.start_ms, hourly)}: ${b.runs} runs, ${b.with_problems} with problems, ${b.failed} failed`}
               >
                 {b.with_problems > 0 && <div className="w-full rounded-t-xs bg-warning-fg" style={{ height: `${(b.with_problems / max) * 100}%` }} />}
-                {clean > 0 && <div className={cn("w-full bg-chart-bar", b.with_problems === 0 && "rounded-t-xs")} style={{ height: `${(clean / max) * 100}%` }} />}
+                {clean > 0 && <div className={cn("w-full bg-chart-foreground-muted", b.with_problems === 0 && "rounded-t-xs")} style={{ height: `${(clean / max) * 100}%` }} />}
                 {b.runs === 0 && <div className="h-px w-full bg-border" />}
               </div>
             );

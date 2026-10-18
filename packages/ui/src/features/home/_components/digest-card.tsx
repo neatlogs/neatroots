@@ -11,7 +11,7 @@ import { useWriteDigest } from "../_services/home-queries";
 
 /**
  * The LLM's reading of the numbers on this page: what stands out, in a few sentences. It sees
- * aggregates only, and a sentence quoting a number that is not in the data is dropped.
+ * aggregates only; its interpretation can still disagree with the measured totals.
  */
 export function DigestCard({ data, llmOk }: { data: Insights; llmOk: boolean | undefined }) {
   const write = useWriteDigest(data.window.key);
@@ -56,6 +56,7 @@ export function DigestCard({ data, llmOk }: { data: Insights; llmOk: boolean | u
         }
       />
       <PanelContent>
+        <p className="mb-4 text-sm text-muted-foreground">AI interpretation of aggregate data. It may disagree with the measured totals on this page.</p>
         {d ? (
           <div className={cn("grid gap-6", columns.length > 1 && "md:grid-cols-2")}>
             {columns.map(({ tone, items }) => (
