@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
@@ -245,7 +246,16 @@ export function loadConfig(): RootsConfig {
 
 export function saveConfig(cfg: RootsConfig, file = configPath()): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, YAML.stringify(cfg), "utf8");
+  // A failed or partial write must leave the previous saved policy intact.
+  const pending = `${file}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(pending, YAML.stringify(cfg), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    const fd = fs.openSync(pending, "r+");
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(pending, file);
+  } finally {
+    if (fs.existsSync(pending)) fs.unlinkSync(pending);
+  }
 }
 
 export function projectSettings(cfg: RootsConfig, project: string): ProjectSettings {

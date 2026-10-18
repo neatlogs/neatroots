@@ -16,7 +16,7 @@ import { importedSource } from "../ingest/import-source.js";
 // Run views (chat, conversation), search, imports, cloud import, replays and the in-app coding
 // agent. Everything here is local; the cloud and import routes call out only when the user asks.
 
-/** Persisted import provenance, with legacy resource markers as a fallback. */
+/** Trusted local import provenance only; historical unclassified origins also return null. */
 export function importSource(roots: Roots, traceId: string): string | null {
   return importedSource(roots.store, traceId);
 }

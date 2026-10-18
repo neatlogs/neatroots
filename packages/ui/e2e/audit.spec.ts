@@ -107,3 +107,17 @@ test.describe("audit", () => {
     await expect(page.getByText(/Connection inventory unavailable. Stored-run counts remain available/)).toBeVisible();
   });
 });
+
+test("archive status labels observations without claiming a current integrity check", async ({ page }) => {
+  const data = await api<any>("/api/audit/status");
+  data.observation_state = "stale";
+  data.observed_ms = 1700000000000;
+  data.last_observed_verified = true;
+  data.verified = null;
+  data.archive_totals_known = true;
+  await page.route("**/api/audit/status", route => route.fulfill({ json: data }));
+  await open(page, "settings/audit");
+  await expect(page.getByText(/Archive observation: Stale/)).toBeVisible();
+  await expect(page.getByText(/Status does not reverify archive files/)).toBeVisible();
+  await expect(page.getByText("Last observed archive size", { exact: true })).toBeVisible();
+});

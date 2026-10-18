@@ -1,13 +1,12 @@
-import fs from "node:fs";
 import path from "node:path";
 import type { Roots } from "../core.js";
 import type { RunRow } from "../types.js";
 import { buildView } from "../semantics/view.js";
 import { kvToPlain } from "../otlp/types.js";
 import { projectSettings } from "../config.js";
-import { ArchiveUnavailableError, AuditArchive, snapshot } from "./archive.js";
-import { readFile, sha256 } from "./files.js";
-import { verifyArchive } from "./manifest.js";
+import { ArchiveUnavailableError, AuditArchive } from "./archive.js";
+import { archiveObservations } from "./observations.js";
+import { namedUnknownProjects } from "./project-evidence.js";
 import { log } from "../util/log.js";
 
 /** Server-owned archive-before-release policy with bounded synchronous background capture. */
@@ -73,11 +72,11 @@ export class AuditHold {
     try {
       this.archive.ensure(traceId, this.directory());
       this.failures.delete(traceId);
+      archiveObservations(this.roots.store).clearError(traceId);
     } catch (e) {
       if (this.sweep && e instanceof ArchiveUnavailableError) this.sweep.archiveFailed = true;
       // Paths/hashes are useful; never echo a parser's potentially private payload text.
-      this.failures.set(traceId, "archive could not be written or verified; inspect the local archive directory and permissions");
-      log.warn(`audit archive failed for ${traceId}: local write or verification failed`);
+      this.failed(traceId);
       throw new Error(`audit hold: ${this.failures.get(traceId)}`, { cause: e });
     }
   }
@@ -87,6 +86,7 @@ export class AuditHold {
   }
 
   private failed(traceId: string): void {
+    archiveObservations(this.roots.store).error(traceId);
     this.failures.set(traceId, "archive could not be written or verified; inspect the local archive directory and permissions");
     log.warn(`audit archive failed for ${traceId}: local write or verification failed`);
   }
@@ -129,7 +129,10 @@ export class AuditHold {
     }
     try {
       const result = this.archive.ensureMany(ready, this.directory());
-      for (const id of result.archived) this.failures.delete(id);
+      for (const id of result.archived) {
+        this.failures.delete(id);
+        archiveObservations(this.roots.store).clearError(id);
+      }
       for (const id of result.failed) this.failed(id);
     } catch {
       for (const id of ready) this.failed(id);
@@ -153,48 +156,14 @@ export class AuditHold {
     }
   }
 
-  /** Read-only status; snapshot byte counts exclude SQLite/index/shared-blob overhead. */
+  /** Metadata aggregates and last observations only; never verify or hydrate on a read. */
   status() {
-    const directory = this.directory();
-    const exists = fs.existsSync(directory);
-    const verification = exists ? verifyArchive(directory) : undefined;
-    const entries = verification?.ok ? verification.entries : [];
-    let archiveBytes = 0;
-    if (verification?.ok) {
-      archiveBytes = readFile(path.join(directory, "manifest.jsonl")).length;
-      for (const entry of entries) {
-        const dir = path.join(directory, path.dirname(entry.path));
-        archiveBytes += readFile(path.join(dir, "trace.json")).length + readFile(path.join(dir, "record.json")).length;
-      }
-    }
-    let covered = 0, held = 0, archived = 0, heldBytes = 0, archivedBytes = 0;
-    const reasons = new Map<string, number>();
-    const runs = this.roots.store.db.prepare("SELECT * FROM runs").all() as RunRow[];
-    for (const run of runs) {
-      if (!this.covered(run)) continue;
-      covered++;
-      let bytes = 0, current = false;
-      let reason = this.reason(run) ?? this.failures.get(run.trace_id);
-      try {
-        const data = snapshot(this.roots, run.trace_id);
-        bytes = data.trace.length + data.record.length;
-        const last = entries.findLast((e) => e.trace_id === run.trace_id);
-        current = !reason && last?.bundle_sha256 === sha256(data.trace) && last.sidecar_sha256 === sha256(data.record);
-      } catch { reason = "stored payload unavailable"; }
-      if (current) { archived++; archivedBytes += bytes; }
-      else {
-        held++; heldBytes += bytes;
-        reason ??= this.failures.get(run.trace_id) ?? (verification && !verification.ok ? "archive verification failed" : "current snapshot not archived");
-        reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
-      }
-    }
-    return { enabled: this.roots.config.audit.enabled, directory, covered_runs: covered,
-      held_runs: held, held_bytes: heldBytes, archived_live_runs: archived, archived_live_bytes: archivedBytes,
-      archived_runs: new Set(entries.map((e) => e.trace_id)).size, archive_entries: entries.length, archive_bytes: archiveBytes,
-      live_store_bytes: this.roots.store.storedBytes(), seq: verification?.seq ?? 0, head: verification?.head ?? null,
-      verified: verification?.ok ?? null, hold_reasons: Object.fromEntries(reasons),
-      failures: [...this.failures].filter(([id]) => { const run = this.roots.store.getRun(id); return run && this.covered(run); }).map(([trace_id, error]) => ({ trace_id, error })),
-      verification_errors: verification && !verification.ok ? ["archive verification failed; run audit verify for artifact details"] : [] };
+    const projects = (this.roots.store.db.prepare("SELECT DISTINCT project FROM runs WHERE doctor=0").all() as { project: string }[])
+      .map(r => r.project).filter(p => p && projectSettings(this.roots.config, p).audit);
+    const pending = this.roots.engine ? (this.roots.store.db.prepare("SELECT trace_id FROM runs WHERE doctor=0").all() as { trace_id: string }[])
+      .filter(r => !this.roots.engine!.auditReady(r.trace_id)).map(r => r.trace_id) : [];
+    return { enabled: this.roots.config.audit.enabled, directory: this.directory(),
+      ...archiveObservations(this.roots.store).status(this.directory(), projects, namedUnknownProjects(this.roots.store), !!this.roots.engine, pending) };
   }
 
   close(): void {

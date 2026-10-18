@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import type { Roots } from "../core.js";
 import { AuditArchive, type ExportOptions } from "../audit/archive.js";
+import { archiveObservations } from "../audit/observations.js";
 import { verifyArchive } from "../audit/manifest.js";
 import { AuditCoverage } from "../audit/coverage.js";
 import { body, err } from "./util.js";
@@ -26,7 +27,10 @@ export function mountAuditApi(app: Hono, roots: Roots): void {
     const b = await body<{ directory?: string; expect_head?: string }>(c);
     if (!b || (b.directory !== undefined && typeof b.directory !== "string")
       || (b.expect_head !== undefined && typeof b.expect_head !== "string")) return err(c, 400, "invalid verification options");
-    const { entries: _, ...report } = verifyArchive(b.directory ?? roots.audit.directory(), b.expect_head);
+    const directory = b.directory ?? roots.audit.directory();
+    const verified = verifyArchive(directory, b.expect_head);
+    archiveObservations(roots.store).verified(directory, verified);
+    const { entries: _, ...report } = verified;
     return c.json(report);
   });
 }

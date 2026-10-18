@@ -450,6 +450,15 @@ export class Store {
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
     this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
+    // One local cutover, independent of untrusted sender attributes. Keep historical IDs
+    // even after deletion so late redelivery cannot silently become auto-forwardable.
+    this.db.exec("CREATE TABLE IF NOT EXISTS import_provenance_unknown (trace_id TEXT PRIMARY KEY)");
+    if (this.getMeta("import-provenance-cutover-v1") !== "1") this.db.transaction(() => {
+      this.db.exec(`INSERT OR IGNORE INTO import_provenance_unknown
+        SELECT trace_id FROM runs r WHERE NOT EXISTS (SELECT 1 FROM meta m
+          WHERE m.key='import-source:' || r.trace_id AND typeof(m.value)='text' AND length(trim(m.value))>0)`);
+      this.setMeta("import-provenance-cutover-v1", "1");
+    })();
   }
 
   // ------------------------------------------------------------------ ingest

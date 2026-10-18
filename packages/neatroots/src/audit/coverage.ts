@@ -48,9 +48,10 @@ export class AuditCoverage {
           THEN NULL ELSE NULLIF(r.project, '') END AS project,
         CASE WHEN NOT EXISTS (SELECT 1 FROM spans s WHERE s.trace_id = r.trace_id) THEN 'unclassified'
           WHEN m.key IS NOT NULL AND (typeof(m.value) <> 'text' OR length(trim(m.value)) = 0) THEN 'unclassified'
-          WHEN m.key IS NOT NULL THEN 'imported' ELSE 'traced' END AS category,
+          WHEN m.key IS NOT NULL THEN 'imported' WHEN u.trace_id IS NOT NULL THEN 'unclassified' ELSE 'traced' END AS category,
         EXISTS (SELECT 1 FROM notes n WHERE n.trace_id = r.trace_id AND n.delivered_ms IS NOT NULL) AS guidance
-        FROM runs r LEFT JOIN meta m ON m.key = 'import-source:' || r.trace_id WHERE r.doctor = 0
+        FROM runs r LEFT JOIN meta m ON m.key = 'import-source:' || r.trace_id
+        LEFT JOIN import_provenance_unknown u ON u.trace_id=r.trace_id WHERE r.doctor = 0
       ) GROUP BY project, category, guidance
     `).all(JSON.stringify(namedUnknownProjects(this.roots.store))) as { project: string | null; category: Category; guidance: number; n: number }[];
     const byProject = new Map<string | null, Counts>();

@@ -32,17 +32,20 @@ export interface Verification {
   head: string;
   errors: string[];
   entries: Entry[];
+  archive_bytes: number;
 }
 
 /** Read-only: also rejects unlisted files/directories and interrupted publications. */
 export function verifyArchive(input: string, expectHead?: string, writer = false): Verification {
-  const result: Verification = { ok: false, seq: 0, head: GENESIS.entry_sha256, errors: [], entries: [] };
+  const result: Verification = { ok: false, seq: 0, head: GENESIS.entry_sha256, errors: [], entries: [], archive_bytes: 0 };
   const error = (message: string) => { result.errors.push(message); };
   try {
     const dir = archiveDirectory(input);
     const expected = new Set(["manifest.jsonl"]);
     if (writer) expected.add(".writer.lock");
-    const text = readFile(path.join(dir, "manifest.jsonl")).toString("utf8");
+    const manifest = readFile(path.join(dir, "manifest.jsonl"));
+    result.archive_bytes += manifest.length;
+    const text = manifest.toString("utf8");
     if (!text.endsWith("\n")) error("manifest has an interrupted final line");
     const lines = text.split("\n");
     if (lines.at(-1) === "") lines.pop();
@@ -65,7 +68,9 @@ export function verifyArchive(input: string, expectHead?: string, writer = false
       try {
         const bundleDir = archiveDirectory(path.join(dir, folder));
         for (const [name, hash] of [["trace.json", e.bundle_sha256], ["record.json", e.sidecar_sha256]]) {
-          if (sha256(readFile(path.join(bundleDir, name))) !== hash) error(`edited artifact: ${folder}/${name}`);
+          const bytes = readFile(path.join(bundleDir, name));
+          result.archive_bytes += bytes.length;
+          if (sha256(bytes) !== hash) error(`edited artifact: ${folder}/${name}`);
         }
         for (const name of fs.readdirSync(bundleDir)) if (!["trace.json", "record.json"].includes(name)) error(`extra artifact: ${folder}/${name}`);
       } catch (err) { error(`missing or unsafe bundle ${folder}: ${(err as Error).message}`); }

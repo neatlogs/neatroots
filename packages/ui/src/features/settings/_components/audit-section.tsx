@@ -23,8 +23,11 @@ function Protection({ config, data }: { config: NonNullable<Status["config"]["au
   return <SettingsCard title="Archive protection" description="Archive original local records before releasing covered runs. This does not enable telemetry capture.">
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       <Stat label="Covered live runs" value={data.covered_runs} /><Stat label="Held live runs" value={data.held_runs} />
-      <Stat label="Archived live runs" value={data.archived_live_runs} /><Stat label="Archive size" value={bytes(data.archive_bytes)} />
+      <Stat label="Observed live snapshots" value={data.archived_live_runs} /><Stat label="Last observed archive size" value={data.archive_totals_known ? bytes(data.archive_bytes) : "Unknown"} />
     </div>
+    <p className="text-sm" role="status">Archive observation: {data.observation_state === "current" ? "Current local metadata" : data.observation_state === "stale" ? "Stale" : data.observation_state === "error" ? "Failed" : "Unknown"}.
+      {data.observed_ms ? ` Last observed ${new Date(data.observed_ms).toLocaleString()}.` : " No archive observation this session."}</p>
+    <p className="text-xs text-muted-foreground">Status does not reverify archive files. Counts compare local changes with last observed snapshots; byte totals may be estimates. Deletion always verifies the archive again.</p>
     <div className="flex items-center justify-between gap-4"><label htmlFor="audit-default" className="text-sm">Default protection for projects</label>
       <Switch id="audit-default" checked={enabled} disabled={save.isPending} onCheckedChange={setEnabled} /></div>
     <SettingField label="Archive directory" htmlFor="audit-directory" hint="Leave empty for the server's default local audit folder.">

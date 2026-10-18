@@ -28,6 +28,11 @@ export interface AuditStatus {
   seq: number;
   head: string | null;
   verified: boolean | null;
+  observation_state?: "unknown" | "current" | "stale" | "error";
+  observed_ms?: number | null;
+  last_observed_verified?: boolean | null;
+  archive_totals_known?: boolean;
+  integrity?: "not_rechecked";
   hold_reasons: Record<string, number>;
   failures: { trace_id: string; error: string }[];
   verification_errors: string[];

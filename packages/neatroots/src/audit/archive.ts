@@ -5,8 +5,9 @@ import type { Roots } from "../core.js";
 import type { ResourceSpansBatch } from "../otlp/types.js";
 import { compileRules, redactBatches, type RedactionHit } from "../relay/redact.js";
 import { archiveDirectory, atomicFile, readFile, sha256, syncDirectory } from "./files.js";
-import { entryHash, GENESIS, line, verifyArchive, type Entry } from "./manifest.js";
+import { entryHash, GENESIS, line, verifyArchive, type Entry, type Verification } from "./manifest.js";
 import { importedSource } from "../ingest/import-source.js";
+import { archiveObservations } from "./observations.js";
 import { redactRecord } from "./redact-record.js";
 
 /** Failure of the shared archive, distinct from one run's unreadable snapshot. */
@@ -61,7 +62,7 @@ export function snapshot(roots: Roots, traceId: string): Snapshot {
 }
 
 /** Verification is local to this synchronous writer lock, never reused by a later call. */
-function withWriter<T>(directory: string, write: (dir: string, entries: Entry[]) => T): T {
+function withWriter<T>(directory: string, write: (dir: string, entries: Entry[], report: Verification) => T): T {
   const dir = archiveDirectory(directory, true);
   const lock = path.join(dir, ".writer.lock");
   const lockFd = fs.openSync(lock, "wx", 0o600);
@@ -71,7 +72,7 @@ function withWriter<T>(directory: string, write: (dir: string, entries: Entry[])
     }
     const verified = verifyArchive(dir, undefined, true);
     if (!verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
-    return write(dir, verified.entries);
+    return write(dir, verified.entries, verified);
   } finally {
     fs.closeSync(lockFd);
     fs.unlinkSync(lock);
@@ -103,14 +104,18 @@ function writeEntry(dir: string, traceId: string, data: Snapshot, previous: Entr
 }
 
 /** Synchronous critical section: no await between exclusive verification and append. */
-function append(directory: string, traceId: string, data: Snapshot): Entry {
-  return withWriter(directory, (dir, entries) => writeEntry(dir, traceId, data, entries.at(-1) ?? GENESIS));
+function append(directory: string, traceId: string, data: Snapshot) {
+  return withWriter(directory, (dir, entries) => {
+    const entry = writeEntry(dir, traceId, data, entries.at(-1) ?? GENESIS);
+    return { entry };
+  });
 }
 
 export interface ExportOptions { directory?: string; redacted?: boolean; output?: string; preview?: boolean; preview_token?: string }
 
 export class AuditArchive {
-  constructor(private readonly roots: Roots) {}
+  private readonly observations;
+  constructor(private readonly roots: Roots) { this.observations = archiveObservations(roots.store); }
 
   /** Verify exact current bytes before release; unchanged originals reuse their last entry. */
   ensure(traceId: string, directory: string) {
@@ -120,12 +125,19 @@ export class AuditArchive {
       let verified = fs.readdirSync(dir).length ? verifyArchive(dir) : undefined;
       if (verified && !verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
       const prior = verified?.entries.findLast((e) => e.trace_id === traceId);
-      if (prior?.bundle_sha256 === sha256(data.trace) && prior.sidecar_sha256 === sha256(data.record)) return prior;
-      const entry = append(directory, traceId, data);
+      if (prior?.bundle_sha256 === sha256(data.trace) && prior.sidecar_sha256 === sha256(data.record)) {
+        this.observations.verified(directory, verified!);
+        this.observations.snapshot(traceId, directory, data.trace.length + data.record.length);
+        return prior;
+      }
+      const { entry } = append(directory, traceId, data);
       verified = verifyArchive(directory, entry.entry_sha256);
       if (!verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
+      this.observations.verified(directory, verified);
+      this.observations.snapshot(traceId, directory, data.trace.length + data.record.length);
       return entry;
     } catch (cause) {
+      this.observations.failed(directory);
       throw new ArchiveUnavailableError(cause instanceof Error ? cause.message : "archive unavailable", { cause });
     }
   }
@@ -134,29 +146,37 @@ export class AuditArchive {
   ensureMany(traceIds: string[], directory: string): { archived: string[]; failed: string[] } {
     if (traceIds.length > 32) throw new Error("background archive batch exceeds 32 runs");
     if (!traceIds.length) return { archived: [], failed: [] };
-    return withWriter(directory, (dir, entries) => {
-      const latest = new Map(entries.map(e => [e.trace_id, e]));
-      let previous = entries.at(-1) ?? GENESIS;
-      let appended = false;
-      const archived: string[] = [], failed: string[] = [];
-      for (const id of new Set(traceIds)) {
-        let data: Snapshot;
-        try { data = snapshot(this.roots, id); }
-        catch { failed.push(id); continue; }
-        const prior = latest.get(id);
-        if (prior?.bundle_sha256 !== sha256(data.trace) || prior.sidecar_sha256 !== sha256(data.record)) {
-          previous = writeEntry(dir, id, data, previous);
-          latest.set(id, previous);
-          appended = true;
+    try {
+      const result = withWriter(directory, (dir, entries, initial) => {
+        const latest = new Map(entries.map(e => [e.trace_id, e]));
+        let previous = entries.at(-1) ?? GENESIS;
+        let appended = false;
+        const archived: string[] = [], failed: string[] = [];
+        const snapshots: { id: string; bytes: number }[] = [];
+        for (const id of new Set(traceIds)) {
+          let data: Snapshot;
+          try { data = snapshot(this.roots, id); }
+          catch { failed.push(id); continue; }
+          const prior = latest.get(id);
+          if (prior?.bundle_sha256 !== sha256(data.trace) || prior.sidecar_sha256 !== sha256(data.record)) {
+            previous = writeEntry(dir, id, data, previous);
+            latest.set(id, previous);
+            appended = true;
+          }
+          archived.push(id);
+          snapshots.push({ id, bytes: data.trace.length + data.record.length });
         }
-        archived.push(id);
-      }
-      if (appended) {
-        const verified = verifyArchive(dir, previous.entry_sha256, true);
-        if (!verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
-      }
-      return { archived, failed };
-    });
+        let verified = initial;
+        if (appended) {
+          verified = verifyArchive(dir, previous.entry_sha256, true);
+          if (!verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
+        }
+        return { archived, failed, verified, snapshots };
+      });
+      this.observations.verified(directory, result.verified);
+      for (const row of result.snapshots) this.observations.snapshot(row.id, directory, row.bytes);
+      return { archived: result.archived, failed: result.failed };
+    } catch (error) { this.observations.failed(directory); throw error; }
   }
 
   export(traceId: string, options: ExportOptions = {}) {
@@ -164,10 +184,19 @@ export class AuditArchive {
     const directory = options.directory ?? path.join(this.roots.home, "audit");
     if (!options.redacted) {
       if (options.output || options.preview || options.preview_token) throw new Error("preview/output options require redacted export");
-      const entry = append(directory, traceId, snapshot(this.roots, traceId));
+      const data = snapshot(this.roots, traceId);
+      let entry: Entry;
+      try {
+        ({ entry } = append(directory, traceId, data));
+        const report = verifyArchive(directory, entry.entry_sha256);
+        this.observations.verified(directory, report);
+        if (!report.ok) throw new Error("archive post-write verification failed");
+        this.observations.snapshot(traceId, directory, data.trace.length + data.record.length);
+      } catch (error) { this.observations.failed(directory); throw error; }
       return { seq: entry.seq, head: entry.entry_sha256, directory: path.resolve(directory), path: entry.path, redacted: false };
     }
     const verified = verifyArchive(directory);
+    this.observations.verified(directory, verified);
     if (!verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
     const entry = verified.entries.findLast((e) => e.trace_id === traceId);
     if (!entry) throw new Error("export an original archive for this run before making a redacted share copy");
@@ -193,7 +222,7 @@ export class AuditArchive {
     if (outputKey === sourceKey || outputKey.startsWith(sourceKey + path.sep) || sourceKey.startsWith(outputKey + path.sep)) {
       throw new Error("share output must be separate from the original archive");
     }
-    const shared = append(output, traceId, data);
+    const { entry: shared } = append(output, traceId, data);
     return { ...preview, seq: shared.seq, head: shared.entry_sha256, directory: output, path: shared.path };
   }
 }

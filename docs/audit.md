@@ -293,3 +293,38 @@ The Audit page has global protection and per-project Inherit/On/Off controls, se
 from capture evidence. Save failures retain edits. The doctor command renders optional
 coverage after its existing probe handling; unavailable, malformed or older-server
 responses are nonfatal and do not change its transport exit status or probe flow.
+
+
+### Status observations and upgrade privacy
+
+Status, Settings and doctor reads use SQL aggregates and the last archive observation;
+they do not walk or hash archive files or hydrate stored payloads. `verified` is null
+on status reads: only explicit verification or archive operations inspect contents.
+`last_observed_verified` and `observed_ms` describe that earlier operation.
+`observation_state` is unknown on a cold start or after choosing another directory,
+current when observed local revisions and directory/manifest metadata still match,
+stale after local evidence or observed directory metadata changes, and error after
+an archive operation fails. Current metadata is not proof against external file edits.
+Deletion always freshly verifies contents, regardless of these status observations.
+
+Archive counts and bytes are the last observed totals, with `archive_totals_known`
+false until a successful observation supplies totals. A later failure retains only
+those explicitly last-known totals. Live bytes use the last measured snapshot only while its local
+revision matches; otherwise they estimate stored inline metadata and exclude offloaded
+blob contents. `byte_estimate` identifies this mixed estimate. `live_store_bytes` on
+status is allocated SQLite pages only, explicitly marked by `live_store_bytes_kind`;
+it is not the retention cap's database-plus-blob measurement. Changed findings,
+annotations, spans and run metadata invalidate observed snapshots. Only the existing
+bounded capture lane refreshes them automatically; status does not trigger a rescan.
+
+At the first provenance cutover, existing trace IDs lacking trusted local import
+metadata are durably classified as unknown. They are excluded from automatic cloud
+forwarding across later updates, deletion/redelivery and restarts. No sender attribute
+is used to infer an authentic import. This deliberately protects old traced runs too
+when their origin cannot be established. New received runs remain eligible for
+configured automatic forwarding; new local imports remain excluded. Explicit
+user-requested forwarding is separate from this automatic privacy guard.
+
+Audit settings are saved before the active policy changes. A failed config write keeps
+the prior saved file and active protection, including project overrides and archive
+directory; mixed settings requests do not emit a successful settings event on failure.

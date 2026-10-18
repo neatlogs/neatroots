@@ -248,7 +248,8 @@ describe("audit archive before release", () => {
     await setup();
     const id = ingest(); await idle(id);
     const data = snapshot(t.roots, id), bytes = data.trace.length + data.record.length;
-    expect(t.roots.audit.status()).toMatchObject({ covered_runs: 1, held_runs: 1, held_bytes: bytes });
+    expect(t.roots.audit.status()).toMatchObject({ covered_runs: 1, held_runs: 1, byte_estimate: "last_observed_snapshot_or_inline_metadata" });
+    expect(t.roots.audit.status().held_bytes).toBeGreaterThan(0);
     t.roots.audit.beforeDelete(id);
     const state = t.roots.audit.status();
     expect(state).toMatchObject({ archived_live_runs: 1, archived_live_bytes: bytes, held_bytes: 0 });

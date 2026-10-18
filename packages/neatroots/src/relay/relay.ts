@@ -11,7 +11,7 @@ import type { ForwardRow } from "../types.js";
 import { log } from "../util/log.js";
 import { VERSION } from "../version.js";
 import { endpointProblem } from "./endpoint.js";
-import { importedSource } from "../ingest/import-source.js";
+import { automaticForwardAllowed } from "../ingest/import-source.js";
 
 export interface ForwardPreview {
   trace_ids: string[];
@@ -41,7 +41,7 @@ export class Relay {
       if (!u.rootEnded && !u.completed) return;
       const run = roots.store.getRun(u.traceId);
       if (!run || run.doctor || !run.project) return;
-      if (importedSource(roots.store, u.traceId)) return;
+      if (!automaticForwardAllowed(roots.store, u.traceId)) return;
       if (!projectSettings(roots.config, run.project).forward) return;
       void this.autoForward(u.traceId);
     });
@@ -56,7 +56,7 @@ export class Relay {
       // Let checks finish so findings travel with the run.
       await new Promise((r) => setTimeout(r, 1500));
       if (this.roots.engine) await this.roots.engine.waitIdle(traceId, 120_000);
-      if (importedSource(this.roots.store, traceId)) return;
+      if (!automaticForwardAllowed(this.roots.store, traceId)) return;
       if (this.roots.store.forwardedTraceIds().has(traceId)) return;
       const res = await this.forward([traceId], "auto");
       if (res.status !== "ok") log.warn(`auto-forward of ${traceId.slice(0, 8)} failed: ${res.error}`);
