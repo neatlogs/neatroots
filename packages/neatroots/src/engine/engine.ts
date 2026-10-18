@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Roots } from "../core.js";
 import type { TraceUpdate } from "../store/db.js";
 import type { LlmClient } from "../models/llm.js";
@@ -35,6 +36,7 @@ import type { Explanation, Finding, Note, PlanRow } from "../types.js";
 import type { Plain } from "../otlp/types.js";
 import { preview } from "../semantics/view.js";
 import { log } from "../util/log.js";
+import { CheckOutcomes, type OutcomeReason } from "./check-outcomes.js";
 import { CheckProgress } from "./progress.js";
 import { addOccurrence, dropOccurrence, findingSpans, isOpenFinding, newFindingStatus } from "./findings.js";
 import { verifyFlag } from "./verify.js";
@@ -63,6 +65,7 @@ const RULE_GRACE_MS = 250;
 const INVESTIGATE_AT = 2.5;
 
 interface LiveRun {
+  generation: string;
   traceId: string;
   project: string;
   workflow: string;
@@ -159,6 +162,7 @@ export class Engine {
   private idleWaiters = new Map<string, (() => void)[]>();
   private decisionDown = false;
   readonly progress: CheckProgress;
+  readonly outcomes: CheckOutcomes;
 
   constructor(
     private readonly roots: Roots,
@@ -168,6 +172,7 @@ export class Engine {
     readonly steering: SteeringHub,
   ) {
     this.progress = new CheckProgress(roots.store);
+    this.outcomes = new CheckOutcomes(roots.store);
     roots.bus.on("trace", (u) => this.onTrace(u));
     steering.idleWaiter = (traceId, ms) => this.waitIdle(traceId, ms);
   }
@@ -242,12 +247,14 @@ export class Engine {
 
   // ------------------------------------------------------------- live runs
 
-  private liveRun(traceId: string): LiveRun | undefined {
+  private liveRun(traceId: string, origin: "live" | "recheck" | "resume" = "live"): LiveRun | undefined {
     let r = this.live.get(traceId);
-    if (r) return r;
+    if (r && this.outcomes.current(traceId, r.generation)) return r;
+    if (r) this.live.delete(traceId);
     const row = this.roots.store.getRun(traceId);
     if (!row) return undefined;
     r = {
+      generation: this.outcomes.begin(traceId, origin),
       traceId,
       project: row.project ?? "unknown",
       workflow: row.workflow ?? row.project ?? "unknown",
@@ -268,6 +275,10 @@ export class Engine {
     };
     this.live.set(traceId, r);
     return r;
+  }
+
+  private observe(run: LiveRun, check: Check, reason: OutcomeReason, target: string | null = null, count = 1, attemptId: string | null = null): void {
+    this.outcomes.observe(run.traceId, run.generation, { id: check.id, title: checkTitle(check) }, reason, target, count, attemptId);
   }
 
   private onTrace(u: TraceUpdate): void {
@@ -330,8 +341,9 @@ export class Engine {
 
   private scheduleQuestions(run: LiveRun, snap: TraceSnapshot, fresh: SpanInfo[]): void {
     for (const { check, params } of this.questionsFor(run)) {
-      if (check.when === "end") continue;
+      if (check.when === "end") { this.observe(run, check, "waiting_end"); continue; }
       const sel = check.evidence?.spans;
+      if (!fresh.some((s) => matchesSelector(s, sel))) this.observe(run, check, "no_evidence");
       if (check.scope === "span") {
         const queue = run.spanQueue.get(check.id) ?? [];
         for (const s of fresh) {
@@ -339,11 +351,13 @@ export class Engine {
           if (run.spanDone.has(key) || !matchesSelector(s, sel)) continue;
           run.spanDone.add(key);
           queue.push(s.id);
+          this.observe(run, check, "queued", s.id);
         }
         run.spanQueue.set(check.id, queue);
         if (queue.length) void this.track(run.traceId, this.drainSpanQueue(run, check, params));
       } else if (fresh.some((s) => matchesSelector(s, sel))) {
         run.dirty.add(check.id);
+        this.observe(run, check, "queued");
       }
     }
     if (run.dirty.size) this.scheduleFlush(run);
@@ -365,15 +379,21 @@ export class Engine {
     run.spanBusy.add(check.id);
     try {
       for (;;) {
+        if (!this.outcomes.current(run.traceId, run.generation)) break;
         const queue = run.spanQueue.get(check.id) ?? [];
         if (!queue.length) break;
         const slow = await this.decisions.isSlow([toQuestion(check, params)]);
         let spanId: string;
         if (slow) {
           spanId = queue[queue.length - 1];
-          queue.length = 0;
           const asked = run.spanAsked.get(check.id) ?? 0;
-          if (asked >= SLOW_SPAN_CHECKS_PER_RUN) break;
+          if (asked >= SLOW_SPAN_CHECKS_PER_RUN) {
+            this.observe(run, check, "span_cap", null, queue.length);
+            queue.length = 0;
+            break;
+          }
+          if (queue.length > 1) this.observe(run, check, "coalesced", null, queue.length - 1);
+          queue.length = 0;
           run.spanAsked.set(check.id, asked + 1);
         } else {
           spanId = queue.shift()!;
@@ -394,7 +414,7 @@ export class Engine {
     for (const spanId of retry) {
       if (slow) {
         const asked = run.spanAsked.get(check.id) ?? 0;
-        if (asked >= SLOW_SPAN_CHECKS_PER_RUN) break;
+        if (asked >= SLOW_SPAN_CHECKS_PER_RUN) { this.observe(run, check, "span_cap", spanId); continue; }
         run.spanAsked.set(check.id, asked + 1);
       }
       await this.askSpan(run, check, params, spanId);
@@ -414,22 +434,26 @@ export class Engine {
   // ----------------------------------------------------------------- rules
 
   private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>): void {
+    if (!this.outcomes.current(run.traceId, run.generation)) return;
     for (const lc of this.registry.rules()) {
       const rule = lc.check as RuleCheck;
       if (!this.appliesTo(rule, run)) continue;
-      if (rule.rule.type === "run_end" && !atEnd) continue;
+      if (rule.rule.type === "run_end" && !atEnd) { this.observe(run, rule, "waiting_end"); continue; }
       let hit: RuleHit | null;
       try {
         hit = evaluateRule(rule, snap, atEnd, fresh, lc.source !== "library");
       } catch (err) {
+        this.observe(run, rule, "evaluation_error");
         log.warn(`rule ${rule.id} failed: ${(err as Error).message}`);
         continue;
       }
+      if (!hit?.firing) this.observe(run, rule, hit ? "rule_clear" : "rule_unknown");
       const open = this.roots.store.openFindingFor(run.traceId, rule.id);
       if (!hit?.firing) run.ruleGrace.delete(rule.id);
-      else if (!open && !atEnd && rule.rule.type === "requires_before" && this.waitForLateSpans(run, rule.id)) continue;
+      else if (!open && !atEnd && rule.rule.type === "requires_before" && this.waitForLateSpans(run, rule.id)) { this.observe(run, rule, "queued"); continue; }
       if (hit?.firing) {
         if (open) {
+          this.observe(run, rule, open.status === "quiet" ? "quiet" : "flagged");
           const changed = JSON.stringify(open.evidence_span_ids) !== JSON.stringify(hit.evidenceSpanIds);
           if (changed) {
             const f = this.roots.store.updateFinding(open.id, { evidence_span_ids: hit.evidenceSpanIds, detail: { ...open.detail, params: hit.params } });
@@ -437,6 +461,7 @@ export class Engine {
           }
         } else {
           const status = newFindingStatus(this.roots.store, rule.id, run.project);
+          this.observe(run, rule, status === "quiet" ? "quiet" : "flagged");
           const f = this.roots.store.insertFinding({
             trace_id: run.traceId,
             check_id: rule.id,
@@ -508,9 +533,9 @@ export class Engine {
   }
 
   private async askTrace(run: LiveRun, check: QuestionCheck, params: Record<string, string>, snap: TraceSnapshot): Promise<void> {
-    if (run.answered?.traceChecks.has(check.id)) return;
+    if (run.answered?.traceChecks.has(check.id)) { this.observe(run, check, "resumed_answer"); return; }
     const ev = buildEvidence(snap, check.evidence);
-    if (!ev.spanIds.length && !check.evidence?.final_output) return;
+    if (!ev.spanIds.length && !check.evidence?.final_output) { this.observe(run, check, "no_evidence"); return; }
     const key = ev.spanIds.join(",") + (check.evidence?.final_output ? `|${finalOutput(snap) ?? ""}` : "");
     if (run.traceEvidence.get(check.id) === key) return;
     run.traceEvidence.set(check.id, key);
@@ -528,11 +553,16 @@ export class Engine {
     snap: TraceSnapshot,
     spanId: string | null,
   ): Promise<"unavailable" | void> {
+    if (!this.outcomes.current(run.traceId, run.generation)) return;
+    const attemptId = randomUUID();
+    this.observe(run, check, "evaluating", spanId, 1, attemptId);
     let result: DecisionResult;
     try {
       result = await this.decisions.decide(evidence, [toQuestion(check, params)]);
       this.decisionDown = false;
     } catch (err) {
+      if (!this.outcomes.current(run.traceId, run.generation)) return;
+      this.observe(run, check, err instanceof DecisionUnavailableError || err instanceof LlmUnavailableError ? "backend_unavailable" : "evaluation_error", spanId, 1, attemptId);
       if (err instanceof DecisionUnavailableError || err instanceof LlmUnavailableError) {
         if (!this.decisionDown) log.warn(`questions skipped: ${(err as Error).message}`);
         this.decisionDown = true;
@@ -558,7 +588,9 @@ export class Engine {
       }
       return;
     }
+    if (!this.outcomes.current(run.traceId, run.generation)) return;
     const answer = result.answers[check.id];
+    if (!answer) this.observe(run, check, "missing_answer", spanId, 1, attemptId);
     const verdict = flagged(check, result);
     this.roots.store.insertDecision({
       trace_id: run.traceId,
@@ -572,6 +604,7 @@ export class Engine {
     const open = this.findOpen(run.traceId, check.id, spanId);
     if (verdict.flagged) {
       if (open) {
+        this.observe(run, check, open.status === "quiet" ? "quiet" : "flagged", spanId, 1, attemptId);
         const spans = spanId && findingSpans(open).length > 1 ? [...new Set([...open.evidence_span_ids, ...spanIds])] : spanIds;
         const f = this.roots.store.updateFinding(open.id, { probability: Math.max(verdict.probability, open.probability ?? 0), evidence_span_ids: spans });
         if (f) this.roots.bus.emit("finding", f);
@@ -580,14 +613,17 @@ export class Engine {
       // A question about single spans raises one finding per run; later spans join it.
       const sibling = spanId ? this.roots.store.openFindingFor(run.traceId, check.id) : undefined;
       if (sibling) {
+        this.observe(run, check, sibling.status === "quiet" ? "quiet" : "flagged", spanId, 1, attemptId);
         const f = addOccurrence(this.roots.store, sibling, spanId!, spanIds);
         if (f) this.roots.bus.emit("finding", f);
         return;
       }
       // A second look, with a quote that must be in the run, before anything is raised.
-      if ((run.rejected.get(check.id) ?? 0) >= 3) return;
+      if ((run.rejected.get(check.id) ?? 0) >= 3) { this.observe(run, check, "suppressed", spanId, 1, attemptId); return; }
       const check2 = check.kind === "yes_no" ? await verifyFlag(this.llm, fillTemplate(check.ask, params) || check.ask, evidence) : undefined;
+      if (!this.outcomes.current(run.traceId, run.generation)) return;
       if (check2 && !check2.verified) {
+        this.observe(run, check, "verification_rejected", spanId, 1, attemptId);
         run.rejected.set(check.id, (run.rejected.get(check.id) ?? 0) + 1);
         log.debug(`${check.id}: flag not confirmed on a second look${check2.quote ? ` (quote: ${clip(check2.quote, 80)})` : ""}`);
         return;
@@ -601,6 +637,7 @@ export class Engine {
         ...(errSpan ? { error: clip(errSpan.error ?? "error", 160), tool: params.tool ?? errSpan.toolName ?? errSpan.name } : {}),
       };
       const status = newFindingStatus(this.roots.store, check.id, run.project);
+      this.observe(run, check, status === "quiet" ? "quiet" : "flagged", spanId, 1, attemptId);
       const f = this.roots.store.insertFinding({
         trace_id: run.traceId,
         check_id: check.id,
@@ -624,7 +661,9 @@ export class Engine {
       this.roots.bus.emit("finding", f);
       const lc = this.registry.get(check.id);
       if (lc && status === "raised") this.onFindingRaised(run, f, lc, findingParams, snap);
-    } else if (open) {
+    } else {
+      if (answer) this.observe(run, check, "below_threshold", spanId, 1, attemptId);
+      if (!open) return;
       // This span reads clean now: it leaves the finding, which resolves once no span shows it.
       const rest = spanId ? dropOccurrence(this.roots.store, open, spanId) : undefined;
       if (rest) this.roots.bus.emit("finding", rest);
@@ -1013,7 +1052,7 @@ ${library}`;
   // --------------------------------------------------------------- run end
 
   private async handleEnd(run: LiveRun): Promise<void> {
-    if (run.endHandled) return;
+    if (run.endHandled || !this.outcomes.current(run.traceId, run.generation)) return;
     run.endHandled = true;
     // Notes the agent never picked up can no longer help this run.
     for (const n of this.roots.store.notesForTrace(run.traceId, "pending")) {
@@ -1024,12 +1063,14 @@ ${library}`;
     let snap = loadTrace(this.roots.store, run.traceId);
     if (!run.plan) this.ensurePlan(run, snap);
     if (run.planning) await run.planning;
+    if (!this.outcomes.current(run.traceId, run.generation)) return;
     snap = loadTrace(this.roots.store, run.traceId);
     this.applyRules(run, snap, true);
     // Final pass: end-only questions, and live questions with evidence they have not seen.
     for (const { check, params } of this.questionsFor(run)) {
       if (check.scope === "span") {
         const queue = run.spanQueue.get(check.id) ?? [];
+        if (!selectSpans(snap.spans, check.evidence?.spans).length) this.observe(run, check, "no_evidence");
         for (const s of selectSpans(snap.spans, check.evidence?.spans)) {
           const key = `${check.id}:${s.id}`;
           if (run.spanDone.has(key)) continue;
@@ -1052,7 +1093,7 @@ ${library}`;
     for (const work of run.deferred.splice(0)) await work();
     await this.summarize(run, snap);
     setTimeout(() => {
-      if (!this.pending(run.traceId)) this.live.delete(run.traceId);
+      if (this.live.get(run.traceId) === run && !this.pending(run.traceId)) this.live.delete(run.traceId);
     }, 60_000);
   }
 
@@ -1210,12 +1251,16 @@ ${library}`;
     const row = this.roots.store.getRun(traceId);
     if (!row) return;
     this.live.delete(traceId);
-    const run = this.liveRun(traceId)!;
+    const run = this.liveRun(traceId, opts.resume ? "resume" : "recheck")!;
     run.ended = row.status !== "running";
     run.rechecked = true;
     if (opts.resume) {
       const done = this.roots.store.decisionsForTrace(traceId);
-      for (const d of done) if (d.span_id) run.spanDone.add(`${d.check_id}:${d.span_id}`);
+      for (const d of done) if (d.span_id) {
+        run.spanDone.add(`${d.check_id}:${d.span_id}`);
+        const check = this.registry.get(d.check_id)?.check;
+        if (check) this.observe(run, check, "resumed_answer", d.span_id);
+      }
       run.answered = {
         traceChecks: new Set(done.filter((d) => !d.span_id).map((d) => d.check_id)),
         toolSpans: new Set(done.filter((d) => d.check_id === "neatroots.tool-result" && d.span_id).map((d) => d.span_id!)),
