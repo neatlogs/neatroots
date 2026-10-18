@@ -62,11 +62,13 @@ export class Roots {
     );
     this.checks = new CheckRegistry(this.store, path.join(this.home, "checks"), () => this.config.checkDirs);
     this.steering = new SteeringHub(this);
+    this.steering.warnInactiveHalts(this.checks.rules().filter((c) => c.source === "user" || c.source === "project").map((c) => c.check));
     this.relay = new Relay(this);
     this.imports = new ImportJobs(this);
     this.replays = new Replays(this);
     this.chats = new AgentChats(this);
-    this.store.reindexSearch((n) => n && log.info(`search now covers whole inputs and outputs (${n} spans re-indexed)`));
+    this.store.reindexSearch((n, ok) => (ok ? n && log.info(`search now covers whole inputs and outputs (${n} spans re-indexed)`) : log.warn("couldn't finish re-indexing search; it starts over at the next start")));
+    this.store.rebuildSearchIds((n, ready) => (ready ? n && log.info(`search index ready for fast lookups (${n} rows)`) : log.warn("search index lookups couldn't be prepared; search works but is slower on a large store")));
     if (!opts.noEngine) {
       const engine = new Engine(this, this.llm, this.decisions, this.checks, this.steering);
       this.engine = engine;

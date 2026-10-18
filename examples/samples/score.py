@@ -35,12 +35,21 @@ def latest_runs() -> dict[str, str]:
     return out
 
 
+def mock_judge(status: dict) -> str | None:
+    decision = ((status.get("engine") or {}).get("decision") or {})
+    model = decision.get("model") or ""
+    return model if decision.get("backend") == "llm" and model in ("mock", "mock-sloppy") else None
+
+
 def main() -> int:
     runs = latest_runs()
     missing = [s for s in EXPECTED if s not in runs]
     if missing:
         print(f"no runs for {', '.join(missing)} at {URL}: run run_samples.py first")
         return 2
+    if model := mock_judge(get("/api/status")):
+        print(f"warning: {model} is the stand-in LLM, not a meaningful judge of the model-based checks.")
+        print("Install Laya, enable Jev cloud, or configure a real local/hosted LLM before treating those MISS results as product failures.")
     deadline = time.time() + float(os.environ.get("SCORE_TIMEOUT", "900"))
     while True:
         details = {s: get(f"/api/runs/{t}") for s, t in runs.items()}

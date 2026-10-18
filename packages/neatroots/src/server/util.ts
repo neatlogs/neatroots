@@ -5,6 +5,14 @@ export function err(c: Context, status: number, message: string) {
   return c.json({ error: message }, status as 400);
 }
 
+/** Parse a query param as an integer and clamp it to [min, max]; non-numbers fall back to `dflt`. */
+export function clampInt(raw: string | undefined, dflt: number, min: number, max: number): number {
+  if (raw === undefined || raw === "") return dflt;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(Math.max(Math.trunc(n), min), max);
+}
+
 /**
  * A request's JSON body as an object. No body reads as {}; anything else that isn't a JSON object
  * (malformed JSON, null, an array, a number) is a 400, so a route never reads fields off null.

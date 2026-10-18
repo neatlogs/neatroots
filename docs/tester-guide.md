@@ -21,7 +21,9 @@ anything that confuses you or takes longer than it should: confusion is a findin
 - Optional: a coding agent you use (Claude Code, Codex, Cursor, …), and an agent of your own that
   you are building.
 
-No API key is needed for the examples or samples: they use a stand-in LLM.
+No API key is needed to generate the example and sample runs: agents use a stand-in LLM. The
+model-judged sample checks still need Laya, Jev cloud, or a real local or hosted LLM; the stand-in
+is deterministic test plumbing, not a useful judge.
 
 ## 1. Install (5 minutes)
 
@@ -80,6 +82,10 @@ To score it rather than eyeball it, run the scorer. It waits until every sample 
 ```bash
 uv run ~/.neatroots/app/examples/samples/score.py
 ```
+
+If the stand-in mock LLM is answering checks, the scorer warns before the results and tells you how
+to configure a meaningful decision source. Its model-based verdicts should not be treated as a
+neatroots accuracy result.
 
 - [ ] Every flagged scenario shows its problem. Note any that don't.
 - [ ] `happy` shows no problems. Note any false alarm.

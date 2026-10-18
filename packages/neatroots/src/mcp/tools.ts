@@ -3,7 +3,7 @@ import { checkWarnings } from "../checks/lint.js";
 import type { Roots } from "../core.js";
 import { runDetail, runSummary, spanDetail, checkFromInput } from "../server/api.js";
 import { draftCheckFromConcern, askRuns } from "../engine/assist.js";
-import { checkToYaml } from "../checks/registry.js";
+import { checkToYaml, checkDirState } from "../checks/registry.js";
 import { newId } from "../util/ids.js";
 import type { Plain } from "../otlp/types.js";
 
@@ -31,23 +31,44 @@ export function clip(s: string | null | undefined, n: number): string | null {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
+/** The run an id names, else the run in focus, else the latest run. May clear roots.focus (see resolveTraceNoting). */
 export function resolveTrace(roots: Roots, id: string | undefined): string {
+  return resolveTraceNoting(roots, id).traceId;
+}
+
+/**
+ * Like resolveTrace, but also says when the run in focus was deleted and the latest run is used
+ * instead, so tools can tell the agent. Note: this clears roots.focus when it points at a deleted
+ * run, even when called from a read-only tool.
+ */
+export function resolveTraceNoting(roots: Roots, id: string | undefined): { traceId: string; fellBackFrom?: string } {
   if (id) {
     const exact = roots.store.getRun(id);
-    if (exact) return exact.trace_id;
+    if (exact) return { traceId: exact.trace_id };
     // Match as a literal prefix: % and _ in the id are not wildcards.
     const prefix = id.toLowerCase().replace(/[\\%_]/g, (ch) => `\\${ch}`);
     const rows = roots.store.db
       .prepare("SELECT trace_id FROM runs WHERE trace_id LIKE ? ESCAPE '\\' ORDER BY started_ms DESC LIMIT 6")
       .all(`${prefix}%`) as { trace_id: string }[];
-    if (rows.length === 1) return rows[0].trace_id;
+    if (rows.length === 1) return { traceId: rows[0].trace_id };
     if (rows.length > 1) throw new Error(`run id ${id} matches more than one run (${shortList(rows.map((r) => r.trace_id))}); use more characters`);
     throw new Error(`no run with id ${id}`);
   }
-  if (roots.focus) return roots.focus.trace_id;
+  let fellBackFrom: string | undefined;
+  if (roots.focus) {
+    // The run in focus may have been deleted since (by the user or by retention); then nothing is in focus.
+    if (roots.store.getRun(roots.focus.trace_id)) return { traceId: roots.focus.trace_id };
+    fellBackFrom = roots.focus.trace_id;
+    roots.focus = null;
+  }
   const latest = roots.store.listRuns({ limit: 1 })[0];
   if (!latest) throw new Error(`neatroots has no runs yet. Point NEATLOGS_ENDPOINT at http://localhost:${roots.config.port} and run your agent.`);
-  return latest.trace_id;
+  return fellBackFrom ? { traceId: latest.trace_id, fellBackFrom } : { traceId: latest.trace_id };
+}
+
+/** The note tools add to their response when resolveTraceNoting fell back to the latest run. */
+export function fallbackNote(r: { fellBackFrom?: string }): { note?: string } {
+  return r.fellBackFrom ? { note: `The run in focus (${r.fellBackFrom.slice(0, 8)}…) was deleted; using the latest run.` } : {};
 }
 
 export function resolveSpan(roots: Roots, traceId: string, spanId: string): string {
@@ -172,10 +193,11 @@ export const TOOLS = [
     input: { max_spans: z.number().int().min(1).max(500).optional().describe("Most spans to include in the outline (default 80)") },
     readOnly: true,
     run: async (roots, a) => {
-      const traceId = resolveTrace(roots, undefined);
+      const r = resolveTraceNoting(roots, undefined);
+      const traceId = r.traceId;
       const o = outline(roots, traceId, a.max_spans ?? 80);
       const span = roots.focus?.trace_id === traceId && roots.focus.span_id ? spanDetail(roots, traceId, roots.focus.span_id) : null;
-      return { ...o, selected_span: span ? { span_id: span.span_id, name: span.name, kind: span.kind, input: span.view.input, output: span.view.output, error: span.view.error ?? null } : null };
+      return { ...o, selected_span: span ? { span_id: span.span_id, name: span.name, kind: span.kind, input: span.view.input, output: span.view.output, error: span.view.error ?? null } : null, ...fallbackNote(r) };
     },
   }),
   def({
@@ -230,7 +252,10 @@ export const TOOLS = [
       max_spans: z.number().int().min(1).max(1000).optional(),
     },
     readOnly: true,
-    run: async (roots, a) => outline(roots, resolveTrace(roots, a.trace_id), a.max_spans ?? 150),
+    run: async (roots, a) => {
+      const r = resolveTraceNoting(roots, a.trace_id);
+      return { ...outline(roots, r.traceId, a.max_spans ?? 150), ...fallbackNote(r) };
+    },
   }),
   def({
     name: "get_span",
@@ -245,7 +270,8 @@ export const TOOLS = [
     },
     readOnly: true,
     run: async (roots, a) => {
-      const traceId = resolveTrace(roots, a.trace_id);
+      const r = resolveTraceNoting(roots, a.trace_id);
+      const traceId = r.traceId;
       const spanId = resolveSpan(roots, traceId, a.span_id);
       const d = spanDetail(roots, traceId, spanId)!;
       const doc = { name: d.name, kind: d.kind, status: d.status, input: d.view.input ?? null, output: d.view.output ?? null, error: d.view.error ?? null, attributes: d.attributes, events: d.events, resource: d.resource };
@@ -253,7 +279,7 @@ export const TOOLS = [
       const text = typeof selected === "string" ? selected : JSON.stringify(selected, null, 1);
       const offset = a.offset ?? 0;
       const limit = a.limit ?? 6000;
-      return { trace_id: traceId, span_id: spanId, path: a.path ?? "$", total_chars: text.length, offset, value: text.slice(offset, offset + limit), more: offset + limit < text.length };
+      return { trace_id: traceId, span_id: spanId, path: a.path ?? "$", total_chars: text.length, offset, value: text.slice(offset, offset + limit), more: offset + limit < text.length, ...fallbackNote(r) };
     },
   }),
   def({
@@ -295,10 +321,11 @@ export const TOOLS = [
     input: { trace_id: z.string().optional(), refresh: z.boolean().optional().describe("Ignore a cached explanation") },
     run: async (roots, a) => {
       if (!roots.engine) throw new Error("engine not running");
-      const traceId = resolveTrace(roots, a.trace_id);
+      const r = resolveTraceNoting(roots, a.trace_id);
+      const traceId = r.traceId;
       const exp = await roots.engine.explainRun(traceId, { force: a.refresh, priority: "interactive" });
-      if (!exp) return { trace_id: traceId, explanation: null, reason: "The local LLM could not explain this run." };
-      return { trace_id: traceId, cause: exp.cause, fix: exp.fix, evidence_span_ids: exp.evidence_span_ids, grounding: exp.grounding, model: exp.model };
+      if (!exp) return { trace_id: traceId, explanation: null, reason: "The local LLM could not explain this run.", ...fallbackNote(r) };
+      return { trace_id: traceId, cause: exp.cause, fix: exp.fix, evidence_span_ids: exp.evidence_span_ids, grounding: exp.grounding, model: exp.model, ...fallbackNote(r) };
     },
   }),
   def({
@@ -319,16 +346,17 @@ export const TOOLS = [
     },
     run: async (roots, a) => {
       if (!roots.engine) throw new Error("engine not running");
-      const traceId = resolveTrace(roots, a.trace_id);
+      const resolved = resolveTraceNoting(roots, a.trace_id);
+      const traceId = resolved.traceId;
       const r = await roots.engine.judge(traceId, a.question, { spanIds: a.span_ids });
-      return { trace_id: traceId, question: a.question, probability_yes: r.probability, evidence_span_ids: r.evidence_span_ids, backend: r.backend, model: r.model };
+      return { trace_id: traceId, question: a.question, probability_yes: r.probability, evidence_span_ids: r.evidence_span_ids, backend: r.backend, model: r.model, ...fallbackNote(resolved) };
     },
   }),
   def({
     name: "create_check",
     title: "Create check",
     description:
-      "Add a check. Give either `concern` (plain language; the local LLM writes the question) or `check` (YAML or JSON in neatroots check format). Set save=false to only draft it. Saved checks go to ~/.neatroots/checks or a registered project directory.",
+      "Add a check. Give either `concern` (plain language; the local LLM writes the question) or `check` (YAML or JSON in neatroots check format). Set save=false to only draft it. Saved checks go to ~/.neatroots/checks or a registered project directory. Halt rules can't be saved or changed here: save a rule with action: flag, and the user can switch it to halt in the app or CLI.",
     input: {
       concern: z.string().optional(),
       check: z.string().optional().describe("YAML or JSON check definition"),
@@ -348,6 +376,12 @@ export const TOOLS = [
       } else throw new Error("give concern or check");
       if (a.save === false) return { saved: false, id: check.id, yaml: checkToYaml(check), warnings: checkWarnings(check) };
       if (a.dir && !roots.config.checkDirs.includes(a.dir)) throw new Error("dir must be a registered project checks directory (neatroots init registers one)");
+      if (a.dir) {
+        // Save creates a registered directory that isn't there yet; only a path a save can't make is
+        // an error here.
+        const state = checkDirState(a.dir);
+        if (!state.ok && !state.creatable) throw new Error(`that checks directory ${state.reason}`);
+      }
       const saved = roots.checks.save(check, a.dir ? { dir: a.dir } : "user", "mcp");
       return { saved: true, id: saved.check.id, path: saved.path, yaml: checkToYaml(saved.check), warnings: checkWarnings(saved.check) };
     },
@@ -386,11 +420,12 @@ export const TOOLS = [
       text: z.string().optional(),
     },
     run: async (roots, a) => {
-      const traceId = resolveTrace(roots, a.trace_id);
+      const r = resolveTraceNoting(roots, a.trace_id);
+      const traceId = r.traceId;
       const spanId = a.span_id ? resolveSpan(roots, traceId, a.span_id) : null;
       const ann = roots.store.insertAnnotation({ trace_id: traceId, span_id: spanId, label: a.label, text: a.text ?? null, author: "coding-agent" });
       roots.bus.emit("activity", { trace_id: traceId, kind: "annotation", message: a.label });
-      return ann;
+      return { ...ann, ...fallbackNote(r) };
     },
   }),
   def({
@@ -406,13 +441,14 @@ export const TOOLS = [
       timeout_sec: z.number().int().min(5).max(900).optional(),
     },
     run: async (roots, a) => {
-      const traceId = resolveTrace(roots, a.trace_id);
+      const resolved = resolveTraceNoting(roots, a.trace_id);
+      const traceId = resolved.traceId;
       const { replay, done } = roots.replays.startRun(traceId, { input: a.input, model: a.model, system: a.system });
       const r = await Promise.race([done, new Promise<null>((res) => setTimeout(() => res(null), (a.timeout_sec ?? 300) * 1000))]);
-      if (!r) return { replay_id: replay.id, state: "running", note: "still running; call get_current_run or search_runs later" };
+      if (!r) return { replay_id: replay.id, state: "running", note: [fallbackNote(resolved).note, "still running; call get_current_run or search_runs later"].filter(Boolean).join(" ") };
       const run = r.new_trace_id ? runSummary(roots, roots.store.getRun(r.new_trace_id)!) : null;
       const findings = r.new_trace_id ? roots.store.listFindings({ traceId: r.new_trace_id }).map((f) => ({ check: f.check_id, title: f.title, status: f.status })) : [];
-      return { replay_id: r.id, state: r.state, error: r.error, original: traceId, new_run: run, findings, log_tail: clip(r.log_tail, 2000) };
+      return { replay_id: r.id, state: r.state, error: r.error, original: traceId, new_run: run, findings, log_tail: clip(r.log_tail, 2000), ...fallbackNote(resolved) };
     },
   }),
   def({
@@ -426,11 +462,12 @@ export const TOOLS = [
         if (!p) throw new Error("unknown push_id");
         return { ...p, app_url: roots.config.cloud.appUrl };
       }
-      const ids = (a.trace_ids?.length ? a.trace_ids : [resolveTrace(roots, undefined)]).map((t) => resolveTrace(roots, t));
+      const fallback = a.trace_ids?.length ? undefined : resolveTraceNoting(roots, undefined);
+      const ids = (fallback ? [fallback.traceId] : a.trace_ids!).map((t) => resolveTrace(roots, t));
       const id = newId("push");
       roots.pushes.set(id, { id, trace_ids: ids, requested_by: "coding-agent", created_ms: Date.now(), status: "pending" });
       roots.bus.emit("activity", { kind: "push-request", message: id });
-      return { push_id: id, status: "awaiting_confirmation", confirm_in_app: `http://localhost:${roots.config.port}/#/push/${id}`, trace_ids: ids };
+      return { push_id: id, status: "awaiting_confirmation", confirm_in_app: `http://localhost:${roots.config.port}/#/push/${id}`, trace_ids: ids, ...(fallback ? fallbackNote(fallback) : {}) };
     },
   }),
 ] as ToolDef[];

@@ -15,6 +15,7 @@ import { go } from "@/lib/router";
 import { RUN_STATE, runGoal } from "../_libs/labels";
 import { useRunActions, useRunDetail } from "../_services/run-queries";
 import { useReplay, useReplayOptions } from "../_services/view-queries";
+import { DeleteRunDialog } from "./delete-run-dialog";
 import { ForwardDialog } from "./forward-dialog";
 import { SteeringNotes } from "./notes-panel";
 import { ProblemsPanel } from "./problems-panel";
@@ -45,6 +46,7 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
   const [investigating, setInvestigating] = useState<string>();
   const [replayFor, setReplayFor] = useState<{ span?: string } | null>(null);
   const [forking, setForking] = useState<"llm" | "run" | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const rawView = query?.get("view");
   const view: RunView = rawView && (RUN_VIEWS as string[]).includes(rawView) ? (rawView as RunView) : "overview";
   const highlighted = open ?? (d ? firstSpan(d) : undefined);
@@ -148,8 +150,13 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
             <Icon icon={Download01Icon} size="xs" />
             Download run JSON
           </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem className="text-danger-fg" onClick={() => setDeleting(true)}>
+            Delete run
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+      <DeleteRunDialog traceId={traceId} open={deleting} onOpenChange={setDeleting} />
       <Button variant="secondary" onClick={() => setReplayFor({})}>
         <Icon icon={GitForkIcon} size="xs" />
         Replay

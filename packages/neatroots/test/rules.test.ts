@@ -7,16 +7,17 @@ import { evaluateRule, fillTemplate } from "../src/checks/rules.js";
 import { parseChecks } from "../src/checks/registry.js";
 import type { RuleCheck } from "../src/checks/types.js";
 import { heuristicToolLabel } from "../src/engine/engine.js";
-import { batch, hex, llmSpan, s, span, tmpHome, toolSpan } from "./helpers.js";
+import { batch, closeTrackedStores, hex, llmSpan, s, span, tmpHome, toolSpan, trackedStore } from "./helpers.js";
 
 const homes: string[] = [];
 afterEach(() => {
+  closeTrackedStores();
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 function store(): Store {
   const h = tmpHome();
   homes.push(h);
-  return new Store(path.join(h, "data"));
+  return trackedStore(path.join(h, "data"));
 }
 const lib = parseChecks(fs.readFileSync(new URL("../library/rules.yaml", import.meta.url), "utf8")).checks as RuleCheck[];
 const rule = (id: string) => lib.find((c) => c.id === id)!;

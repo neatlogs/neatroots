@@ -1,6 +1,6 @@
 import type { SpanInfo, TraceSnapshot } from "../engine/trace.js";
 import type { Plain } from "../otlp/types.js";
-import { preview } from "./view.js";
+import { isSystemRole, preview } from "./view.js";
 
 // A run read as a conversation: what the user asked, what the model said and which tools it
 // called, in order. Built from LLM spans (their messages), tool spans, and agent spans, which
@@ -77,7 +77,7 @@ export function buildChat(t: TraceSnapshot, rootSpanId?: string): { root: string
         const role = String(m.role);
         const body = text(m.content);
         const history = i < current;
-        if (role === "system" && body && once(`system:${body}`)) items.push({ type: "system", text: body, span_id: s.id });
+        if (isSystemRole(role) && body && once(`system:${body}`)) items.push({ type: "system", text: body, span_id: s.id });
         else if (role === "user" && body && once(`user:${body}`)) items.push({ type: "user", text: body, span_id: s.id, ...(history ? { history } : {}) });
         else if (role === "assistant" && history && body && once(`assistant:${body}`)) items.push({ type: "assistant", text: body, span_id: s.id, tool_calls: [], history });
         else if ((role === "tool" || role === "function") && !hasTools && body && once(`tool:${body}`))

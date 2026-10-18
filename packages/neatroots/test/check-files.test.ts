@@ -52,6 +52,17 @@ const write = (steps: Step[]) => {
 };
 
 describe("checkFiles", () => {
+  it("flags a loop or error streak the agent later moved on from", () => {
+    const loop = write([...same("search", 4), tool("summarize", true, '{"n":4}')]);
+    const errs = write([
+      tool("charge", false, '{"a":1}'), tool("refund", false, '{"a":2}'), tool("lookup", false, '{"a":3}'),
+      tool("charge", true, '{"a":4}'), tool("refund", true, '{"a":5}'), tool("lookup", true, '{"a":6}'),
+    ]);
+    const r = checkFiles([loop, errs]);
+    expect(r.runs[0].findings.map((f) => f.check_id)).toContain("repeated-tool-call");
+    expect(r.runs[1].findings.map((f) => f.check_id)).toContain("tool-error-streak");
+  });
+
   it("flags a bad run and passes a good one", () => {
     const r = checkFiles([write(BAD[0]), write(GOOD[0])]);
     expect(r.runs.map((x) => x.findings.length > 0)).toEqual([true, false]);
@@ -68,6 +79,10 @@ describe("checkFiles", () => {
     expect(() => checkFiles([write(GOOD[0])], { only: ["nope"] })).toThrow(/no rule check named nope/);
   });
 
+  it("rejects an empty rule list instead of checking nothing", () => {
+    expect(() => checkFiles([write(BAD[0])], { only: [] })).toThrow(/names no rule ids/);
+  });
+  
   it("fails on a file that is not a trace", () => {
     const p = path.join(dir, "junk.json");
     fs.writeFileSync(p, "{oops");
@@ -90,5 +105,24 @@ describe("checkFiles", () => {
       else tn++;
     });
     expect({ tp, fn, fp, tn }).toEqual({ tp: 60, fn: 0, fp: 0, tn: 60 });
+  });
+
+  it("gives each file its own verdict when two files share a trace id, in either order", () => {
+    const checks = path.join(dir, "same-trace-checks");
+    fs.mkdirSync(checks, { recursive: true });
+    fs.writeFileSync(path.join(checks, "bad-name.yaml"), "id: bad-name\nkind: rule\nrule: {type: match, field: name, pattern: '^bad$'}\n");
+    const one = (file: string, spanId: string, name: string) => {
+      const span = { traceId: "0123456789abcdef0123456789abcdef", spanId, name, kind: 1, startTimeUnixNano: "1700000000000000000", endTimeUnixNano: "1700000000010000000", attributes: [], status: { code: 1 } };
+      const p = path.join(dir, file);
+      fs.writeFileSync(p, JSON.stringify({ resourceSpans: [{ resource: { attributes: [] }, scopeSpans: [{ scope: { name: "t" }, spans: [span] }] }] }));
+      return p;
+    };
+    const bad = one("same-bad.json", "0123456789abcdef", "bad");
+    const clean = one("same-clean.json", "fedcba9876543210", "clean");
+    const verdicts = (files: string[]) =>
+      checkFiles(files, { dirs: [checks], only: ["bad-name"] }).runs.map((r) => [path.basename(r.file), r.findings.flatMap((f) => f.evidence_span_ids)]);
+    expect(verdicts([clean])).toEqual([["same-clean.json", []]]);
+    expect(verdicts([bad, clean])).toEqual([["same-bad.json", ["0123456789abcdef"]], ["same-clean.json", []]]);
+    expect(verdicts([clean, bad])).toEqual([["same-clean.json", []], ["same-bad.json", ["0123456789abcdef"]]]);
   });
 });

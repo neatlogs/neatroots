@@ -10,8 +10,9 @@ neatroots mock-llm            # terminal 2
 cd examples/python-openai && uv run agent.py "Please refund order 1001"
 ```
 
-Then open http://localhost:4100. To run them all and check each produced a run:
-`sh examples/run-all.sh`. With the installer, they are in `~/.neatroots/app/examples`.
+Then open http://localhost:4100. `sh examples/run-all.sh` runs the automated agent examples
+and the HTTP API example, and checks that each produced a run. Run `browser`, `import-files`,
+`refund-agent`, and `samples` separately/by hand. With the installer, they are in `~/.neatroots/app/examples`.
 
 | Example | Language | How it sends runs | Shows |
 | --- | --- | --- | --- |
@@ -29,4 +30,4 @@ Then open http://localhost:4100. To run them all and check each produced a run:
 | [browser](browser) | HTML + JS | Neatlogs HTTP trace API from the browser | A chat widget sending traces |
 | [import-files](import-files) | files | `neatroots import` or Add data → Import files | An OpenInference OTLP JSON trace and Neatlogs HTTP traces as JSONL |
 | [refund-agent](refund-agent) | Python | Neatlogs SDK + steering hook | Steering: neatroots adds a note to the agent's next LLM call |
-| [samples](samples) | Python | Neatlogs SDK | Seven scripted failure scenarios (loops, ignored errors, prompt injection, leaks) |
+| [samples](samples) | Python | Neatlogs SDK | Eight scripted scenarios: six failures (loops, ignored errors, prompt injection, leaks, contradictions) and two healthy controls |

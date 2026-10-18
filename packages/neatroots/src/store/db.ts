@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { BlobStore } from "./blobs.js";
+import { SearchIds } from "./search-ids.js";
 import { sha256, newId } from "../util/ids.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
 import { kvToPlain, type KeyValue, type OtlpResource, type OtlpScope, type OtlpSpan, type Plain, type ResourceSpansBatch } from "../otlp/types.js";
@@ -108,10 +109,16 @@ CREATE TABLE IF NOT EXISTS spans (
 );
 CREATE INDEX IF NOT EXISTS spans_trace_start ON spans (trace_id, start_ms);
 CREATE INDEX IF NOT EXISTS spans_seq ON spans (seq);
+-- Covers the kind:, tool: and model: run filters, so they scan this instead of the wide span rows.
+CREATE INDEX IF NOT EXISTS spans_filter ON spans (span_kind, tool_name, model, is_marker, trace_id, span_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS span_fts USING fts5 (
   trace_id UNINDEXED, span_id UNINDEXED, name, tool_name, body, tokenize = 'porter unicode61'
 );
+-- The run and span of each span_fts row, by rowid, so span_fts rows are found by run or span
+-- without reading their text (see search-ids.ts).
+CREATE TABLE IF NOT EXISTS span_fts_ids (id INTEGER PRIMARY KEY, trace_id TEXT NOT NULL, span_id TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS span_fts_ids_span ON span_fts_ids (trace_id, span_id);
 
 CREATE TABLE IF NOT EXISTS logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -279,12 +286,54 @@ export interface RunFilter {
   hasFinding?: boolean;
   /** Runs with an open or resolved finding from this check. */
   checkId?: string;
+  /** Runs with an open finding. */
+  hasOpenFinding?: boolean;
+  /** Runs with a span of this kind (LLM, TOOL, ...) whose tool name and model contain these, ignoring case. */
+  spanKind?: string;
+  tool?: string;
+  model?: string;
   text?: string;
   sinceMs?: number;
   untilMs?: number;
   limit?: number;
   offset?: number;
   includeDoctor?: boolean;
+}
+
+type AggregateSpan = Pick<SpanRow, "is_marker" | "span_kind" | "status_code" | "prompt_tokens" | "completion_tokens" | "total_tokens">;
+
+interface RunContribution {
+  spans: number;
+  llmCalls: number;
+  toolCalls: number;
+  errors: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+const NO_RUN_CONTRIBUTION: RunContribution = {
+  spans: 0,
+  llmCalls: 0,
+  toolCalls: 0,
+  errors: 0,
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+};
+
+function runContribution(span: AggregateSpan): RunContribution {
+  if (span.is_marker) return NO_RUN_CONTRIBUTION;
+  const llm = span.span_kind === "LLM";
+  return {
+    spans: 1,
+    llmCalls: llm ? 1 : 0,
+    toolCalls: span.span_kind === "TOOL" || span.span_kind === "MCP_TOOL" ? 1 : 0,
+    errors: span.status_code === 2 ? 1 : 0,
+    promptTokens: llm ? (span.prompt_tokens ?? 0) : 0,
+    completionTokens: llm ? (span.completion_tokens ?? 0) : 0,
+    totalTokens: llm ? (span.total_tokens ?? 0) : 0,
+  };
 }
 
 function nsToMs(ns: string): number {
@@ -330,6 +379,25 @@ export function currentRequest(v: Parameters<typeof preview>[0]): string | undef
 /** Search covers this much of each input, output and error: the start and the end of long values. */
 export const SEARCH_LIMIT = { head: 150_000, tail: 50_000 };
 const SEARCH_INDEX_VERSION = 2;
+/** A store over its size cap is trimmed to this share of the cap, so it isn't trimmed every hour. */
+export const RETENTION_LOW_WATER = 0.9;
+
+/** Free text as an FTS5 query: each word quoted, so operators and punctuation match literally. */
+function ftsQuery(text: string): string {
+  return text
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((t) => `"${t.replace(/"/g, '""')}"`)
+    .join(" ");
+}
+
+/**
+ * A LIKE pattern for text anywhere in a column. Wildcards are escaped so a literal % or _ is
+ * matched as text, not as "match anything"; the ESCAPE '\' clauses that use it pair with this.
+ */
+function likeText(text: string): string {
+  return `%${text.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+}
 
 function searchText(v: Parameters<typeof preview>[0]): string {
   if (v === undefined || v === null) return "";
@@ -340,6 +408,7 @@ function searchText(v: Parameters<typeof preview>[0]): string {
 export class Store {
   readonly db: Database.Database;
   readonly blobs: BlobStore;
+  private readonly searchIds: SearchIds;
   private seq = 0;
   readonly dir: string;
   readonly file: string;
@@ -361,6 +430,7 @@ export class Store {
     this.db.pragma("busy_timeout = 5000");
     this.db.exec(SCHEMA);
     this.migrate();
+    this.searchIds = new SearchIds(this.db);
     this.blobs = new BlobStore(path.join(dir, "blobs"));
     const row = this.db.prepare("SELECT MAX(seq) AS s FROM spans").get() as { s: number | null };
     this.seq = row.s ?? 0;
@@ -411,6 +481,7 @@ export class Store {
   /** Stores spans losslessly and updates run, session and search rows. */
   ingest(batches: ResourceSpansBatch[]): TraceUpdate[] {
     const updates = new Map<string, TraceUpdate>();
+    const supersededBlobs = new Set<string>();
     const now = Date.now();
     const tx = this.db.transaction(() => {
       for (const b of batches) {
@@ -419,17 +490,26 @@ export class Store {
         const resAttrs = kvToPlain(b.resource.attributes);
         for (const span of b.spans) {
           const view = buildView(span, b.resource.attributes);
-          const exists = this.db
-            .prepare("SELECT 1 FROM spans WHERE trace_id = ? AND span_id = ?")
-            .get(span.traceId, span.spanId);
+          const previous = this.db
+            .prepare(
+              `SELECT is_marker, span_kind, status_code, prompt_tokens, completion_tokens, total_tokens, blobs
+               FROM spans WHERE trace_id = ? AND span_id = ?`,
+            )
+            .get(span.traceId, span.spanId) as (AggregateSpan & { blobs: string | null }) | undefined;
+          const previousBlobs = json<unknown>(previous?.blobs, null);
+          if (Array.isArray(previousBlobs)) {
+            for (const sha of previousBlobs) {
+              if (typeof sha === "string" && /^[0-9a-f]{64}$/.test(sha)) supersededBlobs.add(sha);
+            }
+          }
           let u = updates.get(span.traceId);
           if (!u) {
             u = { traceId: span.traceId, spans: [], runCreated: false, rootEnded: false, completed: false };
             updates.set(span.traceId, u);
           }
-          const row = this.writeSpan(span, view, resourceId, scopeId, now);
-          u.spans.push({ row, view, isNew: !exists });
-          const runFlags = this.updateRun(span, view, row, resAttrs, now, !exists);
+          const row = this.writeSpan(span, view, resourceId, scopeId, now, !previous);
+          u.spans.push({ row, view, isNew: !previous });
+          const runFlags = this.updateRun(span, view, row, resAttrs, now, previous);
           if (runFlags.created) u.runCreated = true;
           if (runFlags.rootEnded) u.rootEnded = true;
           if (runFlags.completed) u.completed = true;
@@ -437,10 +517,12 @@ export class Store {
       }
     });
     tx();
+    // Files are reclaimed only after the span replacement commits and no remaining span uses them.
+    this.reclaimUnreferencedBlobs(supersededBlobs);
     return [...updates.values()];
   }
 
-  private writeSpan(span: OtlpSpan, view: SpanView, resourceId: string, scopeId: string, now: number): SpanRow {
+  private writeSpan(span: OtlpSpan, view: SpanView, resourceId: string, scopeId: string, now: number, isNew: boolean): SpanRow {
     const used = new Set<string>();
     const attributes = this.blobs.offload(span.attributes, used);
     const events = span.events.map((e) => ({ ...e, attributes: this.blobs.offload(e.attributes, used) }));
@@ -468,7 +550,7 @@ export class Store {
       end_ms: endMs,
       duration_ms: Math.max(0, endMs - startMs),
       status_code: span.status.code,
-      status_message: span.status.message ?? null,
+      status_message: span.status.message != null ? (typeof span.status.message === "string" ? span.status.message : JSON.stringify(span.status.message)) : null,
       model: view.model ?? null,
       provider: view.provider ?? null,
       tool_name: view.toolName ?? null,
@@ -504,7 +586,7 @@ export class Store {
         blobs: used.size ? JSON.stringify([...used]) : null,
       });
     if (!view.isMarker) {
-      this.indexSpan(span.traceId, span.spanId, span.name, view);
+      this.indexSpan(span.traceId, span.spanId, span.name, view, !isNew);
     }
     return row;
   }
@@ -515,7 +597,7 @@ export class Store {
     row: SpanRow,
     resAttrs: Record<string, Plain>,
     now: number,
-    isNew: boolean,
+    previous: AggregateSpan | undefined,
   ): { created: boolean; rootEnded: boolean; completed: boolean } {
     const flags = { created: false, rootEnded: false, completed: false };
     let run = this.getRun(span.traceId);
@@ -553,18 +635,22 @@ export class Store {
           sets.push("ended_ms = COALESCE(ended_ms, @end)");
         }
       }
-    } else if (isNew) {
-      sets.push("span_count = span_count + 1");
-      if (view.kind === "LLM") {
-        sets.push("llm_calls = llm_calls + 1");
-        sets.push("prompt_tokens = prompt_tokens + @pt", "completion_tokens = completion_tokens + @ct", "total_tokens = total_tokens + @tt");
-        p.pt = view.promptTokens ?? 0;
-        p.ct = view.completionTokens ?? 0;
-        p.tt = view.totalTokens ?? 0;
-      }
-      if (view.kind === "TOOL" || view.kind === "MCP_TOOL") sets.push("tool_calls = tool_calls + 1");
-      if (span.status.code === 2) sets.push("error_count = error_count + 1");
     }
+    const before = previous ? runContribution(previous) : NO_RUN_CONTRIBUTION;
+    const afterContribution = runContribution(row);
+    const addDelta = (column: string, parameter: string, next: number, prior: number) => {
+      const delta = next - prior;
+      if (!delta) return;
+      sets.push(`${column} = ${column} + @${parameter}`);
+      p[parameter] = delta;
+    };
+    addDelta("span_count", "spanDelta", afterContribution.spans, before.spans);
+    addDelta("llm_calls", "llmDelta", afterContribution.llmCalls, before.llmCalls);
+    addDelta("tool_calls", "toolDelta", afterContribution.toolCalls, before.toolCalls);
+    addDelta("error_count", "errorDelta", afterContribution.errors, before.errors);
+    addDelta("prompt_tokens", "promptDelta", afterContribution.promptTokens, before.promptTokens);
+    addDelta("completion_tokens", "completionDelta", afterContribution.completionTokens, before.completionTokens);
+    addDelta("total_tokens", "totalDelta", afterContribution.totalTokens, before.totalTokens);
     if (view.interrupted) {
       sets.push("interrupted = 1", "status = 'interrupted'");
       if (view.terminationReason) {
@@ -644,7 +730,8 @@ export class Store {
     return this.db.prepare("SELECT * FROM runs WHERE trace_id = ?").get(traceId) as RunRow | undefined;
   }
 
-  listRuns(f: RunFilter = {}): RunRow[] {
+  /** The WHERE clauses and parameters for a run filter, shared by listing and counting. */
+  private runFilter(f: RunFilter): { where: string[]; p: Record<string, unknown> } {
     const where: string[] = [];
     const p: Record<string, unknown> = {};
     if (!f.includeDoctor) where.push("doctor = 0");
@@ -665,10 +752,25 @@ export class Store {
       p.session = f.sessionId;
     }
     if (f.hasFinding) where.push("finding_count > 0");
+    if (f.hasOpenFinding) where.push("open_finding_count > 0");
     if (f.checkId) {
       where.push("trace_id IN (SELECT trace_id FROM findings WHERE check_id = @check AND status NOT IN ('dismissed', 'failed', 'quiet'))");
       p.check = f.checkId;
     }
+    const span: string[] = [];
+    if (f.spanKind) {
+      span.push("s.span_kind = @kind");
+      p.kind = f.spanKind;
+    }
+    if (f.tool) {
+      span.push("s.tool_name LIKE @tool ESCAPE '\\'");
+      p.tool = likeText(f.tool);
+    }
+    if (f.model) {
+      span.push("s.model LIKE @model ESCAPE '\\'");
+      p.model = likeText(f.model);
+    }
+    if (span.length && !f.text) where.push(`trace_id IN (SELECT s.trace_id FROM spans s WHERE s.is_marker = 0 AND ${span.join(" AND ")})`);
     if (f.sinceMs) {
       where.push("started_ms >= @since");
       p.since = f.sinceMs;
@@ -678,20 +780,40 @@ export class Store {
       p.until = f.untilMs;
     }
     if (f.text) {
-      const ids = this.searchSpans(f.text, 500).map((h) => h.trace_id);
-      // Escape LIKE wildcards so a literal % or _ in the query is matched as text,
-      // not as "match anything". The ESCAPE clauses below pair with this.
-      const escaped = f.text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
-      const like = `%${escaped}%`;
-      where.push(`(trace_id IN (SELECT value FROM json_each(@ids)) OR root_name LIKE @like ESCAPE '\\' OR workflow LIKE @like ESCAPE '\\' OR input_preview LIKE @like ESCAPE '\\' OR output_preview LIKE @like ESCAPE '\\')`);
-      p.ids = JSON.stringify([...new Set(ids)]);
+      // Match the full-text index inside this query, so every matching run can be listed and
+      // paged newest first. (Taking the best-ranked 500 spans first dropped matching runs whose
+      // match ranked low, even the newest one.)
+      const match = ftsQuery(f.text);
+      const indexed = !!match && this.ftsQueryOk(match);
+      if (span.length) {
+        // With span filters the text must match a span that passes them: tool:issue_refund timeout means the
+        // refund call mentions "timeout". Without the index there is no per-span text to match, as before.
+        // INDEXED BY: probing the wide span rows for every text match is about twice as slow on a large store.
+        where.push(indexed ? `trace_id IN (SELECT s.trace_id FROM spans s INDEXED BY spans_filter WHERE ${span.join(" AND ")} AND (s.trace_id, s.span_id) IN (${this.searchIds.matching("trace_id, span_id")}))` : "0");
+        if (indexed) p.match = match;
+        return { where, p };
+      }
+      const like = likeText(f.text);
+      where.push(`(${indexed ? `trace_id IN (${this.searchIds.matching("trace_id")}) OR ` : ""}root_name LIKE @like ESCAPE '\\' OR workflow LIKE @like ESCAPE '\\' OR input_preview LIKE @like ESCAPE '\\' OR output_preview LIKE @like ESCAPE '\\')`);
+      if (indexed) p.match = match;
       p.like = like;
     }
+    return { where, p };
+  }
+
+  listRuns(f: RunFilter = {}): RunRow[] {
+    const { where, p } = this.runFilter(f);
     const sql = `SELECT * FROM runs ${where.length ? "WHERE " + where.join(" AND ") : ""}
       ORDER BY COALESCE(started_ms, received_ms) DESC LIMIT @limit OFFSET @offset`;
     p.limit = Number.isFinite(f.limit) ? Math.min(Math.max(Math.trunc(f.limit as number), 1), 500) : 50;
     p.offset = Number.isFinite(f.offset) ? Math.max(Math.trunc(f.offset as number), 0) : 0;
     return this.db.prepare(sql).all(p) as RunRow[];
+  }
+
+  /** How many runs a filter matches, whatever the page size. */
+  countMatchingRuns(f: RunFilter = {}): number {
+    const { where, p } = this.runFilter(f);
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM runs ${where.length ? "WHERE " + where.join(" AND ") : ""}`).get(p) as { n: number }).n;
   }
 
   countRuns(): number {
@@ -768,22 +890,32 @@ export class Store {
     return [...groups.values()];
   }
 
-  searchSpans(text: string, limit = 50): { trace_id: string; span_id: string; name: string; snippet: string }[] {
-    const q = text
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((t) => `"${t.replace(/"/g, '""')}"`)
-      .join(" ");
+  /**
+   * Best-ranked spans matching `text`. With `traceIds`, only spans from those runs, in stored order:
+   * ranking would score every match in the store, which costs more than the rest of a search.
+   */
+  searchSpans(text: string, limit = 50, traceIds?: string[]): { trace_id: string; span_id: string; name: string; snippet: string }[] {
+    const q = ftsQuery(text);
     if (!q) return [];
     try {
       return this.db
         .prepare(
           `SELECT trace_id, span_id, name, snippet(span_fts, 4, '[', ']', '…', 12) AS snippet
-           FROM span_fts WHERE span_fts MATCH ? ORDER BY rank LIMIT ?`,
+           FROM span_fts WHERE span_fts MATCH ? ${traceIds ? `AND ${this.searchIds.inRuns(traceIds.length)}` : "ORDER BY rank"} LIMIT ?`,
         )
-        .all(q, limit) as { trace_id: string; span_id: string; name: string; snippet: string }[];
+        .all(q, ...(traceIds ?? []), limit) as { trace_id: string; span_id: string; name: string; snippet: string }[];
     } catch {
       return [];
+    }
+  }
+
+  /** True when `match` parses as a full-text query (so it can go inside a larger query safely). */
+  private ftsQueryOk(match: string): boolean {
+    try {
+      this.db.prepare("SELECT 1 FROM span_fts WHERE span_fts MATCH ? LIMIT 1").get(match);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -1171,25 +1303,84 @@ export class Store {
       const old = this.db
         .prepare("SELECT trace_id FROM runs WHERE pinned = 0 AND COALESCE(ended_ms, received_ms) < ?")
         .all(cutoff) as { trace_id: string }[];
-      for (const r of old) {
-        this.deleteRun(r.trace_id);
-        removed++;
-      }
+      this.deleteRuns(old.map((r) => r.trace_id));
+      removed += old.length;
     }
-    let size = this.diskBytes();
-    while (size > maxBytes) {
-      const oldest = this.db
-        .prepare("SELECT trace_id FROM runs WHERE pinned = 0 ORDER BY COALESCE(ended_ms, received_ms) ASC LIMIT 20")
-        .all() as { trace_id: string }[];
-      if (!oldest.length) break;
-      for (const r of oldest) {
-        this.deleteRun(r.trace_id);
-        removed++;
-      }
-      size = this.diskBytes();
+    // Measure what the database holds, not the file size: SQLite keeps the file (and WAL) at its
+    // high-water mark after a delete and reuses the freed pages, so the file size never drops
+    // after a delete and measuring it would delete every unpinned run.
+    let size = this.storedBytes();
+    if (size > maxBytes) {
+      // Deleting from the full-text index leaves "deleted" markers until it is compacted, so the
+      // size can read high. Compact (once per sweep, and only when over the cap) before trusting it.
+      this.compactSearchIndex();
+      size = this.storedBytes();
+    }
+    if (size > maxBytes) {
+      // Trim the oldest unpinned runs down to a low-water mark below the cap, so a store sitting
+      // at its cap isn't trimmed (and compacted) again on every hourly sweep.
+      const oldest = this.oldestRunsCovering(size - maxBytes * RETENTION_LOW_WATER, size);
+      this.deleteRuns(oldest);
+      removed += oldest.length;
     }
     if (removed) this.db.pragma("wal_checkpoint(TRUNCATE)");
     return removed;
+  }
+
+  /**
+   * The oldest unpinned runs whose share of storedBytes() adds up to `excess`. A run's span rows
+   * are scaled to the database's share of `stored` (which also holds the search index and table
+   * overhead). Blobs are shared between runs, so a blob counts only toward the run whose deletion
+   * actually frees it: the newest run that references it, and never one a pinned run still uses.
+   * Returns at least one run while any unpinned run exists.
+   */
+  private oldestRunsCovering(excess: number, stored: number): string[] {
+    const rowBytes = `octet_length(s.attributes) + octet_length(s.events) + octet_length(s.links) + IFNULL(octet_length(s.extra), 0) + IFNULL(octet_length(s.input_preview), 0) + IFNULL(octet_length(s.output_preview), 0) + octet_length(s.name)`;
+    // A big value lives in a blob file but its text is also in the search index, so the
+    // indexed text counts toward the run too.
+    const indexed = new Map(
+      (this.db.prepare("SELECT trace_id AS t, SUM(octet_length(name) + octet_length(tool_name) + octet_length(body)) AS f FROM span_fts GROUP BY trace_id").all() as { t: string; f: number }[]).map((r) => [r.t, r.f]),
+    );
+    const rows = (
+      this.db
+        .prepare(
+          `SELECT r.trace_id AS t, r.pinned AS pinned, COALESCE(SUM(${rowBytes}), 0) AS w, group_concat(s.blobs, '') AS b
+           FROM runs r LEFT JOIN spans s ON s.trace_id = r.trace_id
+           GROUP BY r.trace_id ORDER BY COALESCE(r.ended_ms, r.received_ms) ASC`,
+        )
+        .all() as { t: string; pinned: number; w: number; b: string | null }[]
+    ).map((r) => ({ ...r, w: r.w + (indexed.get(r.t) ?? 0) }));
+    const shas = rows.map((r) => (r.b ? [...new Set(r.b.match(/[0-9a-f]{64}/g) ?? [])] : []));
+    const lastRef = new Map<string, number>();
+    shas.forEach((list, i) => list.forEach((sha) => lastRef.set(sha, rows[i].pinned ? Infinity : Math.max(lastRef.get(sha) ?? -1, i))));
+    const blobTotal = this.blobs.size();
+    const rowTotal = rows.reduce((n, r) => n + r.w, 0);
+    // Every table and index keeps at least its root page however many runs are deleted.
+    const fixed = (this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_schema WHERE rootpage > 0").get() as { n: number }).n * (this.db.pragma("page_size", { simple: true }) as number);
+    const rowScale = rowTotal > 0 ? Math.max(0, stored - blobTotal - fixed) / rowTotal : 0;
+    const pick: string[] = [];
+    let freed = 0;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].pinned) continue;
+      pick.push(rows[i].t);
+      freed += rows[i].w * rowScale;
+      for (const sha of shas[i]) if (lastRef.get(sha) === i) freed += this.blobs.sizeOf(sha);
+      if (freed >= excess) break;
+    }
+    return pick;
+  }
+
+  /** Merges the full-text index so space held by deleted spans is actually released. */
+  private compactSearchIndex(): void {
+    this.db.prepare("INSERT INTO span_fts(span_fts) VALUES('optimize')").run();
+  }
+
+  /** Bytes of data actually stored: database pages in use (not free pages) plus payload blobs. */
+  storedBytes(): number {
+    const pages = this.db.pragma("page_count", { simple: true }) as number;
+    const free = this.db.pragma("freelist_count", { simple: true }) as number;
+    const pageSize = this.db.pragma("page_size", { simple: true }) as number;
+    return (pages - free) * pageSize + this.blobs.size();
   }
 
   diskBytes(): number {
@@ -1205,20 +1396,38 @@ export class Store {
   }
 
   deleteRun(traceId: string): void {
-    const blobRows = this.db.prepare("SELECT blobs FROM spans WHERE trace_id = ? AND blobs IS NOT NULL").all(traceId) as { blobs: string }[];
+    this.deleteRuns([traceId]);
+  }
+
+  /**
+   * Deletes runs in one go. Until the search index's run ids are filled in (the first start after
+   * an update), deleting from it by run scans the whole index; doing it once for the batch, not
+   * once per run, keeps a large retention trim fast.
+   */
+  deleteRuns(traceIds: string[]): void {
+    if (!traceIds.length) return;
+    const ids = JSON.stringify(traceIds);
+    const inIds = "trace_id IN (SELECT value FROM json_each(?))";
+    const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
     const tx = this.db.transaction(() => {
-      for (const t of ["spans", "span_fts", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
-        this.db.prepare(`DELETE FROM ${t} WHERE trace_id = ?`).run(traceId);
+      this.searchIds.deleteRuns(ids);
+      for (const t of ["spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
+        this.db.prepare(`DELETE FROM ${t} WHERE ${inIds}`).run(ids);
       }
-      this.db.prepare("DELETE FROM runs WHERE trace_id = ?").run(traceId);
+      this.db.prepare(`DELETE FROM runs WHERE ${inIds}`).run(ids);
     });
     tx();
-    for (const r of blobRows) {
-      for (const sha of json<string[]>(r.blobs, [])) {
-        const still = this.db.prepare("SELECT 1 FROM spans WHERE blobs LIKE ? LIMIT 1").get(`%${sha}%`);
-        if (!still) this.blobs.delete(sha);
-      }
-    }
+    this.reclaimUnreferencedBlobs(shas);
+  }
+
+  /** Deletes candidate payloads only after checking every remaining span reference. */
+  private reclaimUnreferencedBlobs(candidates: Iterable<string>): void {
+    const shas = [...new Set(candidates)];
+    if (!shas.length) return;
+    const used = new Set(
+      (this.db.prepare("SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.blobs IS NOT NULL AND j.value IN (SELECT value FROM json_each(?))").all(JSON.stringify(shas)) as { sha: string }[]).map((r) => r.sha),
+    );
+    for (const sha of shas) if (!used.has(sha)) this.blobs.delete(sha);
   }
 
   stats(): { runs: number; spans: number; findings: number; bytes: number } {
@@ -1252,25 +1461,30 @@ export class Store {
   }
 
   /** Full-text index for a span: its input, output and error, as much as SEARCH_LIMIT allows. */
-  private indexSpan(traceId: string, spanId: string, name: string, view: SpanView): void {
-    this.db.prepare("DELETE FROM span_fts WHERE trace_id = ? AND span_id = ?").run(traceId, spanId);
+  private indexSpan(traceId: string, spanId: string, name: string, view: SpanView, replace = true): void {
+    // A span stored for the first time has no index rows yet (they are only deleted with the span).
+    if (replace) this.searchIds.deleteSpan(traceId, spanId);
     const body = [searchText(view.input), searchText(view.output), searchText(view.error ?? undefined)].join("\n");
-    this.db.prepare("INSERT INTO span_fts (trace_id, span_id, name, tool_name, body) VALUES (?, ?, ?, ?, ?)").run(traceId, spanId, name, view.toolName ?? "", body);
+    const { lastInsertRowid } = this.db.prepare("INSERT INTO span_fts (trace_id, span_id, name, tool_name, body) VALUES (?, ?, ?, ?, ?)").run(traceId, spanId, name, view.toolName ?? "", body);
+    this.searchIds.add(lastInsertRowid, traceId, spanId);
+  }
+
+  /** Fills in the run and span of each search-index row, for a store from an older version. */
+  rebuildSearchIds(onDone?: (rows: number, ready: boolean) => void): void {
+    this.searchIds.rebuild(onDone);
   }
 
   /**
    * Re-indexes spans stored before the index covered whole values (it kept 4,000 characters of
    * each), a few hundred at a time so startup isn't held up. Runs once per database.
    */
-  reindexSearch(onDone?: (n: number) => void): void {
+  reindexSearch(onDone?: (n: number, ok: boolean) => void): void {
     if (this.getMeta("search_index") === String(SEARCH_INDEX_VERSION)) return;
     let after = 0;
     let n = 0;
-    const step = () => {
-      if (!this.db.open) return;
-      const rows = this.db.prepare("SELECT seq, trace_id, span_id FROM spans WHERE seq > ? ORDER BY seq LIMIT 300").all(after) as { seq: number; trace_id: string; span_id: string }[];
+    // Each chunk commits as one, so the index and its run ids (span_fts_ids) change together.
+    const chunk = this.db.transaction((rows: { seq: number; trace_id: string; span_id: string }[]) => {
       for (const r of rows) {
-        after = r.seq;
         const full = this.getOtlpSpan(r.trace_id, r.span_id);
         if (!full) continue;
         const view = buildView(full.span, full.resource.attributes);
@@ -1278,11 +1492,24 @@ export class Store {
         this.indexSpan(r.trace_id, r.span_id, full.span.name, view);
         n++;
       }
-      if (rows.length) setImmediate(step);
-      else {
+    });
+    const step = () => {
+      if (!this.db.open) return;
+      try {
+        const rows = this.db.prepare("SELECT seq, trace_id, span_id FROM spans WHERE seq > ? ORDER BY seq LIMIT 300").all(after) as { seq: number; trace_id: string; span_id: string }[];
+        chunk(rows);
+        if (rows.length) {
+          after = rows[rows.length - 1].seq;
+          setImmediate(step);
+          return;
+        }
         this.setMeta("search_index", String(SEARCH_INDEX_VERSION));
-        onDone?.(n);
+      } catch {
+        // A busy or failing database: stop (a failed chunk rolls back), and start over at the next start.
+        onDone?.(n, false);
+        return;
       }
+      onDone?.(n, true);
     };
     setImmediate(step);
   }

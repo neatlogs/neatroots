@@ -69,7 +69,7 @@
 
 - id: unrecovered-tool-failure
   kind: rule
-  group: loop
+  group: tool-result
   title: A tool call failed and the run still ended with an answer
   rule:
     type: unrecovered_error
@@ -88,6 +88,46 @@
     pattern: '(sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|Bearer [A-Za-z0-9._~+/=-]{24,})'
     flags: ''
   guidance: A tool result contains what looks like a credential. Do not repeat it in your reply or pass it to other tools. Refer to it by name instead.
+
+- id: soft-tool-failure
+  kind: rule
+  group: tool-result
+  title: A tool reported success but its output looks like a failure
+  rule:
+    type: match
+    span: { type: [tool, mcp_tool], status: ok }
+    field: output
+    pattern: '"(error|errors|exception)"\s*:\s*("[^"\s]|\{|\[\s*[^\]\s])|"(status|status_code|http_status)"\s*:\s*"?[45]\d\d\b|rate limit(ed)? exceeded|too many requests|internal server error|service unavailable|traceback \(most recent call last\)|(^|\n)\s*error:|\bHTTP [45]\d\d\b'
+  guidance: >-
+    The output of {span} looks like an error even though the call did not fail. Do not treat it as a
+    result. Check it, retry or tell the user.
+
+- id: context-growth
+  kind: rule
+  title: The model calls keep getting bigger
+  rule:
+    type: growth
+    span: { type: llm }
+    min_calls: 5
+    rising: 0.8
+    factor: 3
+    min_tokens: 4000
+  guidance: >-
+    The model calls in this run grew from {first} to {last} tokens over {count} calls. Context is piling
+    up. Summarize or drop old messages before it hits the limit.
+
+- id: tool-cycle
+  kind: rule
+  group: loop
+  title: Two or more tools are going around in a circle
+  rule:
+    type: cycle
+    span: { type: [tool, mcp_tool] }
+    max_period: 3
+    min_cycles: 4
+  guidance: >-
+    The last calls repeat {pattern} {count} times and keep returning the same results, even if the
+    inputs differ. This is not making progress. Stop, change the approach or ask the user.
 
 - id: run-failed
   kind: rule

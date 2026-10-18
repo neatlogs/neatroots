@@ -34,3 +34,42 @@ test.describe("runs list", () => {
     await expect(page.getByRole("cell", { name: input })).toBeVisible();
   });
 });
+
+// Runs made inside a test, in a project of their own, so repeats don't see each other's. They are
+// dated 2020 so they sort after the seeded runs other tests look for on the first page.
+async function sendRuns(project: string, n: number): Promise<string[]> {
+  const ids: string[] = [];
+  for (let i = 0; i < n; i += 25) {
+    const batch = Array.from({ length: Math.min(25, n - i) }, (_, k) =>
+      fetch(`${state().url}/v1/trace`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "step", project, input: `request ${i + k}`, output: "done", start: new Date(Date.UTC(2020, 0, 1) + (i + k) * 1000).toISOString(), duration_ms: 5 }) }).then((r) => r.json() as Promise<{ trace_id: string }>),
+    );
+    for (const r of await Promise.all(batch)) ids.push(r.trace_id);
+  }
+  return ids;
+}
+
+test.describe("runs list beyond one page", () => {
+  test("Load more runs reaches runs past the first 150", async ({ page }) => {
+    const project = `e2e-many-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    await sendRuns(project, 155);
+    await open(page, `runs?project=${project}`);
+    await expect(page.getByText(/^155 matching of \d+ runs, newest 150 shown$/)).toBeVisible({ timeout: 15_000 });
+    await page.getByRole("button", { name: "Load more runs" }).click();
+    await expect(page.getByText(/^155 matching of \d+ runs$/)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Load more runs" })).toBeHidden();
+  });
+});
+
+test.describe("deleting a run", () => {
+  test("Delete run asks first, then removes it and goes back to the list", async ({ page }) => {
+    const [id] = await sendRuns(`e2e-delete-${Date.now()}`, 1);
+    await open(page, `runs/${id}`);
+    await page.getByRole("button", { name: "More actions" }).click();
+    await page.getByRole("menuitem", { name: "Delete run" }).click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog.getByText("Delete this run?")).toBeVisible();
+    await dialog.getByRole("button", { name: "Delete run" }).click();
+    await expect(page).toHaveURL(/#\/runs$/);
+    expect((await fetch(`${state().url}/api/runs/${id}`)).status).toBe(404);
+  });
+});

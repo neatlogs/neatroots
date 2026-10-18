@@ -3,3 +3,6 @@ contact_links:
   - name: Getting started
     url: https://github.com/neatlogs/neatroots/blob/main/docs/getting-started.md
     about: Install, sending runs, replay, coding agents and troubleshooting.
+  - name: How contributions work
+    url: https://github.com/neatlogs/neatroots/blob/main/MAINTAINERS.md
+    about: Who maintains neatroots, and what to do before opening a pull request.

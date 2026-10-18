@@ -117,8 +117,9 @@ uv run agent.py "Please refund order 1001"
 MODEL=mock-sloppy uv run agent.py "Please refund order 4512"   # claims success after a failed tool
 ```
 
-Open http://localhost:4100 and click the run. `sh ~/.neatroots/app/examples/run-all.sh` runs every
-example and checks each one produced a run. [examples/](examples) lists them: OpenAI, Anthropic,
+Open http://localhost:4100 and click the run. `sh ~/.neatroots/app/examples/run-all.sh` runs the
+automated agent examples and the HTTP API example, and checks that each produced a run.
+Run `browser`, `import-files`, `refund-agent`, and `samples` separately/by hand. [examples/](examples) lists them: OpenAI, Anthropic,
 LangGraph, OpenAI Agents SDK handoffs, sub-agents, multi-turn sessions, replay, plain OpenTelemetry,
 TypeScript, Vercel AI SDK, the HTTP API, a browser page, and trace files to import.
 
@@ -221,7 +222,8 @@ client = neatroots_steer.wrap(OpenAI())      # or Anthropic(); sync or async
 ```
 
 Modes: `advisory` (a note on the next LLM call), `gate` (each call waits up to 300 ms for pending
-checks), `self-check` (the agent gets `check_my_work`), and `halt` from rules you write. At most one
+checks), and `self-check` (the agent gets `check_my_work`). In any of them, rules you write with
+`action: halt` stop the run; with steering `off`, nothing is sent, halts included. At most one
 note per call and three per run. See [docs/steering.md](docs/steering.md).
 
 ## What leaves your machine
@@ -230,7 +232,7 @@ note per call and three per run. See [docs/steering.md](docs/steering.md).
 | --- | --- | --- |
 | Collector, checks, Laya, local LLM, store, app, MCP | On | Nothing |
 | Hosted LLM | Off | The run content each LLM task needs, minus secrets, to the provider you pick |
-| Jev cloud | Off | Span content a question needs, to api.typesafe.ai |
+| Jev cloud | Off | Span content a question needs, credentials removed, to api.typesafe.ai |
 | Neatlogs Cloud forward | Off | Runs you send, redacted first, to ingest.neatlogs.com |
 | Neatlogs Cloud import | Off | Requests to app.neatlogs.com with your service-account token |
 | Coding agents in the app | Off | Whatever Claude Code or Codex sends to their own providers |
@@ -253,7 +255,7 @@ can read) and never in the database.
 | `neatroots llm`, `neatroots models`, `neatroots jev` | Where LLM and decision-model work runs |
 | `neatroots steering <mode> --project <name>` | Steering per project; `neatroots steering stop` turns it off everywhere |
 | `neatroots checks list`, `neatroots checks validate <file>` | Checks in force, and YAML validation |
-| `neatroots check <files...>` | Run the rule checks over saved traces with no server or model. Exits 1 if a rule fires, for CI |
+| `neatroots check <files...>` | Run the rule checks over saved traces with no server or model. Exits 0 when clean, 1 if a rule fires, 2 for invalid input or check configuration |
 | `neatroots cloud login`, `neatroots cloud forward <trace>` | Neatlogs Cloud: send runs (project API key) |
 | `neatroots cloud token`, `neatroots cloud project` | Neatlogs Cloud: import traces (service-account token) |
 | `neatroots service install`, `neatroots update` | Run at login; update to the latest release |
@@ -283,11 +285,11 @@ can read) and never in the database.
 
 ```bash
 pnpm install && pnpm build    # UI, then the server (copies the UI into packages/neatroots/dist/ui)
-pnpm test                     # server tests (vitest)
+pnpm test                     # server and TypeScript steering tests (vitest)
 pnpm --filter @neatlogs/neatroots-ui e2e     # UI end-to-end tests (Playwright; real server, mock LLM)
-cd packages/steer-ts && pnpm test
-cd python/neatroots-steer && python -m pytest
-sh examples/run-all.sh        # every example, against a running neatroots
+(cd python/neatroots-steer && python -m pytest)
+pnpm typecheck                # all pnpm workspaces
+sh examples/run-all.sh        # agent and HTTP API examples against a running neatroots; browser, import-files, refund-agent, samples by hand
 pnpm --filter @neatlogs/neatroots dev        # server with reload on 4100
 pnpm --filter @neatlogs/neatroots-ui dev     # UI on 5173 (set NEATROOTS_DEV_ORIGIN=http://localhost:5173 on the server)
 ```
@@ -295,6 +297,10 @@ pnpm --filter @neatlogs/neatroots-ui dev     # UI on 5173 (set NEATROOTS_DEV_ORI
 neatroots is built from public inputs: the public Neatlogs SDKs and their telemetry schema,
 OpenTelemetry, MCP, publicly documented APIs, and openly licensed models. Issues and pull requests
 are welcome; [AGENTS.md](AGENTS.md) has the conventions.
+
+neatroots is maintained by [@akshay-neatlogs](https://github.com/akshay-neatlogs), with
+[@harshk-neatlogs](https://github.com/harshk-neatlogs) and [@taranum-neatlogs](https://github.com/taranum-neatlogs)
+on the core team. [MAINTAINERS.md](MAINTAINERS.md) says how contributions are handled.
 
 ## License
 

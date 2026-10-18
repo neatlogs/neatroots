@@ -1,3 +1,4 @@
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadTrace } from "../src/engine/trace.js";
 import { EXPLORE_TOOLS } from "../src/mcp/explore-tools.js";
@@ -5,7 +6,7 @@ import { toChat } from "../src/replay/replay.js";
 import { Replays } from "../src/replay/replay.js";
 import { buildChat } from "../src/semantics/chat-view.js";
 import { parseSearch } from "../src/server/api-explore.js";
-import { batch, hex, llmSpan, makeRoots, mockLlm, span, toolSpan, until, type TestRoots } from "./helpers.js";
+import { batch, hex, llmSpan, makeRoots, mockLlm, s, span, tmpHome, toolSpan, until, type TestRoots } from "./helpers.js";
 
 let t: TestRoots | undefined;
 let llm: Awaited<ReturnType<typeof mockLlm>> | undefined;
@@ -83,6 +84,32 @@ describe("replay", () => {
     expect(() => t!.roots.replays.startRun(hex(16))).toThrow(/run not found/);
   }, 30_000);
 
+  it("fails the replay, not the server, when the rerun folder is gone", async () => {
+    t = await makeRoots({ noEngine: true });
+    const x = seed(t);
+    // Registered while the folder existed, then the folder was deleted (a removed worktree, say).
+    const gone = path.join(tmpHome(), "deleted-agent-dir");
+    t.roots.config.rerun["support-agent"] = { command: "node -e 0", cwd: gone };
+    const { done } = t.roots.replays.startRun(x.traceId);
+    const r = await done;
+    expect(r.state).toBe("failed");
+    expect(r.error).toMatch(/rerun folder .*deleted-agent-dir doesn't exist/);
+    expect(t.roots.replays.get(r.id)?.state).toBe("failed");
+  });
+
+  it("refuses to register a rerun command in a folder that doesn't exist", async () => {
+    t = await makeRoots({ noEngine: true, serve: true });
+    const post = (cwd: string) =>
+      fetch(`${t!.url}/api/projects/support-agent/rerun`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ command: "node agent.js", cwd }) });
+    const bad = await post(path.join(tmpHome(), "missing"));
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error).toMatch(/no such folder/);
+    expect(t.roots.config.rerun["support-agent"]).toBeUndefined();
+    const dir = tmpHome();
+    expect((await post(dir)).status).toBe(200);
+    expect(t.roots.config.rerun["support-agent"]).toMatchObject({ command: "node agent.js", cwd: dir });
+  });
+
   it("marks replays left running as failed on restart", async () => {
     t = await makeRoots({ noEngine: true });
     const id = `rp_${hex(6)}`;
@@ -141,5 +168,38 @@ describe("search and exploring tools", () => {
     await tool("show_in_ui").run(t.roots, { trace_id: a.traceId, view: "timeline" });
     await until(() => nav.length > 0);
     expect(nav[0]).toBe(`runs/${a.traceId}?view=timeline`);
+  });
+
+  it("list_projects counts failed runs, including ones interrupted by a restart", async () => {
+    t = await makeRoots({ noEngine: true });
+    const ok = hex(16);
+    const bad = hex(16);
+    const cut = hex(16);
+    t.roots.ingest([
+      batch([span({ traceId: ok, name: "checkout", kind: "workflow" })], "shop-agent"),
+      batch([span({ traceId: bad, name: "checkout", kind: "workflow", status: 2, message: "gateway timeout" })], "shop-agent"),
+      batch([span({ traceId: cut, name: "checkout", kind: "workflow", attrs: [s("neatlogs.trace.interrupted", true)] })], "shop-agent"),
+      batch([span({ traceId: hex(16), name: "browse", kind: "workflow" })], "calm-agent"),
+    ]);
+    const projects = (await tool("list_projects").run(t.roots, {})) as { project: string; runs: number; failed: number }[];
+    const shop = projects.find((p) => p.project === "shop-agent")!;
+    expect(shop.runs).toBe(3);
+    // Runs store ok/error/interrupted; a failed count of 0 for a project with an error and an
+    // interrupted run is the bug.
+    expect(shop.failed).toBe(2);
+    expect(projects.find((p) => p.project === "calm-agent")!.failed).toBe(0);
+  });
+
+  it("stops a SQL query at the row cap instead of running it to the end", async () => {
+    t = await makeRoots({ noEngine: true });
+    type Out = { rows: { n: number }[]; truncated: boolean };
+    const exact = (await tool("query_sql").run(t.roots, { sql: "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c LIMIT 200) SELECT n FROM c" })) as Out;
+    expect(exact.truncated).toBe(false);
+    expect(exact.rows).toHaveLength(200);
+    // Unbounded, and row 202 raises a SQLite error: this only comes back if the tool stops reading early.
+    const sql = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c) SELECT CASE WHEN n <= 201 THEN n ELSE json(n || 'x') END AS n FROM c";
+    const capped = (await tool("query_sql").run(t.roots, { sql })) as Out;
+    expect(capped.truncated).toBe(true);
+    expect(capped.rows.map((r) => r.n)).toEqual(Array.from({ length: 200 }, (_, i) => i + 1));
   });
 });

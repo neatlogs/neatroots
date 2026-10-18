@@ -6,17 +6,20 @@ import { clientStatus, connectClient, disconnectClient, findClient } from "../sr
 
 const cmd = { command: "/opt/neatroots/bin/neatroots", args: ["mcp"] };
 let home: string;
-const saved = { HOME: process.env.HOME, PATH: process.env.PATH };
+const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, PATH: process.env.PATH };
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-clients-"));
   process.env.HOME = home;
+  if (process.platform === "win32") process.env.USERPROFILE = home;
   process.env.PATH = "";
 });
 
 afterEach(() => {
-  process.env.HOME = saved.HOME;
-  process.env.PATH = saved.PATH;
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   fs.rmSync(home, { recursive: true, force: true });
 });
 
@@ -71,6 +74,34 @@ describe("coding-agent MCP setup", () => {
     expect(clientStatus(codex).connected).toBe(true);
     disconnectClient(codex);
     expect(fs.readFileSync(path.join(home, ".codex/config.toml"), "utf8")).toBe(before);
+  });
+
+  // Agent configs often hold other MCP servers' tokens in their env blocks.
+  it.skipIf(process.platform === "win32")("keeps a private config file private", () => {
+    fs.mkdirSync(path.join(home, ".cursor"));
+    const json = path.join(home, ".cursor/mcp.json");
+    fs.writeFileSync(json, JSON.stringify({ mcpServers: { github: { command: "x", env: { GITHUB_TOKEN: "ghp_secret" } } } }), { mode: 0o600 });
+    fs.mkdirSync(path.join(home, ".codex"));
+    const toml = path.join(home, ".codex/config.toml");
+    fs.writeFileSync(toml, '[mcp_servers.github.env]\nGITHUB_TOKEN = "ghp_secret"\n', { mode: 0o600 });
+    connectClient(findClient("cursor")!, cmd);
+    connectClient(findClient("codex")!, cmd);
+    expect(fs.statSync(json).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(toml).mode & 0o777).toBe(0o600);
+    disconnectClient(findClient("cursor")!);
+    expect(fs.statSync(json).mode & 0o777).toBe(0o600);
+  });
+
+  it.skipIf(process.platform === "win32")("edits a symlinked config through the link and keeps the link", () => {
+    const real = path.join(home, "dotfiles/cursor-mcp.json");
+    fs.mkdirSync(path.dirname(real));
+    fs.writeFileSync(real, JSON.stringify({ mcpServers: { other: { command: "x" } } }));
+    fs.mkdirSync(path.join(home, ".cursor"));
+    const link = path.join(home, ".cursor/mcp.json");
+    fs.symlinkSync(real, link);
+    expect(connectClient(findClient("cursor")!, cmd).ok).toBe(true);
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(JSON.parse(fs.readFileSync(real, "utf8")).mcpServers).toEqual({ other: { command: "x" }, neatroots: cmd });
   });
 
   it("installs neatroots' skills where Codex reads them, and removes them on disconnect", () => {

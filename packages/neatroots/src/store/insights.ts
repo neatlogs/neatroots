@@ -219,17 +219,23 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
   const projectOf = new Map(cur.runs.map((r) => [r.trace_id, r.project]));
   const prevRunsByCheck = new Map<string, Set<string>>();
   for (const f of prev.findings.filter(IS_PROBLEM)) prevRunsByCheck.set(f.check_id, (prevRunsByCheck.get(f.check_id) ?? new Set()).add(f.trace_id));
-  const byCheck = new Map<string, { f: FindingRec[]; runs: Set<string>; dismissed: number }>();
+  const byCheck = new Map<string, { f: FindingRec[]; runs: Set<string>; dismissed: number; quiet: number }>();
   for (const f of cur.findings) {
     if (f.status === "failed") continue;
-    const e = byCheck.get(f.check_id) ?? { f: [], runs: new Set<string>(), dismissed: 0 };
+    const e = byCheck.get(f.check_id) ?? { f: [], runs: new Set<string>(), dismissed: 0, quiet: 0 };
     if (f.status === "dismissed") e.dismissed++;
+    else if (f.status === "quiet") e.quiet++;
     else {
       e.f.push(f);
       e.runs.add(f.trace_id);
     }
     byCheck.set(f.check_id, e);
   }
+  // A check has nothing to report when every finding this window is dismissed, failed, or quiet.
+  const reportedNothing = (id: string) => {
+    const e = byCheck.get(id);
+    return !e?.runs.size && !e?.quiet;
+  };
   const problems: ProblemAgg[] = [...byCheck]
     .filter(([, e]) => e.runs.size > 0)
     .map(([id, e]) => {
@@ -302,13 +308,13 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
   const ranOn = new Map(asked.map((a) => [a.check_id, a.runs]));
   for (const c of checks) if (c.kind === "rule" && c.enabled && cur.totals.runs) ranOn.set(c.id, cur.totals.runs);
   const passing = [...ranOn]
-    .filter(([id]) => !byCheck.get(id)?.runs.size)
+    .filter(([id]) => reportedNothing(id))
     .map(([id, runs]) => ({ check_id: id, title: titles.get(id)?.title ?? id, kind: titles.get(id)?.kind ?? "question", runs }))
     .sort((a, b) => b.runs - a.runs);
 
   const prevTitle = new Map(prev.findings.map((f) => [f.check_id, f.title]));
   const gone = [...prevRunsByCheck]
-    .filter(([id]) => !byCheck.get(id)?.runs.size)
+    .filter(([id]) => reportedNothing(id))
     .map(([id, runs]) => ({ check_id: id, title: titles.get(id)?.title ?? prevTitle.get(id) ?? id, prev_runs: runs.size }))
     .sort((a, b) => b.prev_runs - a.prev_runs);
 

@@ -1,4 +1,3 @@
-import Database from "better-sqlite3";
 import { z } from "zod";
 import type { Roots } from "../core.js";
 import { loadTrace, type SpanInfo } from "../engine/trace.js";
@@ -6,7 +5,8 @@ import { listCloudTraces, NO_CLOUD_TOKEN } from "../ingest/importers/neatlogs-cl
 import { cloudImportAuth, cloudImportBase } from "../ingest/importers/index.js";
 import { preview } from "../semantics/view.js";
 import { runSummary } from "../server/api.js";
-import { clip, def, resolveSpan, resolveTrace, type ToolDef } from "./tools.js";
+import { runReadonlySql } from "./sql-runner.js";
+import { clip, def, fallbackNote, resolveSpan, resolveTrace, resolveTraceNoting, type ToolDef } from "./tools.js";
 
 // Tools for exploring runs: where a span sits, finding things inside one run, conversations
 // across runs, comparing two runs, read-only SQL over the local store, opening something in the
@@ -24,15 +24,6 @@ const brief = (s: SpanInfo) => ({
 
 const SQL_TABLES = "runs, spans, sessions, findings, decisions, explanations, notes, summaries, annotations, logs, checks, plans, replays";
 
-let readonlyDb: { file: string; db: Database.Database } | undefined;
-function readonly(roots: Roots): Database.Database {
-  if (readonlyDb?.file !== roots.store.file) {
-    readonlyDb?.db.close();
-    readonlyDb = { file: roots.store.file, db: new Database(roots.store.file, { readonly: true, fileMustExist: true }) };
-  }
-  return readonlyDb.db;
-}
-
 export const EXPLORE_TOOLS = [
   def({
     name: "show_in_ui",
@@ -41,7 +32,8 @@ export const EXPLORE_TOOLS = [
     readOnly: true,
     input: { trace_id: z.string().optional(), span_id: z.string().optional(), view: z.enum(["overview", "trace", "timeline", "conversation"]).optional() },
     run: async (roots, a) => {
-      const traceId = resolveTrace(roots, a.trace_id);
+      const r = resolveTraceNoting(roots, a.trace_id);
+      const traceId = r.traceId;
       const spanId = a.span_id ? resolveSpan(roots, traceId, a.span_id) : null;
       const q = new URLSearchParams();
       if (a.view) q.set("view", a.view);
@@ -49,7 +41,7 @@ export const EXPLORE_TOOLS = [
       const path = `runs/${traceId}${q.size ? `?${q}` : ""}`;
       roots.focus = { trace_id: traceId, span_id: spanId, at: Date.now() };
       roots.bus.emit("navigate", { path });
-      return { shown: true, url: `http://localhost:${roots.config.port}/#/${path}` };
+      return { shown: true, url: `http://localhost:${roots.config.port}/#/${path}`, ...fallbackNote(r) };
     },
   }),
   def({
@@ -59,13 +51,18 @@ export const EXPLORE_TOOLS = [
     readOnly: true,
     input: { trace_id: z.string().optional(), span_id: z.string() },
     run: async (roots, a) => {
-      const traceId = resolveTrace(roots, a.trace_id);
+      const r = resolveTraceNoting(roots, a.trace_id);
+      const traceId = r.traceId;
       const id = resolveSpan(roots, traceId, a.span_id);
       const t = loadTrace(roots.store, traceId);
       const byId = new Map(t.spans.map((s) => [s.id, s]));
       const span = byId.get(id)!;
       const ancestors: SpanInfo[] = [];
-      for (let p = span.parentId ? byId.get(span.parentId) : undefined; p; p = p.parentId ? byId.get(p.parentId) : undefined) ancestors.unshift(p);
+      const seen = new Set<string>([id]);
+      for (let p = span.parentId ? byId.get(span.parentId) : undefined; p && !seen.has(p.id); p = p.parentId ? byId.get(p.parentId) : undefined) {
+        seen.add(p.id);
+        ancestors.unshift(p);
+      }
       const siblings = t.spans.filter((s) => s.parentId === span.parentId).sort((x, y) => x.startMs - y.startMs);
       const children = t.spans.filter((s) => s.parentId === id).sort((x, y) => x.startMs - y.startMs);
       const withIo = (s: SpanInfo) => ({ ...brief(s), input: clip(preview(s.input, 300), 300), output: clip(preview(s.output, 300), 300) });
@@ -82,6 +79,7 @@ export const EXPLORE_TOOLS = [
           return i >= 0 && i < siblings.length - 1 ? withIo(siblings[i + 1]) : null;
         })(),
         children: children.map(withIo),
+        ...fallbackNote(r),
       };
     },
   }),
@@ -92,7 +90,8 @@ export const EXPLORE_TOOLS = [
     readOnly: true,
     input: { trace_id: z.string().optional(), query: z.string().min(1), kinds: z.array(z.string()).optional().describe("Only these span kinds, e.g. LLM, TOOL") },
     run: async (roots, a) => {
-      const traceId = resolveTrace(roots, a.trace_id);
+      const r = resolveTraceNoting(roots, a.trace_id);
+      const traceId = r.traceId;
       const q = a.query.toLowerCase();
       const kinds = a.kinds?.map((k) => k.toUpperCase());
       const hits = [];
@@ -112,7 +111,7 @@ export const EXPLORE_TOOLS = [
         }
         if (hits.length >= 50) break;
       }
-      return { trace_id: traceId, query: a.query, matches: hits.length, spans: hits };
+      return { trace_id: traceId, query: a.query, matches: hits.length, spans: hits, ...fallbackNote(r) };
     },
   }),
   def({
@@ -122,12 +121,19 @@ export const EXPLORE_TOOLS = [
     readOnly: true,
     input: { session_id: z.string().optional(), trace_id: z.string().optional() },
     run: async (roots, a) => {
-      const session = a.session_id ?? roots.store.getRun(resolveTrace(roots, a.trace_id))?.session_id;
-      if (!session) return { session_id: null, note: "This run has no session id. Agents set one with neatlogs.init(session_id=…) or the neatlogs.session.id attribute." };
+      // A run is only looked up without a session id; then the agent hears if the run in focus was deleted.
+      const resolved = a.session_id ? undefined : resolveTraceNoting(roots, a.trace_id);
+      const fellBack = resolved ? fallbackNote(resolved) : {};
+      const session = a.session_id ?? roots.store.getRun(resolved!.traceId)?.session_id;
+      if (!session) {
+        const why = "This run has no session id. Agents set one with neatlogs.init(session_id=…) or the neatlogs.session.id attribute.";
+        return { session_id: null, note: [fellBack.note, why].filter(Boolean).join(" ") };
+      }
       const runs = roots.store.listRuns({ sessionId: session, limit: 200 }).sort((x, y) => (x.started_ms ?? 0) - (y.started_ms ?? 0));
       return {
         session_id: session,
         turns: runs.map((r, i) => ({ turn: i + 1, trace_id: r.trace_id, status: r.status, input: clip(r.input_preview, 600), output: clip(r.output_preview, 600), open_problems: r.open_finding_count })),
+        ...fellBack,
       };
     },
   }),
@@ -168,22 +174,22 @@ export const EXPLORE_TOOLS = [
     input: {},
     run: async (roots) =>
       roots.store.db
-        .prepare("SELECT project, COUNT(*) AS runs, SUM(open_finding_count > 0) AS with_problems, SUM(status = 'failed') AS failed, MAX(started_ms) AS last_ms FROM runs WHERE doctor = 0 GROUP BY project ORDER BY last_ms DESC")
+        // Runs store ok/error/interrupted, so count the two statuses the app shows as failed.
+        .prepare("SELECT project, COUNT(*) AS runs, SUM(open_finding_count > 0) AS with_problems, SUM(status IN ('error', 'interrupted')) AS failed, MAX(started_ms) AS last_ms FROM runs WHERE doctor = 0 GROUP BY project ORDER BY last_ms DESC")
         .all(),
   }),
   def({
     name: "query_sql",
     title: "Read-only SQL",
-    description: `Run one read-only SQLite SELECT over the local store (tables: ${SQL_TABLES}). Times are ms since the epoch. Use it for questions the other tools don't answer, e.g. "which tool failed most this week". At most 200 rows come back.`,
+    description: `Run one read-only SQLite SELECT over the local store (tables: ${SQL_TABLES}). Times are ms since the epoch. Use it for questions the other tools don't answer, e.g. "which tool failed most this week". At most 200 rows come back; truncated is true when there were more. A query that runs longer than 5 s is stopped with an error.`,
     readOnly: true,
     input: { sql: z.string().min(1) },
     run: async (roots, a) => {
       const sql = a.sql.trim().replace(/;+\s*$/, "");
       if (!/^(select|with)\b/i.test(sql) || /;/.test(sql)) throw new Error("only a single SELECT (or WITH … SELECT) statement is allowed");
-      const stmt = readonly(roots).prepare(sql);
-      if (!stmt.reader) throw new Error("only queries that return rows are allowed");
-      const rows = stmt.all() as Record<string, unknown>[];
-      return { rows: rows.slice(0, 200).map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, typeof v === "string" ? clip(v, 2000) : v]))), total_rows: rows.length, truncated: rows.length > 200 };
+      // Runs in a child process with a time limit: an aggregate or ORDER BY over an unbounded
+      // recursive CTE computes everything before its first row, so a row cap alone can't stop it.
+      return runReadonlySql(roots.store.file, sql);
     },
   }),
   def({
@@ -199,9 +205,10 @@ export const EXPLORE_TOOLS = [
       system: z.string().optional(),
     },
     run: async (roots, a) => {
-      const traceId = resolveTrace(roots, a.trace_id);
+      const resolved = resolveTraceNoting(roots, a.trace_id);
+      const traceId = resolved.traceId;
       const r = await roots.replays.replayLlm(traceId, resolveSpan(roots, traceId, a.span_id), { messages: a.messages, model: a.model, system: a.system });
-      return { replay_id: r.id, state: r.state, error: r.error, new_trace_id: r.new_trace_id, answer: r.output_preview };
+      return { replay_id: r.id, state: r.state, error: r.error, new_trace_id: r.new_trace_id, answer: r.output_preview, ...fallbackNote(resolved) };
     },
   }),
   def({

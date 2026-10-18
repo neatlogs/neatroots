@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS chat_events (session_id TEXT NOT NULL, seq INTEGER NO
 
 const READ_TOOLS = ["Read", "Grep", "Glob", "LS", "TodoWrite", "mcp__neatroots__*", "mcp__neatroots_app__*"];
 const EDIT_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+/** neatroots' MCP rerun runs the project's registered agent command, so it counts as a command. */
+const RERUN_TOOLS = ["mcp__neatroots__rerun", "mcp__neatroots_app__rerun"];
 
 /** Where agent CLIs get installed when they aren't on the PATH neatroots was started with. */
 function candidateDirs(): string[] {
@@ -113,21 +115,48 @@ export function signInHelp(agent: ChatAgent, message: string): string | null {
   return `${name} couldn't sign in, so it never reached neatroots. ${how}\n\n${message.trim().slice(0, 600)}`;
 }
 
-/** Ends an agent and everything it started (shell commands, MCP servers): its whole process group. */
-function endAgent(p: ChildProcess, signal: NodeJS.Signals = "SIGTERM"): void {
-  if (p.pid && process.platform !== "win32") {
+/**
+ * Signals an agent CLI and everything it started (tools, MCP servers): each turn runs in its own
+ * process group, so its children don't outlive a Stop.
+ */
+function signalGroup(p: ChildProcess, signal: NodeJS.Signals): void {
+  try {
+    if (p.pid) process.kill(-p.pid, signal);
+  } catch {
     try {
-      process.kill(-p.pid, signal);
-      return;
+      p.kill(signal);
     } catch {
-      /* the group is already gone; fall back to the process itself */
+      /* already gone */
     }
   }
-  p.kill(signal);
+}
+
+/** Whether anything in the agent's process group is still running. */
+function groupAlive(p: ChildProcess): boolean {
+  if (!p.pid) return false;
+  try {
+    process.kill(-p.pid, 0);
+    return true;
+  } catch {
+    return p.exitCode === null && p.signalCode === null;
+  }
+}
+
+/**
+ * Asks the agent's group to stop, then kills whatever is left 3 s later. The deadline doesn't depend
+ * on the turn still running: a tool that ignores SIGTERM can outlive the CLI that started it.
+ */
+function endGroup(p: ChildProcess): void {
+  signalGroup(p, "SIGTERM");
+  setTimeout(() => {
+    if (groupAlive(p)) signalGroup(p, "SIGKILL");
+  }, 3000).unref();
 }
 
 export class AgentChats {
   private readonly running = new Map<string, ChildProcess>();
+  private readonly stopping = new Set<string>();
+  /** Set when neatroots stops: a killed agent's late output is ignored (the store is closed). */
   private closed = false;
 
   constructor(private readonly roots: Roots) {
@@ -215,15 +244,24 @@ export class AgentChats {
   stop(id: string): boolean {
     const p = this.running.get(id);
     if (!p) return false;
-    endAgent(p);
+    this.stopping.add(id);
+    endGroup(p);
     return true;
   }
 
-  /** Ends every agent still answering, so none outlives neatroots (Ctrl-C, or the service stopping). */
+  /**
+   * Ends every agent still answering, and what it started, when neatroots stops (Ctrl-C, the
+   * service stopping, the terminal closing). neatroots exits right after, so endGroup's timer would
+   * never fire: give them a moment to exit on SIGTERM, then SIGKILL whatever is left.
+   */
   close(): void {
     this.closed = true;
-    for (const p of this.running.values()) endAgent(p);
+    const groups = [...this.running.values()];
     this.running.clear();
+    for (const p of groups) signalGroup(p, "SIGTERM");
+    const nap = new Int32Array(new SharedArrayBuffer(4));
+    for (let waited = 0; waited < 1000 && groups.some(groupAlive); waited += 50) Atomics.wait(nap, 0, 0, 50);
+    for (const p of groups) if (groupAlive(p)) signalGroup(p, "SIGKILL");
   }
 
   /**
@@ -231,11 +269,13 @@ export class AgentChats {
    * open chat that refetched on the result can still have read "running"; this tells it to look again.
    */
   private ended(id: string, state: "idle" | "error"): void {
+    if (!this.get(id)) return;
     this.update(id, { state });
     this.roots.bus.emit("chat", { session_id: id, state });
   }
 
-  private emit(id: string, e: Omit<ChatEvent, "seq" | "at">): ChatEvent {
+  private emit(id: string, e: Omit<ChatEvent, "seq" | "at">): ChatEvent | undefined {
+    if (!this.get(id)) return undefined;
     const row = this.roots.store.db.prepare("SELECT COALESCE(MAX(seq), 0) AS n FROM chat_events WHERE session_id = ?").get(id) as { n: number };
     const ev: ChatEvent = { ...e, seq: row.n + 1, at: Date.now() };
     this.roots.store.db.prepare("INSERT INTO chat_events (session_id, seq, json) VALUES (?, ?, ?)").run(id, ev.seq, JSON.stringify(ev));
@@ -257,14 +297,13 @@ export class AgentChats {
     this.update(id, { state: "running" });
     const { args } = s.agent === "claude" ? this.claudeArgs(s, prompt) : this.codexArgs(s, prompt);
     log.debug(`chat ${id}: ${bin} ${args.slice(0, -1).join(" ")}`);
-    // Its own process group (outside Windows), so stopping the agent also stops what it started.
-    const child = spawn(bin, args, { cwd: s.cwd, env: { ...process.env, NEATLOGS_ENDPOINT: `http://localhost:${this.roots.config.port}` }, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
+    const child = spawn(bin, args, { cwd: s.cwd, env: { ...process.env, NEATLOGS_ENDPOINT: `http://localhost:${this.roots.config.port}` }, stdio: ["ignore", "pipe", "pipe"], detached: true });
     this.running.set(id, child);
     let buf = "";
     let stderr = "";
     let sawResult = false;
     child.stdout!.on("data", (b: Buffer) => {
-      if (this.closed) return;
+      if (this.closed || !this.get(id)) return;
       buf += b.toString();
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {
@@ -283,17 +322,30 @@ export class AgentChats {
       stderr = (stderr + b.toString()).slice(-4000);
     });
     await new Promise<void>((resolve) => {
-      child.on("close", (code, signal) => {
-        this.running.delete(id);
+      let done = false;
+      const finish = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (done) return;
+        done = true;
         if (this.closed) return resolve();
-        if (signal) this.emit(id, { kind: "status", text: "Stopped" });
+        this.running.delete(id);
+        // The turn is over: anything the CLI started and left running goes with it.
+        endGroup(child);
+        const stopped = this.stopping.delete(id) || !!signal;
+        if (stopped) this.emit(id, { kind: "status", text: "Stopped" });
         else if (code !== 0 && !sawResult) this.emit(id, { kind: "error", text: this.explainFailure(s.agent, stderr) });
-        this.ended(id, code === 0 || signal || sawResult ? "idle" : "error");
+        this.ended(id, code === 0 || stopped || sawResult ? "idle" : "error");
         resolve();
-      });
+      };
+      // Normally the output closes right after the CLI exits. A child it left running can hold the
+      // output open, so the turn also ends shortly after the CLI itself exits.
+      child.on("exit", (code, signal) => setTimeout(() => finish(code, signal), 1500).unref());
+      child.on("close", (code, signal) => finish(code, signal));
       child.on("error", (err) => {
-        this.running.delete(id);
+        if (done) return;
+        done = true;
         if (this.closed) return resolve();
+        this.running.delete(id);
+        this.stopping.delete(id);
         this.emit(id, { kind: "error", text: err.message });
         this.ended(id, "error");
         resolve();
@@ -326,6 +378,10 @@ export class AgentChats {
     if (!client || !clientStatus(client).connected) args.push("--mcp-config", JSON.stringify({ mcpServers: { neatroots_app: { type: "http", url: this.mcpUrl() } } }));
     const allowed = [...READ_TOOLS, ...(s.allow_edits ? EDIT_TOOLS : []), ...(s.allow_commands ? ["Bash"] : [])];
     args.push("--allowedTools", allowed.join(","));
+    // Allowing tools isn't enough: the user's own Claude Code settings can allow more. Denying takes
+    // them away, so a chat stays read-only (and doesn't rerun agents) until the user allows it.
+    const denied = [...(s.allow_edits ? [] : EDIT_TOOLS), ...(s.allow_commands ? [] : ["Bash", ...RERUN_TOOLS])];
+    if (denied.length) args.push("--disallowedTools", denied.join(","));
     if (s.allow_edits) args.push("--permission-mode", "acceptEdits");
     args.push("--", prompt);
     return { cmd: "claude", args };
@@ -339,7 +395,8 @@ export class AgentChats {
     else args.push("--json", "--skip-git-repo-check", "--sandbox", mode);
     const client = findClient("codex");
     if (!client || !clientStatus(client).connected) args.push("-c", `mcp_servers.neatroots.url="${this.mcpUrl()}"`);
-    args.push(prompt);
+    // A message can start with "-" (a pasted list, a diff line); without `--` codex reads it as a flag.
+    args.push("--", prompt);
     return { cmd: "codex", args };
   }
 
