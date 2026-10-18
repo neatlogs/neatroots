@@ -240,6 +240,10 @@ export function mountApi(app: Hono, roots: Roots): void {
   app.post("/api/annotations", async (c) => {
     const b = await body<{ trace_id?: string; span_id?: string; label?: string; text?: string; author?: string }>(c);
     if (!b.trace_id || !b.label || !["issue", "good", "note"].includes(b.label)) return err(c, 400, "trace_id and label (issue, good or note) are required");
+    // An annotation on a run or span neatroots doesn't have can never be shown anywhere: say so
+    // instead of storing it (the MCP annotate tool already refuses both).
+    if (!roots.store.getRun(b.trace_id)) return err(c, 404, "run not found");
+    if (b.span_id && !roots.store.getSpanRow(b.trace_id, b.span_id)) return err(c, 404, "span not found");
     const a = roots.store.insertAnnotation({ trace_id: b.trace_id, span_id: b.span_id ?? null, label: b.label as "issue", text: b.text ?? null, author: b.author ?? "user" });
     roots.bus.emit("activity", { trace_id: b.trace_id, kind: "annotation", message: a.label });
     return c.json(a);
