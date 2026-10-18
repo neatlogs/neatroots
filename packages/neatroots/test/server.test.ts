@@ -324,18 +324,33 @@ describe("server", () => {
     // Forward and import only ever reach this local stand-in for the cloud; keys come from the
     // environment, never the Keychain.
     const seen: string[] = [];
+    const exported = JSON.stringify({
+      success: true,
+      data: {
+        schemaVersion: 1,
+        trace: { traceId: t, workflowName: "prod-agent", startedAt: "2026-10-09T10:00:00Z" },
+        spans: [{ traceId: t, spanId: hex(8), parentSpanId: null, spanName: "root", spanType: "workflow", startedAt: "2026-10-09T10:00:00Z", endedAt: "2026-10-09T10:00:01Z", durationMs: 1000, status: "OK" }],
+      },
+    });
     const cloud = http.createServer((req, res) => {
       req.resume();
       req.on("end", () => {
-        seen.push(req.url ?? "");
-        res.statusCode = req.url === "/v1/traces" ? 200 : 404;
-        res.end("{}");
+        const url = req.url ?? "";
+        seen.push(url);
+        res.setHeader("content-type", "application/json");
+        if (url === "/v1/traces") res.end("{}");
+        else if (url.startsWith(`/api/v1/public/traces/${t}/export`)) res.end(exported);
+        else {
+          res.statusCode = 404;
+          res.end("{}");
+        }
       });
     });
     await new Promise<void>((r) => cloud.listen(0, "127.0.0.1", r));
     const base = `http://127.0.0.1:${(cloud.address() as { port: number }).port}`;
     tb.roots.config.cloud.endpoint = base;
     tb.roots.config.cloud.apiBase = `${base}/api/v1/public`;
+    const saved = { NEATLOGS_CLOUD_API_KEY: process.env.NEATLOGS_CLOUD_API_KEY, NEATLOGS_SERVICE_TOKEN: process.env.NEATLOGS_SERVICE_TOKEN };
     process.env.NEATLOGS_CLOUD_API_KEY = "nl-test-key";
     process.env.NEATLOGS_SERVICE_TOKEN = "nlsa_test_token";
     try {
@@ -345,12 +360,18 @@ describe("server", () => {
       expect(seen.filter((u) => u === "/v1/traces").length).toBeGreaterThan(0);
       const imported = await post("/api/cloud/import", [t]);
       expect(imported.status).toBe(202);
-      const job = (await imported.json()) as { id: string };
-      await until(() => tb.roots.imports.get(job.id)?.state !== "running");
+      const { id } = (await imported.json()) as { id: string };
+      const job = await until(() => {
+        const j = tb.roots.imports.get(id);
+        return j && j.state !== "running" ? j : undefined;
+      });
+      expect(job).toMatchObject({ state: "succeeded", traces: 1, failed: 0 });
       expect(seen.some((u) => u.startsWith(`/api/v1/public/traces/${t}/export`))).toBe(true);
     } finally {
-      delete process.env.NEATLOGS_CLOUD_API_KEY;
-      delete process.env.NEATLOGS_SERVICE_TOKEN;
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
       cloud.close();
     }
   });
