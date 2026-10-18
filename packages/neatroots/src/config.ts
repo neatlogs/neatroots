@@ -1,3 +1,4 @@
+import { parseWebhooks, type WebhookConfig } from "./webhook/config.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,8 @@ export interface ProjectSettings {
 }
 
 export interface RootsConfig {
+  /** Private opt-in destinations, omitted from public settings/status. */
+  webhooks?: WebhookConfig[];
   port: number;
   host: string;
   /** OTLP over gRPC (what plain OpenTelemetry exporters send to Neatlogs). 0 turns it off. */
@@ -116,6 +119,7 @@ export const DEFAULT_PORT = 4100;
 
 export function defaultConfig(): RootsConfig {
   return {
+    webhooks: [],
     port: DEFAULT_PORT,
     host: "127.0.0.1",
     grpcPort: 4317,
@@ -214,7 +218,7 @@ export function loadConfig(): RootsConfig {
       cfg = deepMerge(cfg, YAML.parse(fs.readFileSync(file, "utf8")), skipped);
       for (const key of skipped) console.warn(`[neatroots] ignoring ${key} in ${file}: wrong shape, using the default`);
     } catch (err) {
-      console.warn(`[neatroots] could not read ${file}: ${(err as Error).message}`);
+      console.warn("[neatroots] could not read configuration; using defaults");
     }
   }
   if (process.env.NEATROOTS_PORT) cfg.port = Number(process.env.NEATROOTS_PORT);
@@ -234,12 +238,17 @@ export function loadConfig(): RootsConfig {
   cfg.retention.days = Math.min(Math.round(cfg.retention.days), 3650);
   if (!Number.isFinite(cfg.retention.maxGb) || cfg.retention.maxGb <= 0) cfg.retention.maxGb = 5;
   cfg.retention.maxGb = Math.min(cfg.retention.maxGb, 10_000);
+  try { cfg.webhooks = parseWebhooks(cfg.webhooks); }
+  catch { cfg.webhooks = []; console.warn("[neatroots] ignoring invalid webhooks configuration"); }
   return cfg;
 }
 
 export function saveConfig(cfg: RootsConfig, file = configPath()): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, YAML.stringify(cfg), "utf8");
+  const webhooks = parseWebhooks(cfg.webhooks);
+  if (process.platform !== "win32" && fs.existsSync(file)) fs.chmodSync(file, 0o600);
+  fs.writeFileSync(file, YAML.stringify({ ...cfg, webhooks }), { encoding: "utf8", mode: 0o600 });
+  if (process.platform !== "win32") fs.chmodSync(file, 0o600);
 }
 
 export function projectSettings(cfg: RootsConfig, project: string): ProjectSettings {

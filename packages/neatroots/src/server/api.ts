@@ -1,3 +1,4 @@
+import { parseWebhooks, type WebhookConfig } from "../webhook/config.js";
 import os from "node:os";
 import path from "node:path";
 import type { Hono } from "hono";
@@ -124,6 +125,7 @@ export function mountApi(app: Hono, roots: Roots): void {
       name: "neatroots",
       version: VERSION,
       uptime_ms: Date.now() - roots.startedMs,
+      webhooks: { ...roots.webhooks.stats, pending: roots.webhooks.pending, in_flight: roots.webhooks.inFlight },
       port: roots.config.port,
       home: roots.home,
       install: installInfo(),
@@ -252,6 +254,7 @@ export function mountApi(app: Hono, roots: Roots): void {
   app.post("/api/settings", async (c) => {
     const b = await body<{
       project?: string;
+      webhooks?: unknown;
       steering?: SteeringMode;
       forward?: boolean;
       steering_enabled?: boolean;
@@ -269,6 +272,11 @@ export function mountApi(app: Hono, roots: Roots): void {
     }>(c);
     // Check every value first, before anything changes: a refused request applies nothing, not
     // even its valid parts (an out-of-range retention used to be skipped while the reply said ok).
+    let webhooks: WebhookConfig[] | undefined;
+    if (b.webhooks !== undefined) {
+      try { webhooks = parseWebhooks(b.webhooks); }
+      catch { return err(c, 400, "Invalid webhooks configuration"); }
+    }
     const inRange = (v: unknown, min: number, max: number, minOpen = false) => typeof v === "number" && Number.isFinite(v) && (minOpen ? v > min : v >= min) && v <= max;
     if (b.retention_days !== undefined && !inRange(b.retention_days, 1, 3650)) return err(c, 400, "Keep runs for must be between 1 and 3650 days");
     if (b.retention_max_gb !== undefined && !inRange(b.retention_max_gb, 0, 10_000, true)) return err(c, 400, "Size cap must be more than 0 GB and at most 10000 GB");
@@ -303,6 +311,7 @@ export function mountApi(app: Hono, roots: Roots): void {
       if (b.steering !== undefined) roots.steering.setMode(b.project, b.steering);
       if (b.forward !== undefined) roots.config.projects[b.project] = { ...cur, ...roots.config.projects[b.project], forward: b.forward };
     }
+    if (webhooks !== undefined) roots.config.webhooks = webhooks;
     if (b.retention_days !== undefined) roots.config.retention.days = Math.round(b.retention_days);
     if (b.retention_max_gb !== undefined) roots.config.retention.maxGb = b.retention_max_gb;
     if (b.steering_enabled !== undefined) roots.config.steering.enabled = b.steering_enabled;
@@ -324,7 +333,11 @@ export function mountApi(app: Hono, roots: Roots): void {
       roots.config.checkDirs.push(checkDir);
       roots.checks.reload();
     }
-    roots.saveConfig();
+    try { roots.saveConfig(); }
+    catch (error) {
+      if (webhooks !== undefined) return err(c, 500, "Could not save webhook configuration");
+      throw error;
+    }
     if (b.llm_model || b.llm_base_url) await roots.llm.probe(true);
     roots.bus.emit("settings", { project: b.project });
     return c.json({ ok: true, projects: projects(roots) });
