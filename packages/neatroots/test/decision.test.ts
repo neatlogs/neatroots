@@ -1,8 +1,10 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { describe, expect, it } from "vitest";
-import { distributionFromLogprobs, JevBackend, parseJevAnswer } from "../src/models/decision.js";
-import { parseJsonLoose } from "../src/models/llm.js";
+import { describe, expect, it, vi } from "vitest";
+import { defaultConfig } from "../src/config.js";
+import { DecisionModel, distributionFromLogprobs, JevBackend, memoryTrust, parseJevAnswer, TRUST_MIN_SAMPLES } from "../src/models/decision.js";
+import { LlmClient, parseJsonLoose } from "../src/models/llm.js";
+import { mockLlm, until } from "./helpers.js";
 
 describe("decision model", () => {
   it("turns answer-token logprobs into a distribution", () => {
@@ -59,6 +61,7 @@ describe("decision model", () => {
     expect(r.answers.yn.probability).toBeCloseTo(0.9);
     expect(r.answers.ch.choice).toBe("x");
     expect(r.answers.sc.score).toBe(2);
+    server.closeAllConnections();
     server.close();
   });
 
@@ -83,13 +86,18 @@ describe("decision routing", () => {
       });
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    return { server, port: (server.address() as AddressInfo).port };
+    return {
+      server,
+      port: (server.address() as AddressInfo).port,
+      close: () =>
+        new Promise<void>((r) => {
+          server.closeAllConnections();
+          server.close(() => r());
+        }),
+    };
   }
 
   it("prefers Laya, uses Jev cloud only when switched on, and never sends to the cloud otherwise", async () => {
-    const { defaultConfig } = await import("../src/config.js");
-    const { LlmClient } = await import("../src/models/llm.js");
-    const { DecisionModel } = await import("../src/models/decision.js");
     const seen: string[] = [];
     const laya = await jevServer("laya", seen);
     const cloud = await jevServer("cloud", seen);
@@ -103,7 +111,7 @@ describe("decision routing", () => {
     expect((await dm.decide("s1", q)).backend).toBe("laya");
     expect(seen.at(-1)).toBe("laya:Bearer laya-token");
     // Laya down, cloud off: nothing goes to the cloud.
-    laya.server.close();
+    await laya.close();
     dm.reset();
     await expect(dm.decide("s2", q)).rejects.toThrow();
     expect(seen.some((s) => s.startsWith("cloud"))).toBe(false);
@@ -113,16 +121,12 @@ describe("decision routing", () => {
     const r = await dm.decide("s3", q);
     expect(r.backend).toBe("jev-cloud");
     expect(seen.at(-1)).toBe("cloud:Bearer cloud-key");
-    cloud.server.close();
+    await cloud.close();
   });
 });
 
 describe("Laya trust", () => {
   it("shadows the LLM, records agreement, and promotes a question to Laya once trusted", async () => {
-    const { defaultConfig } = await import("../src/config.js");
-    const { LlmClient } = await import("../src/models/llm.js");
-    const { DecisionModel, memoryTrust, TRUST_MIN_SAMPLES } = await import("../src/models/decision.js");
-    const { mockLlm } = await import("./helpers.js");
     const llm = await mockLlm({ yesWhen: ["bad"] });
     let layaCalls = 0;
     const laya = http.createServer((req, res) => {
@@ -147,7 +151,7 @@ describe("Laya trust", () => {
     const q = [{ name: "bad-check", type: "yes_no" as const, ask: "Is this bad?" }];
     const first = await dm.decide("state one", q);
     expect(first.backend).toBe("llm");
-    for (let i = 0; i < 50 && trust.get("bad-check").n < 1; i++) await new Promise((r) => setTimeout(r, 20));
+    await until(() => trust.get("bad-check").n >= 1);
     expect(trust.get("bad-check")).toEqual({ n: 1, agree: 1 });
     for (let i = 1; i < TRUST_MIN_SAMPLES; i++) trust.record("bad-check", true);
     expect(dm.trusted(q)).toBe(true);
@@ -157,6 +161,8 @@ describe("Laya trust", () => {
     expect(layaCalls).toBe(before + 1);
     // An untrusted question still goes to the LLM.
     expect((await dm.decide("state three", [{ name: "other", type: "yes_no", ask: "Is this bad?" }])).backend).toBe("llm");
+    await until(() => trust.get("other").n >= 1);
+    laya.closeAllConnections();
     laya.close();
     await llm.close();
   });
@@ -179,14 +185,17 @@ describe("decision requests that leave the machine", () => {
       });
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    return { bodies, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close: () => server.close() };
+    return {
+      bodies,
+      url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      close: () => {
+        server.closeAllConnections();
+        server.close();
+      },
+    };
   }
 
   async function decideVia(baseUrl: (local: string) => string, redact?: "secrets" | "all" | "off") {
-    const { vi } = await import("vitest");
-    const { defaultConfig } = await import("../src/config.js");
-    const { LlmClient } = await import("../src/models/llm.js");
-    const { DecisionModel } = await import("../src/models/decision.js");
     const rec = await recorder();
     // A remote host can't be reached from a test, so its requests are delivered to the local recorder.
     const realFetch = globalThis.fetch;

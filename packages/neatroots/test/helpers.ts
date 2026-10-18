@@ -211,7 +211,15 @@ export async function mockLlm(
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
   const port = (server.address() as net.AddressInfo).port;
-  return { url: `http://127.0.0.1:${port}/v1`, requests, close: () => new Promise((r) => server.close(() => r())) };
+  return {
+    url: `http://127.0.0.1:${port}/v1`,
+    requests,
+    close: () =>
+      new Promise((r) => {
+        server.closeAllConnections();
+        server.close(() => r());
+      }),
+  };
 }
 
 export async function until<T>(fn: () => T | undefined | false | null, timeoutMs = 8000, stepMs = 50): Promise<T> {

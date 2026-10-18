@@ -85,15 +85,23 @@ const testScript = new vm.Script("re.lastIndex = 0; re.test(s)");
 /**
  * Tests `re` against `s`, giving up after `ms`: a JS regex can't be interrupted from outside, but a
  * vm script with a timeout can. Returns undefined when the time ran out.
+ *
+ * Node's vm timeout is wall-clock time on a watchdog thread, so a single GC pause or OS scheduling
+ * stall can trip a short budget on a trivial pattern; retrying once separates a stall from
+ * catastrophic backtracking.
  */
 export function testWithin(re: RegExp, s: string, ms: number): boolean | undefined {
   sandbox.re = re;
   sandbox.s = s;
   try {
-    return testScript.runInContext(sandbox, { timeout: ms }) === true;
-  } catch (e) {
-    if ((e as { code?: string }).code === "ERR_SCRIPT_EXECUTION_TIMEOUT") return undefined;
-    throw e;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return testScript.runInContext(sandbox, { timeout: ms }) === true;
+      } catch (e) {
+        if ((e as { code?: string }).code !== "ERR_SCRIPT_EXECUTION_TIMEOUT") throw e;
+      }
+    }
+    return undefined;
   } finally {
     sandbox.re = undefined;
     sandbox.s = undefined;
@@ -108,13 +116,21 @@ export function replaceWithin(re: RegExp, s: string, fn: (m: string, ...groups: 
   sandbox.s = s;
   sandbox.fn = fn;
   try {
-    return String(replaceScript.runInContext(sandbox, { timeout: ms }));
-  } catch (e) {
-    if ((e as { code?: string }).code === "ERR_SCRIPT_EXECUTION_TIMEOUT") return undefined;
-    throw e;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return String(replaceScript.runInContext(sandbox, { timeout: ms }));
+      } catch (e) {
+        if ((e as { code?: string }).code !== "ERR_SCRIPT_EXECUTION_TIMEOUT") throw e;
+      }
+    }
+    return undefined;
   } finally {
     sandbox.re = undefined;
     sandbox.s = undefined;
     sandbox.fn = undefined;
   }
 }
+
+// Warm the vm context and compiled scripts at load so the first timed check doesn't pay cold-start cost.
+testWithin(/./, "", 1000);
+replaceWithin(/./, "", (m) => m, 1000);
