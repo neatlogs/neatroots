@@ -303,6 +303,7 @@ export interface RunFilter {
 export interface SweepResult {
   removed: number;
   blobCandidates: string[];
+  blobScanSeq?: number;
 }
 
 type AggregateSpan = Pick<SpanRow, "is_marker" | "span_kind" | "status_code" | "prompt_tokens" | "completion_tokens" | "total_tokens">;
@@ -1307,7 +1308,8 @@ export class Store {
   /** Worker-thread retention: leave blob reclamation to the main thread where ingest runs. */
   sweepDetached(maxAgeDays: number, maxBytes: number, startedMs: number): SweepResult {
     const result = this.sweepResult(maxAgeDays, maxBytes, { updatedBefore: startedMs, batchSize: 4, pauseMs: 10 });
-    return { ...result, blobCandidates: json(this.getMeta(RETENTION_BLOBS_META), []) };
+    const pending = this.prepareBlobReclamation(json(this.getMeta(RETENTION_BLOBS_META), []));
+    return { ...result, blobCandidates: pending.candidates, blobScanSeq: pending.afterSeq };
   }
 
   private sweepResult(maxAgeDays: number, maxBytes: number, options: { updatedBefore?: number; batchSize?: number; pauseMs?: number }): SweepResult {

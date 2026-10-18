@@ -112,7 +112,7 @@ export class Roots {
         return;
       }
       this.retentionWorker = worker;
-      worker.once("message", (result: { removed: number; blobCandidates: string[] }) => {
+      worker.once("message", (result: { removed: number; blobCandidates: string[]; blobScanSeq?: number }) => {
         this.finishRetention(result).catch((err: Error) => {
           if (!this.closing) log.warn(`retention failed: ${err.message}`);
         });
@@ -130,10 +130,9 @@ export class Roots {
     this.sweeper.unref();
   }
 
-  private async finishRetention(result: { removed: number; blobCandidates: string[] }): Promise<void> {
-    const pending = this.store.prepareBlobReclamation(result.blobCandidates);
-    for (let i = 0; i < pending.candidates.length && !this.closing; i += 100) {
-      this.store.reclaimBlobs(pending.candidates.slice(i, i + 100), pending.afterSeq);
+  private async finishRetention(result: { removed: number; blobCandidates: string[]; blobScanSeq?: number }): Promise<void> {
+    for (let i = 0; i < result.blobCandidates.length && !this.closing; i += 100) {
+      this.store.reclaimBlobs(result.blobCandidates.slice(i, i + 100), result.blobScanSeq ?? 0);
       await new Promise((resolve) => setImmediate(resolve));
     }
     if (result.removed && !this.closing) log.info(`retention removed ${result.removed} old runs`);
