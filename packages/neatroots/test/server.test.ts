@@ -313,6 +313,19 @@ describe("server", () => {
     expect((await fetch(`${tb.url}/api/focus`, { method: "POST", headers, body: "{}" })).status).toBe(200);
   });
 
+  it("rejects a non-string span id before storing it as the current focus", async () => {
+    const tb = await served();
+    const { t, batches } = sampleRun();
+    tb.roots.ingest(batches);
+    const r = await fetch(`${tb.url}/api/focus`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ trace_id: t, span_id: {} }),
+    });
+    expect(r.status).toBe(400);
+    expect(tb.roots.focus).toBeNull();
+  });
+
   it("refuses retention values it can't use instead of answering ok and ignoring them", async () => {
     const tb = await served();
     const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
