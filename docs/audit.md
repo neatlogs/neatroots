@@ -87,6 +87,11 @@ running server, so ingest/check callbacks cannot interleave verification and rem
 A failed write or verification leaves the run live; explicit DELETE returns HTTP 409
 with the hold reason. Recovery does not silently remove interrupted archive artifacts.
 
+Within one retention sweep, a shared archive access or verification failure holds
+remaining covered candidates without rescanning the failed archive. Run-specific
+payload failures do not block healthy runs. The next sweep retries, and successful
+selection never replaces fresh verification at final deletion.
+
 Retention retains its age cutoff, pin exemption, oldest-first size selection and
 low-water target. It skips held candidates and counts their bytes as still present;
 shared blobs held by those runs are not counted as freed. Once archiving succeeds,

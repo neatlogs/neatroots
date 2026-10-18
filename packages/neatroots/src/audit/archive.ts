@@ -9,6 +9,9 @@ import { entryHash, GENESIS, line, verifyArchive, type Entry } from "./manifest.
 import { importedSource } from "../ingest/import-source.js";
 import { redactRecord } from "./redact-record.js";
 
+/** Failure of the shared archive, distinct from one run's unreadable snapshot. */
+export class ArchiveUnavailableError extends Error {}
+
 interface Snapshot { trace: Buffer; record: Buffer }
 const json = (value: unknown): Buffer => Buffer.from(JSON.stringify(value, null, 2) + "\n");
 
@@ -112,15 +115,19 @@ export class AuditArchive {
   /** Verify exact current bytes before release; unchanged originals reuse their last entry. */
   ensure(traceId: string, directory: string) {
     const data = snapshot(this.roots, traceId);
-    const dir = archiveDirectory(directory, true);
-    let verified = fs.readdirSync(dir).length ? verifyArchive(dir) : undefined;
-    if (verified && !verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
-    const prior = verified?.entries.findLast((e) => e.trace_id === traceId);
-    if (prior?.bundle_sha256 === sha256(data.trace) && prior.sidecar_sha256 === sha256(data.record)) return prior;
-    const entry = append(directory, traceId, data);
-    verified = verifyArchive(directory, entry.entry_sha256);
-    if (!verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
-    return entry;
+    try {
+      const dir = archiveDirectory(directory, true);
+      let verified = fs.readdirSync(dir).length ? verifyArchive(dir) : undefined;
+      if (verified && !verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
+      const prior = verified?.entries.findLast((e) => e.trace_id === traceId);
+      if (prior?.bundle_sha256 === sha256(data.trace) && prior.sidecar_sha256 === sha256(data.record)) return prior;
+      const entry = append(directory, traceId, data);
+      verified = verifyArchive(directory, entry.entry_sha256);
+      if (!verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
+      return entry;
+    } catch (cause) {
+      throw new ArchiveUnavailableError(cause instanceof Error ? cause.message : "archive unavailable", { cause });
+    }
   }
 
   /** Background capture only: never a receipt authorizing later deletion. */

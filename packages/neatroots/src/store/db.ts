@@ -1298,6 +1298,8 @@ export class Store {
   /** The running server supplies its local audit policy; standalone stores have no policy. */
   deletionGuard?: (traceId: string) => void;
   afterDelete?: (traceIds: string[]) => void;
+  /** Optional server policy lifetime; standalone stores retain ordinary sweep behavior. */
+  sweepScope?: (work: () => number) => number;
 
   private releasable(traceId: string): boolean {
     try { this.deletionGuard?.(traceId); return true; } catch { return false; }
@@ -1305,6 +1307,11 @@ export class Store {
 
   /** Deletes eligible unpinned runs past the age or size limit; returns the number removed. */
   sweep(maxAgeDays: number, maxBytes: number): number {
+    const work = () => this.sweepRuns(maxAgeDays, maxBytes);
+    return this.sweepScope ? this.sweepScope(work) : work();
+  }
+
+  private sweepRuns(maxAgeDays: number, maxBytes: number): number {
     let removed = 0;
     // Skip the age sweep for a non-positive age: a cutoff of "now" (days = 0)
     // would delete every unpinned run. maxBytes pruning below still runs.
