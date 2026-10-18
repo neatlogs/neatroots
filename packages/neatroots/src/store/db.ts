@@ -1416,6 +1416,7 @@ export class Store {
    */
   deleteRuns(traceIds: string[]): void {
     if (!traceIds.length) return;
+    if (this.db.inTransaction) throw new Error("Store.deleteRuns must own its transaction");
     const ids = JSON.stringify(traceIds);
     const inIds = "trace_id IN (SELECT value FROM json_each(?))";
     const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);

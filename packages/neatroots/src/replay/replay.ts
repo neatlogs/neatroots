@@ -120,6 +120,10 @@ export class Replays {
       .run("interrupted by a restart", Date.now());
   }
 
+  private notify(event: RootsEvents["replay"]): void {
+    this.roots.bus.emitSafely("replay", event, (err) => log.warn(`replay listener failed after replay commit: ${String(err)}`));
+  }
+
   private save(r: Replay, previousTrace?: string | null, quiet = false, generatedTrace: string | null = null): RootsEvents["replay"] {
     const event = this.roots.store.db.transaction(() => {
       this.roots.store.db
@@ -138,7 +142,7 @@ export class Replays {
       return { id: r.id, state: r.state, trace_id: r.trace_id, new_trace_id: r.new_trace_id,
         previous_trace_id: previousTrace, error: r.error, attribution: r.attribution, attribution_reason: r.attribution_reason };
     })();
-    if (!quiet) this.roots.bus.emit("replay", event);
+    if (!quiet) this.notify(event);
     return event;
   }
 
@@ -185,6 +189,7 @@ export class Replays {
   }
 
   private create(traceId: string, spanId: string | null, kind: Replay["kind"], via: Replay["via"], overrides: ReplayOverrides): Replay {
+    if (this.roots.store.db.inTransaction) throw new Error("Replay creation must own its transaction");
     const r: Replay = {
       id: `rp_${crypto.randomBytes(6).toString("hex")}`,
       trace_id: traceId,
@@ -202,14 +207,18 @@ export class Replays {
       created_ms: Date.now(),
       finished_ms: null,
     };
-    const previousTraces = new Map<string, string | null>();
-    const evictions = this.correlation.open(r.id, this.roots.store.getRun(traceId)?.project ?? null, previousTraces);
-    try { this.save(r); } catch (err) { this.correlation.close(r.id); throw err; }
-    for (const id of evictions) {
-      const evicted = this.get(id);
-      if (evicted) this.roots.bus.emit("replay", { id, state: evicted.state, trace_id: evicted.trace_id, new_trace_id: null,
-        previous_trace_id: previousTraces.get(id), attribution: evicted.attribution, attribution_reason: evicted.attribution_reason });
-    }
+    const events = this.roots.store.db.transaction(() => {
+      const previousTraces = new Map<string, string | null>();
+      const evictions = this.correlation.open(r.id, this.roots.store.getRun(traceId)?.project ?? null, previousTraces);
+      const staged: RootsEvents["replay"][] = [this.save(r, undefined, true)];
+      for (const id of evictions) {
+        const evicted = this.get(id);
+        if (evicted) staged.push({ id, state: evicted.state, trace_id: evicted.trace_id, new_trace_id: null,
+          previous_trace_id: previousTraces.get(id), attribution: evicted.attribution, attribution_reason: evicted.attribution_reason });
+      }
+      return staged;
+    })();
+    for (const event of events) this.notify(event);
     return r;
   }
 

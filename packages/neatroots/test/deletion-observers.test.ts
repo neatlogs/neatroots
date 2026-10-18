@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { Store } from "../src/store/db.js";
 import { log } from "../src/util/log.js";
-import { batch, hex, llmSpan, makeRoots, span, type TestRoots } from "./helpers.js";
+import { batch, hex, llmSpan, makeRoots, s, span, type TestRoots } from "./helpers.js";
 let t: TestRoots;
 const readers: Store[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const reader of readers.splice(0)) reader.close(); await t?.close(); });
@@ -50,4 +50,36 @@ it("propagates canonical SQL aborts without deletion notifications or persisted 
   expect(t.roots.store.getRun(x.original)).toBeDefined();
   expect(events).toEqual([]); expect(subscriber).not.toHaveBeenCalled();
   for (const r of x.replays) expect(t.roots.replays.get(r.id)).toMatchObject({ new_trace_id: r.new_trace_id, output_preview: "owned answer", attribution: "explicit" });
+});
+
+it.each(["deleteRun", "deleteRuns"] as const)("rejects nested %s before canonical rows, blob cleanup or observer effects", async method => {
+  const x = await setup(), db = t.roots.store.db, payload = "unique nested deletion payload".repeat(4000);
+  const large = span({ traceId: x.original, name: "large", kind: "tool", attrs: [s("payload", payload)] });
+  t.roots.ingest([batch([large], "p")]);
+  const row = db.prepare("SELECT blobs FROM spans WHERE trace_id=? AND span_id=?").get(x.original, large.spanId) as { blobs: string };
+  const sha = (JSON.parse(row.blobs) as string[])[0];
+  expect(t.roots.store.blobs.get(sha)).toBe(payload);
+  const snapshot = () => ["runs", "spans", "replays", "replay_windows", "replay_candidates", "replay_trace_claims"].map(table => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+  const before = snapshot(), events: unknown[] = [];
+  t.roots.bus.on("replay", event => events.push(event));
+  const subscriber = vi.fn(); t.roots.store.onRunsDeleted(subscriber);
+  let nestedError: unknown, duringRows: unknown, duringBlobPresent = false;
+  expect(() => db.transaction(() => {
+    try {
+      if (method === "deleteRun") t.roots.store.deleteRun(x.original);
+      else t.roots.store.deleteRuns([x.original]);
+    } catch (error) { nestedError = error; }
+    duringRows = snapshot(); duringBlobPresent = t.roots.store.blobs.get(sha) === payload;
+    throw new Error("outer rollback");
+  })()).toThrow("outer rollback");
+  expect(nestedError).toBeInstanceOf(Error);
+  expect((nestedError as Error).message).toMatch(/deleteRuns must own its transaction/);
+  expect(duringRows).toEqual(before); expect(duringBlobPresent).toBe(true);
+  expect(snapshot()).toEqual(before); expect(t.roots.store.blobs.get(sha)).toBe(payload);
+  expect(events).toEqual([]); expect(subscriber).not.toHaveBeenCalled();
+});
+it("keeps an empty deletion list a no-op inside a caller transaction", async () => {
+  const x = await setup(), subscriber = vi.fn(); t.roots.store.onRunsDeleted(subscriber);
+  t.roots.store.db.transaction(() => { expect(() => t.roots.store.deleteRuns([])).not.toThrow(); })();
+  expect(t.roots.store.getRun(x.original)).toBeDefined(); expect(subscriber).not.toHaveBeenCalled();
 });
