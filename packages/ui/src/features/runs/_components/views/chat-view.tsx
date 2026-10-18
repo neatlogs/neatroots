@@ -1,15 +1,16 @@
 import { AiBrain01Icon, ArrowRight01Icon, Edit02Icon, Robot01Icon, Settings01Icon, UserIcon, Wrench01Icon } from "@hugeicons/core-free-icons";
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { PendingButton } from "@/components/pending-button";
 import { Button } from "@/components/ui/button";
 import { Icon, type IconData } from "@/components/ui/icon";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusPill } from "@/components/ui/status-pill";
 import { Textarea } from "@/components/ui/textarea";
-import type { ChatItem } from "@/lib/api";
+import type { ChatItem, Span } from "@/lib/api";
 import { dur, num, pretty } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useRunChat } from "../../_services/view-queries";
+import { SpanStatus } from "../span-status";
 
 const argText = (a: unknown) => {
   if (a == null) return "";
@@ -150,8 +151,9 @@ export interface ForkHandlers {
  * The run as a conversation: what the user asked, what the model answered, the tools it called,
  * and sub-agents as cards you can open. Edit a user message to fork the run from there.
  */
-export function ChatView({ traceId, onOpenSpan, fork }: { traceId: string; onOpenSpan: (id: string) => void; fork?: ForkHandlers }) {
+export function ChatView({ traceId, spans, onOpenSpan, fork }: { spans: Span[]; traceId: string; onOpenSpan: (id: string) => void; fork?: ForkHandlers }) {
   const [path, setPath] = useState<{ id: string; name: string }[]>([]);
+  const spansById = useMemo(() => new Map(spans.map((span) => [span.span_id, span])), [spans]);
   const agent = path.at(-1)?.id;
   const { data, isLoading, error } = useRunChat(traceId, agent);
   return (
@@ -186,6 +188,7 @@ export function ChatView({ traceId, onOpenSpan, fork }: { traceId: string; onOpe
           <ol className="flex flex-col" data-testid="chat-view">
             {data.items.map((item, i) => {
               const open = () => onOpenSpan(item.span_id);
+              const span = spansById.get(item.span_id);
               const isHistory = (x: ChatItem | undefined) => !!x && (x.type === "user" || x.type === "assistant") && !!x.history;
               // Earlier turns, replayed in this turn's input: one label, then muted messages.
               if (isHistory(item)) {
@@ -223,7 +226,8 @@ export function ChatView({ traceId, onOpenSpan, fork }: { traceId: string; onOpe
                       label="assistant"
                       onOpen={open}
                       meta={
-                        <span className="text-2xs text-muted-foreground tabular-nums">
+                        <span className="flex items-center gap-2 text-2xs text-muted-foreground tabular-nums">
+                          {!item.history && span && <SpanStatus span={span} />}
                           {[item.model, item.tokens ? `${num(item.tokens)} tokens` : null].filter(Boolean).join(" · ")}
                         </span>
                       }

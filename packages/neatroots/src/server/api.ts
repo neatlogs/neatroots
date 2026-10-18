@@ -45,6 +45,7 @@ export function runDetail(roots: Roots, traceId: string) {
   const run = roots.store.getRun(traceId);
   if (!run) return undefined;
   const spans = roots.store.getSpans(traceId, false);
+  const cancelled = roots.store.spansWithBooleanAttribute(traceId, "neatlogs.stream.cancelled");
   const decisions = roots.store.decisionsForTrace(traceId);
   const toolLabels: Record<string, string> = {};
   for (const d of decisions) {
@@ -58,7 +59,12 @@ export function runDetail(roots: Roots, traceId: string) {
   const plan = run.plan_id ? roots.store.getPlan(run.plan_id) ?? null : null;
   return {
     run: runSummary(roots, run),
-    spans: spans.map((s) => ({ ...s, tool_result: toolLabels[s.span_id] ?? null })),
+    spans: spans.map((s) => ({
+      ...s,
+      // Presentation only: retain the stored status and expose the explicit SDK marker.
+      stream_cancelled: cancelled.has(s.span_id),
+      tool_result: toolLabels[s.span_id] ?? null,
+    })),
     findings,
     notes: roots.store.notesForTrace(traceId),
     explanation: roots.store.explanationFor("run", traceId) ?? null,

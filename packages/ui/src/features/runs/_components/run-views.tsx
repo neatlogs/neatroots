@@ -52,7 +52,7 @@ export function RunViews({
       </div>
       <div className="h-[34rem] min-h-0">
         {view === "overview" ? (
-          <ChatView traceId={traceId} onOpenSpan={onSelect} fork={fork} />
+          <ChatView spans={spans} traceId={traceId} onOpenSpan={onSelect} fork={fork} />
         ) : view === "trace" ? (
           <TraceTree spans={spans} flagged={flagged} selected={selected} onSelect={onSelect} />
         ) : view === "timeline" ? (

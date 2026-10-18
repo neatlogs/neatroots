@@ -831,6 +831,19 @@ export class Store {
       .all(traceId) as SpanRow[];
   }
 
+  /** Read an explicit boolean attribute without loading span bodies or offloaded blobs.
+   * Match kvToPlain: the last occurrence of a duplicate attribute wins. */
+  spansWithBooleanAttribute(traceId: string, key: string): Set<string> {
+    const rows = this.db.prepare(`
+      SELECT span_id FROM spans AS s WHERE trace_id = ? AND (
+        SELECT json_type(a.value, '$.value.boolValue') = 'true'
+        FROM json_each(s.attributes) AS a WHERE json_extract(a.value, '$.key') = ?
+        ORDER BY CAST(a.key AS INTEGER) DESC LIMIT 1
+      ) = 1
+    `).all(traceId, key) as { span_id: string }[];
+    return new Set(rows.map((row) => row.span_id));
+  }
+
   getSpanRow(traceId: string, spanId: string): SpanRow | undefined {
     return this.getSpans(traceId, true).find((s) => s.span_id === spanId);
   }

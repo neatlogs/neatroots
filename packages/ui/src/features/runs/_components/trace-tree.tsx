@@ -1,3 +1,4 @@
+import { SpanStatus, spanState } from "./span-status";
 import { AiBrain01Icon, CircleIcon, DatabaseIcon, FlashIcon, GitForkIcon, Robot01Icon, Shield01Icon, Wrench01Icon } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { useMemo } from "react";
@@ -60,7 +61,7 @@ export function TraceTree({ spans, flagged, selected, onSelect }: { spans: Span[
   return (
     <div role="tree" aria-label="Trace spans" className="h-full overflow-y-auto py-1">
       {rows.map(({ span: s, depth }) => {
-        const failed = s.status_code === 2;
+        const failed = spanState(s) === "Failed";
         const guidance = isGuidance(s);
         const isSel = selected === s.span_id;
         const left = ((s.start_ms - start) / total) * 100;
@@ -75,7 +76,7 @@ export function TraceTree({ spans, flagged, selected, onSelect }: { spans: Span[
             onClick={() => onSelect(s.span_id)}
             onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), onSelect(s.span_id))}
             className={cn(
-              "grid h-9 cursor-pointer grid-cols-[minmax(0,1fr)_6rem_4.5rem] items-center gap-3 px-6 transition-colors focus-visible:ring-1 focus-visible:ring-ring/50 focus-visible:outline-none focus-visible:ring-inset",
+              "grid h-9 cursor-pointer grid-cols-[minmax(0,1fr)_4.5rem] sm:grid-cols-[minmax(0,1fr)_6rem_4.5rem] items-center gap-3 px-6 transition-colors focus-visible:ring-1 focus-visible:ring-ring/50 focus-visible:outline-none focus-visible:ring-inset",
               isSel ? "bg-surface-active" : "hover:bg-surface-subtle",
             )}
           >
@@ -89,10 +90,11 @@ export function TraceTree({ spans, flagged, selected, onSelect }: { spans: Span[
               <span className={cn("truncate text-sm", guidance ? "text-brand-violet" : failed ? "text-danger-fg" : "text-foreground")}>
                 {guidance ? `Note to the agent: ${s.input_preview ?? ""}` : (s.tool_name ?? s.name)}
               </span>
-              {!guidance && <span className="shrink-0 text-eyebrow text-2xs text-muted-foreground">{s.span_kind.toLowerCase().replace("_", " ")}</span>}
+              {!guidance && <span className="hidden shrink-0 text-eyebrow text-2xs text-muted-foreground sm:inline">{s.span_kind.toLowerCase().replace("_", " ")}</span>}
+              <SpanStatus span={s} />
               {flagged.has(s.span_id) && <span role="img" aria-label="Evidence for an open problem" className="size-1.5 shrink-0 rounded-full bg-warning-fg" />}
             </span>
-            <span aria-hidden className="relative h-1.5 rounded-full bg-muted">
+            <span aria-hidden className="relative hidden h-1.5 rounded-full bg-muted sm:block">
               <span className={cn("absolute inset-y-0 rounded-full", failed ? "bg-danger-fg" : guidance ? "bg-brand-violet" : "bg-foreground-subtle")} style={{ left: `${left}%`, width: `${Math.min(width, 100 - left)}%` }} />
             </span>
             <span className="text-right font-mono text-xs text-muted-foreground tabular-nums">{s.end_ns === "0" ? "not ended" : dur(s.duration_ms)}</span>
