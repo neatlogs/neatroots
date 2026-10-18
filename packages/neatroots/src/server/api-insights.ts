@@ -5,8 +5,8 @@ import { readDigest, writeDigest, type Digest } from "../engine/digest.js";
 import { computeInsights, WINDOWS, type WindowKey } from "../store/insights.js";
 import { body, err } from "./util.js";
 
-function windowKey(v: unknown): WindowKey {
-  return typeof v === "string" && v in WINDOWS ? (v as WindowKey) : "7d";
+function windowKey(v: unknown): WindowKey | undefined {
+  return typeof v === "string" && v in WINDOWS ? (v as WindowKey) : undefined;
 }
 
 function insights(roots: Roots, key: WindowKey) {
@@ -25,12 +25,16 @@ export function mountInsightsApi(app: Hono, roots: Roots): void {
   const writing = new Map<WindowKey, Promise<Digest>>();
 
   app.get("/api/insights", (c) => {
-    const key = windowKey(c.req.query("window"));
+    const raw = c.req.query("window");
+    const key = raw === undefined ? "7d" : windowKey(raw);
+    if (!key) return err(c, 400, "window must be 24h, 7d or 30d");
     return c.json({ ...insights(roots, key), digest: readDigest(roots, key), digest_pending: writing.has(key) });
   });
 
   app.post("/api/insights/digest", async (c) => {
-    const key = windowKey((await body<{ window?: string }>(c)).window);
+    const raw = (await body<{ window?: string }>(c)).window;
+    const key = raw === undefined ? "7d" : windowKey(raw);
+    if (!key) return err(c, 400, "window must be 24h, 7d or 30d");
     const data = insights(roots, key);
     if (!data.totals.runs) return err(c, 400, "no runs in this period");
     let job = writing.get(key);
