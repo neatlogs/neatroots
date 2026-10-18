@@ -2,12 +2,14 @@ import type { Hono } from "hono";
 import type { Roots } from "../core.js";
 import { AuditArchive, type ExportOptions } from "../audit/archive.js";
 import { verifyArchive } from "../audit/manifest.js";
+import { AuditCoverage } from "../audit/coverage.js";
 import { body, err } from "./util.js";
 
 /** Mounted behind the same loopback Host/Origin checks as the other local APIs. */
 export function mountAuditApi(app: Hono, roots: Roots): void {
   const archive = new AuditArchive(roots);
-  app.get("/api/audit/status", (c) => c.json(roots.audit.status()));
+  const coverage = new AuditCoverage(roots);
+  app.get("/api/audit/status", (c) => c.json({ ...roots.audit.status(), coverage: coverage.status() }));
   app.post("/api/audit/export", async (c) => {
     const b = await body<ExportOptions & { trace_id?: string }>(c);
     if (!b || typeof b.trace_id !== "string") return err(c, 400, "trace_id is required");

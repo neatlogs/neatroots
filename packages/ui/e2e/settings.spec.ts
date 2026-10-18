@@ -6,6 +6,7 @@ test.describe("settings", () => {
     await open(page, "settings/general");
     for (const [link, title] of [
       ["Projects", "Projects"],
+      ["Audit", "Audit"],
       ["LLM", "LLM"],
       ["Decision model", "Decision model"],
       ["Coding agents", "Coding agents"],

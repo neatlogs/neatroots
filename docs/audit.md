@@ -61,7 +61,8 @@ projects:
 With `audit.enabled: true`, projects inherit coverage unless they explicitly set
 `audit: false`. A missing project override inherits the global setting. Runs without
 a project and synthetic doctor probes are always exempt. Merely connecting a coding
-agent over MCP does not trace that agent. No UI or device discovery is added here.
+agent over MCP does not trace that agent. Settings → Audit controls archive protection
+separately from capture evidence; connection discovery cannot enumerate uninstrumented agents.
 
 Covered runs are archived, unredacted, after a root/completion marker and idle checks.
 Automatic archiving coalesces change events with a single 1.5-second timer and
@@ -259,3 +260,31 @@ The local API routes are `POST /api/audit/export` (`trace_id`, optional `directo
 (`directory`, optional `expect_head`). They use the existing loopback Host/Origin checks.
 Verification is read-only. Export and verification currently scan the full archive; large
 archives can block the local server while the synchronous operation completes.
+
+## Capture coverage
+
+Settings → Audit and `neatroots audit status` distinguish retained capture evidence
+from archive protection. Counts exclude synthetic doctor probes and describe the
+current local store, not lifetime executions or archived-only history. A stored run
+with spans and trusted local import metadata counts as imported. A run with spans
+and no local import metadata counts as received/traced. Sender-supplied import
+attributes do not count as trusted provenance. A row without spans or with unusable
+local provenance is unknown. These three categories are disjoint.
+
+Guidance delivered counts distinct retained runs with a locally recorded delivered
+note. It overlaps capture categories and does not prove the agent obeyed a note.
+No telemetry payload, note text, replay command or connection configuration path is
+included in the coverage response. Project-level counts expose only project labels,
+counts, effective protection and explicit overrides.
+
+MCP connection discovery reuses the existing known-client file/configuration checks,
+without running agent commands. Results are cached for 30 seconds. A connected client “reads neatroots over MCP — its own runs are not captured”.
+That label describes the connection itself: independent instrumentation may exist,
+but connection metadata does not establish it. Discovery failure is reported separately
+from stored-run counts. Closed, web and unknown agents that send no telemetry cannot
+be enumerated or measured here. This page does not claim complete machine coverage.
+
+The Audit page has global protection and per-project Inherit/On/Off controls, separate
+from capture evidence. Save failures retain edits. The doctor command renders optional
+coverage after its existing probe handling; unavailable, malformed or older-server
+responses are nonfatal and do not change its transport exit status or probe flow.

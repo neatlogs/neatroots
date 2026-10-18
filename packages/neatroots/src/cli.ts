@@ -10,6 +10,7 @@ import { rootsHome, loadConfig, saveConfig, type SteeringMode } from "./config.j
 import { runStdioBridge } from "./mcp/stdio.js";
 import { api, ask, port, running } from "./cli/util.js";
 import { registerModelCommands } from "./cli/models.js";
+import { doctorCoverage } from "./cli/doctor-coverage.js";
 import { doctorModels } from "./cli/doctor-models.js";
 import { registerServiceCommands } from "./cli/service.js";
 import { registerConnectCommand } from "./cli/connect.js";
@@ -262,6 +263,7 @@ program
       }
       const s = await api<any>(p, "/api/status");
       line(s.check_errors.length === 0 ? true : "warn", s.check_errors.length ? `${s.check_errors.length} check file problem(s)` : "all checks load");
+      await doctorCoverage(p, line);
     }
     console.log(`\nTo test the SDK path end to end:  NEATLOGS_API_KEY=neatroots-local NEATLOGS_ENDPOINT=http://localhost:${p} python -m neatlogs doctor --probe`);
     process.exitCode = ok ? 0 : 1;

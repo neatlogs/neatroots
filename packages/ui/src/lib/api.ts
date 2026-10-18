@@ -311,6 +311,7 @@ export interface Status {
     classifier: { backend: string; baseUrl: string; model: string };
     budgets: Record<string, number>;
     retention: { days: number; maxGb: number };
+    audit?: { enabled: boolean; directory: string };
     grpc_port?: number;
   };
 }
