@@ -67,3 +67,14 @@ it("resolves explicit paths from the CLI cwd, retaining the server-owned default
   expect(fs.existsSync(path.join(t.roots.home, "audit", "manifest.jsonl"))).toBe(true);
   expect(fs.existsSync(path.join(caller, "audit"))).toBe(false);
 }, 20_000);
+
+it("CLI audit status prints counts and no private run payload", async () => {
+  t = await makeRoots({ noEngine: true, serve: true });
+  t.roots.config.audit.enabled = true;
+  const traceId = hex(16);
+  t.roots.ingest([batch([span({ traceId, name: "PRIVATE-PAYLOAD-DO-NOT-PRINT", kind: "workflow" })])]);
+  const result = await cli(["status"]);
+  expect(result.code, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ covered_runs: 1, held_runs: 1, archive_entries: 0 });
+  expect(result.stdout).not.toContain("PRIVATE-PAYLOAD-DO-NOT-PRINT");
+});

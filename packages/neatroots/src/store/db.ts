@@ -1295,7 +1295,15 @@ export class Store {
 
   // --------------------------------------------------------------- retention
 
-  /** Deletes the oldest unpinned runs past the age or size limit. Returns how many runs were removed. */
+  /** The running server supplies its local audit policy; standalone stores have no policy. */
+  deletionGuard?: (traceId: string) => void;
+  afterDelete?: (traceIds: string[]) => void;
+
+  private releasable(traceId: string): boolean {
+    try { this.deletionGuard?.(traceId); return true; } catch { return false; }
+  }
+
+  /** Deletes eligible unpinned runs past the age or size limit; returns the number removed. */
   sweep(maxAgeDays: number, maxBytes: number): number {
     let removed = 0;
     // Skip the age sweep for a non-positive age: a cutoff of "now" (days = 0)
@@ -1305,8 +1313,9 @@ export class Store {
       const old = this.db
         .prepare("SELECT trace_id FROM runs WHERE pinned = 0 AND COALESCE(ended_ms, received_ms) < ?")
         .all(cutoff) as { trace_id: string }[];
-      this.deleteRuns(old.map((r) => r.trace_id));
-      removed += old.length;
+      const ids = old.map((r) => r.trace_id).filter((id) => this.releasable(id));
+      this.deleteRuns(ids);
+      removed += ids.length;
     }
     // Measure what the database holds, not the file size: SQLite keeps the file (and WAL) at its
     // high-water mark after a delete and reuses the freed pages, so the file size never drops
@@ -1351,7 +1360,7 @@ export class Store {
            GROUP BY r.trace_id ORDER BY COALESCE(r.ended_ms, r.received_ms) ASC`,
         )
         .all() as { t: string; pinned: number; w: number; b: string | null }[]
-    ).map((r) => ({ ...r, w: r.w + (indexed.get(r.t) ?? 0) }));
+    ).map((r) => ({ ...r, pinned: r.pinned || !this.releasable(r.t) ? 1 : 0, w: r.w + (indexed.get(r.t) ?? 0) }));
     const shas = rows.map((r) => (r.b ? [...new Set(r.b.match(/[0-9a-f]{64}/g) ?? [])] : []));
     const lastRef = new Map<string, number>();
     shas.forEach((list, i) => list.forEach((sha) => lastRef.set(sha, rows[i].pinned ? Infinity : Math.max(lastRef.get(sha) ?? -1, i))));
@@ -1408,6 +1417,7 @@ export class Store {
    */
   deleteRuns(traceIds: string[]): void {
     if (!traceIds.length) return;
+    for (const id of traceIds) this.deletionGuard?.(id);
     const ids = JSON.stringify(traceIds);
     const inIds = "trace_id IN (SELECT value FROM json_each(?))";
     const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
@@ -1421,6 +1431,7 @@ export class Store {
     });
     tx();
     this.reclaimUnreferencedBlobs(shas);
+    this.afterDelete?.(traceIds);
   }
 
   /** Deletes candidate payloads only after checking every remaining span reference. */

@@ -14,6 +14,7 @@ import { AgentChats } from "./agents/chat.js";
 import { Relay } from "./relay/relay.js";
 import { LayaManager } from "./models/laya.js";
 import { getSecret } from "./relay/keychain.js";
+import { AuditHold } from "./audit/hold.js";
 import { log } from "./util/log.js";
 
 export interface RootsOptions {
@@ -38,6 +39,7 @@ export class Roots {
   readonly relay: Relay;
   readonly laya: LayaManager;
   readonly imports: ImportJobs;
+  readonly audit: AuditHold;
   readonly replays: Replays;
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
@@ -75,6 +77,18 @@ export class Roots {
       // Finish check work a previous process accepted but didn't complete (a restart or a crash).
       setTimeout(() => void resumeUnfinished(engine, this).catch((e: Error) => log.warn(`couldn't resume checks: ${e.message}`)), 1500).unref();
     }
+    this.audit = new AuditHold(this);
+    this.store.deletionGuard = (id) => this.audit.beforeDelete(id);
+    this.store.afterDelete = (ids) => {
+      this.audit.forgotten(ids);
+      for (const id of ids) {
+        if (this.focus?.trace_id === id) this.focus = null;
+        if (this.engine && !this.engine.pending(id)) {
+          this.engine.resetForImport(id);
+          this.engine.progress.done(id);
+        }
+      }
+    };
   }
 
   ingest(batches: ResourceSpansBatch[], opts: { importSource?: string } = {}): TraceUpdate[] {
@@ -118,6 +132,7 @@ export class Roots {
 
   close(): void {
     clearInterval(this.sweeper);
+    this.audit.close();
     this.laya.stop();
     this.store.close();
   }

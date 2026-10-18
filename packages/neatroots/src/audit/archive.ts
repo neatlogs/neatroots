@@ -35,7 +35,7 @@ export function traceJson(batches: ResourceSpansBatch[]): object {
   }) };
 }
 
-function snapshot(roots: Roots, traceId: string): Snapshot {
+export function snapshot(roots: Roots, traceId: string): Snapshot {
   return roots.store.db.transaction(() => {
     const run = roots.store.getRun(traceId);
     if (!run) throw new Error("run not found");
@@ -101,6 +101,20 @@ export interface ExportOptions { directory?: string; redacted?: boolean; output?
 
 export class AuditArchive {
   constructor(private readonly roots: Roots) {}
+
+  /** Verify exact current bytes before release; unchanged originals reuse their last entry. */
+  ensure(traceId: string, directory: string) {
+    const data = snapshot(this.roots, traceId);
+    const dir = archiveDirectory(directory, true);
+    let verified = fs.readdirSync(dir).length ? verifyArchive(dir) : undefined;
+    if (verified && !verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
+    const prior = verified?.entries.findLast((e) => e.trace_id === traceId);
+    if (prior?.bundle_sha256 === sha256(data.trace) && prior.sidecar_sha256 === sha256(data.record)) return prior;
+    const entry = append(directory, traceId, data);
+    verified = verifyArchive(directory, entry.entry_sha256);
+    if (!verified.ok) throw new Error(`archive verification failed: ${verified.errors.join("; ")}`);
+    return entry;
+  }
 
   export(traceId: string, options: ExportOptions = {}) {
     if (!/^[a-f0-9]{32}$/.test(traceId)) throw new Error("trace_id must be 32 lowercase hexadecimal characters");

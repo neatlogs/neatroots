@@ -7,10 +7,16 @@ type Result = { seq: number; head: string; directory?: string; path?: string; ok
 const head = (r: Result) => console.log(`seq ${r.seq}\nhead ${r.head}`);
 
 export function registerAuditCommands(program: Command): void {
-  const audit = program.command("audit").description("Local plaintext audit archives: export and verify");
+  const audit = program.command("audit").description("Local plaintext audit archives: status, export and verify");
+  audit.command("status").description("Show local audit coverage, held runs and archive failures")
+    .option("-p, --port <port>")
+    .action(async (opts) => {
+      const status = await api<Record<string, unknown>>(port(opts.port), "/api/audit/status");
+      console.log(JSON.stringify(status, null, 2));
+    });
   audit.command("export").argument("<traceId>")
     .description("Archive the original run, or explicitly create a redacted share copy")
-    .option("--directory <directory>", "archive directory (default: neatroots home/audit)")
+    .option("--directory <directory>", "configured archive directory (default: neatroots home/audit)")
     .option("--redacted", "redact a copy of the latest archived version using cloud redaction rules")
     .option("-o, --output <directory>", "separate archive directory for a redacted share copy")
     .option("--preview", "only preview redactions; write nothing")
@@ -36,7 +42,7 @@ export function registerAuditCommands(program: Command): void {
       head(result);
     });
   audit.command("verify").description("Verify exact archive bytes and chain; writes nothing")
-    .option("--directory <directory>", "archive directory (default: neatroots home/audit)")
+    .option("--directory <directory>", "configured archive directory (default: neatroots home/audit)")
     .option("--expect-head <hash>", "externally retained head, detecting truncated or rewritten history")
     .option("-p, --port <port>")
     .action(async (opts) => {

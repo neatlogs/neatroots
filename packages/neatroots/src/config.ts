@@ -10,6 +10,8 @@ export interface ProjectSettings {
   steering: SteeringMode;
   /** Re-export this project's runs to Neatlogs Cloud as they finish. */
   forward: boolean;
+  /** Inherit global audit.enabled when omitted in project config. */
+  audit: boolean;
 }
 
 export interface RootsConfig {
@@ -73,6 +75,7 @@ export interface RootsConfig {
     notesPerRun: number;
     summariesPerRun: number;
   };
+  audit: { enabled: boolean; directory: string };
   retention: {
     days: number;
     maxGb: number;
@@ -149,6 +152,7 @@ export function defaultConfig(): RootsConfig {
       notesPerRun: 3,
       summariesPerRun: 1,
     },
+    audit: { enabled: false, directory: "" },
     retention: { days: 14, maxGb: 5 },
     steering: { enabled: true, maxNotesPerRun: 3, gateWaitMs: 300 },
     cloud: { endpoint: "https://ingest.neatlogs.com", appUrl: "https://app.neatlogs.com", redactPatterns: [] },
@@ -234,6 +238,8 @@ export function loadConfig(): RootsConfig {
   cfg.retention.days = Math.min(Math.round(cfg.retention.days), 3650);
   if (!Number.isFinite(cfg.retention.maxGb) || cfg.retention.maxGb <= 0) cfg.retention.maxGb = 5;
   cfg.retention.maxGb = Math.min(cfg.retention.maxGb, 10_000);
+  cfg.audit.enabled = cfg.audit.enabled === true;
+  if (typeof cfg.audit.directory !== "string") cfg.audit.directory = "";
   return cfg;
 }
 
@@ -243,6 +249,7 @@ export function saveConfig(cfg: RootsConfig, file = configPath()): void {
 }
 
 export function projectSettings(cfg: RootsConfig, project: string): ProjectSettings {
-  const p = cfg.projects[project] ?? {};
-  return { steering: p.steering ?? "off", forward: p.forward ?? false };
+  const p = Object.hasOwn(cfg.projects, project) ? cfg.projects[project] : undefined;
+  const audit = p && Object.hasOwn(p, "audit") ? p.audit : undefined;
+  return { steering: p?.steering ?? "off", forward: p?.forward ?? false, audit: typeof audit === "boolean" ? audit : cfg.audit.enabled };
 }

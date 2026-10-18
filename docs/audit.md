@@ -1,8 +1,9 @@
 # Local audit export and verification
 
 `audit export` saves an original, unredacted local record. `audit verify` checks its
-bytes and append-only manifest. This first stage does not change retention, intercept
-deletion, enable automatic archiving, or claim that every agent on this machine is traced.
+bytes and append-only manifest. Optional audit mode archives covered runs before
+retention or explicit deletion releases their live copy. It does not claim that every
+agent on this machine is traced.
 
 Start neatroots, then use a full trace ID:
 
@@ -40,9 +41,83 @@ Node does not establish an equivalent native Windows directory-flush guarantee, 
 equivalent power-loss guarantee for directory entries is claimed on Windows. Nothing here
 deletes archives or limits their disk usage. Keep enough space and protect your backups.
 
+
+## Archive before release (opt-in)
+
+Audit mode is off by default. Set global defaults and per-project overrides in the
+server home's `config.yaml`, following the existing `projects` convention:
+
+```yaml
+audit:
+  enabled: false
+  directory: "" # empty uses this server's home/audit; otherwise use an absolute local path
+projects:
+  payments:
+    audit: true
+  scratch:
+    audit: false
+```
+
+With `audit.enabled: true`, projects inherit coverage unless they explicitly set
+`audit: false`. A missing project override inherits the global setting. Runs without
+a project and synthetic doctor probes are always exempt. Merely connecting a coding
+agent over MCP does not trace that agent. No UI or device discovery is added here.
+
+Covered runs are archived, unredacted, after a root/completion marker and idle checks.
+Like the relay, automatic archiving waits 1.5 seconds after changes; it also retries
+eligible live runs every 30 seconds, including after restart. The engine's delayed
+end work and on-demand investigations/explanations/rechecks count as processing.
+An intentionally disabled/missing engine or unfinished/interrupted checks holds the
+run visibly. Restore the engine or re-run interrupted work to release it. Settled
+failed checks are still archivable evidence: audit preserves the recorded outcomes,
+not a certificate of successful checks. An agent's error status is also archivable.
+
+Both explicit run deletion and retention require a newly verified archive of the
+current snapshot. Late spans, findings, decisions, summaries, explanations, annotations
+or run-row changes append another immutable version; unchanged snapshots do not.
+The comparison uses the actual stored OTLP and sidecar bytes, with no synthesized
+completion markers. Archive writes and the delete guard are synchronous in the
+running server, so ingest/check callbacks cannot interleave verification and removal.
+A failed write or verification leaves the run live; explicit DELETE returns HTTP 409
+with the hold reason. Recovery does not silently remove interrupted archive artifacts.
+
+Retention retains its age cutoff, pin exemption, oldest-first size selection and
+low-water target. It skips held candidates and counts their bytes as still present;
+shared blobs held by those runs are not counted as freed. Once archiving succeeds,
+normal retention can release the live copy. If held/pinned runs or fixed database
+pages prevent meeting the cap, live storage can remain above it. A pin continues to
+exempt a run from scheduled retention, not an explicit delete request. Archives are
+outside the live-store cap, survive live deletion, and grow without an automatic
+retention/delete policy. Plan archive disk capacity separately.
+
+`neatroots audit status` (or `GET /api/audit/status`) reports covered live runs,
+held runs, current archived live runs, historical archived runs/version entries,
+failures and hold reasons, and `seq`/`head`. `held_bytes` and `archived_live_bytes`
+are the current serialized OTLP plus sidecar bytes, excluding SQLite/index overhead
+and shared-blob attribution. If a corrupt/missing payload cannot be serialized, its
+run is counted as held but its unknown snapshot bytes are not included.
+`live_store_bytes` is the store's existing database-plus-blob accounting used for
+retention. `archive_bytes` counts all verified bundle and manifest file bytes,
+including historical versions, excluding filesystem metadata. Status is read-only
+and reports no span/sidecar content. It re-verifies the archive, so large histories
+can make status and deletion slow. Local permissions and the threat model below
+still apply; the hold cannot prevent another same-user program deleting files.
+
+The existing Settings API accepts `audit_enabled` (boolean), `audit_directory`
+(absolute path or empty for default), and `project` plus `audit` (boolean, or null to
+restore inheritance). Reserved project names `__proto__`, `constructor`, and
+`prototype` are rejected before any setting changes. Inherited object properties
+never supply audit overrides. Settings appear as `config.audit` in `/api/status` and the effective
+`settings.audit` in `/api/projects`. Invalid requests apply no partial settings.
+Permission/path failures are surfaced at archive time and in audit status. Changing
+the configured directory chooses a new trail; keep old trails and their saved heads.
+Explicit export/verify use this configured directory unless `--directory` overrides it.
+
 ## Contents and reimport
 
-Each export appends a fresh version, even if the run has not changed:
+Each explicit export appends a fresh version, even if the run has not changed.
+Automatic archiving and deletion checks reuse the last verified version when both
+current snapshot files have exactly the same bytes:
 
 ```text
 audit/

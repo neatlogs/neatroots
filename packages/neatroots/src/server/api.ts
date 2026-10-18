@@ -148,6 +148,7 @@ export function mountApi(app: Hono, roots: Roots): void {
         classifier: { backend: roots.config.classifier.backend, baseUrl: roots.config.classifier.baseUrl, model: roots.config.classifier.model },
         budgets: roots.config.budgets,
         retention: roots.config.retention,
+        audit: roots.config.audit,
         grpc_port: roots.config.grpcPort,
       },
     });
@@ -189,7 +190,8 @@ export function mountApi(app: Hono, roots: Roots): void {
   });
 
   app.delete("/api/runs/:traceId", (c) => {
-    roots.store.deleteRun(c.req.param("traceId"));
+    try { roots.store.deleteRun(c.req.param("traceId")); }
+    catch (e) { return err(c, 409, (e as Error).message); }
     if (roots.focus?.trace_id === c.req.param("traceId")) roots.focus = null;
     return c.json({ ok: true });
   });
@@ -266,6 +268,9 @@ export function mountApi(app: Hono, roots: Roots): void {
       cloud_endpoint?: string;
       redact_patterns?: string[];
       check_dir?: string;
+      audit_enabled?: boolean;
+      audit_directory?: string;
+      audit?: boolean | null;
       retention_days?: number;
       retention_max_gb?: number;
     }>(c);
@@ -274,9 +279,12 @@ export function mountApi(app: Hono, roots: Roots): void {
     const inRange = (v: unknown, min: number, max: number, minOpen = false) => typeof v === "number" && Number.isFinite(v) && (minOpen ? v > min : v >= min) && v <= max;
     if (b.retention_days !== undefined && !inRange(b.retention_days, 1, 3650)) return err(c, 400, "Keep runs for must be between 1 and 3650 days");
     if (b.retention_max_gb !== undefined && !inRange(b.retention_max_gb, 0, 10_000, true)) return err(c, 400, "Size cap must be more than 0 GB and at most 10000 GB");
-    for (const field of ["forward", "steering_enabled", "jev_cloud_enabled", "laya_enabled"] as const) {
+    for (const field of ["audit_enabled", "forward", "steering_enabled", "jev_cloud_enabled", "laya_enabled"] as const) {
       if (b[field] !== undefined && typeof b[field] !== "boolean") return err(c, 400, `${field} must be a boolean`);
     }
+    if (b.project !== undefined && (typeof b.project !== "string" || ["__proto__", "constructor", "prototype"].includes(b.project))) return err(c, 400, "invalid project name");
+    if (b.audit !== undefined && (typeof b.project !== "string" || !b.project.trim() || (b.audit !== null && typeof b.audit !== "boolean"))) return err(c, 400, "audit requires a project and must be boolean or null (inherit)");
+    if (b.audit_directory !== undefined && (typeof b.audit_directory !== "string" || (b.audit_directory !== "" && (!path.isAbsolute(b.audit_directory) || b.audit_directory.includes("\0") || b.audit_directory.split(/[\\/]/).includes(".."))))) return err(c, 400, "audit_directory must be an absolute directory without traversal, or empty for the default");
     if (b.project && b.steering !== undefined && !STEERING_MODES.includes(b.steering)) return err(c, 400, `steering must be one of ${STEERING_MODES.join(", ")}`);
     if (b.classifier_backend && !["auto", "laya", "jev", "jev-cloud", "llm"].includes(b.classifier_backend)) return err(c, 400, "classifier_backend must be auto, laya, jev, jev-cloud or llm");
     if (b.cloud_endpoint && !allowedEndpoint(b.cloud_endpoint)) return err(c, 400, "cloud endpoint must be an https://*.neatlogs.com URL (or localhost for testing)");
@@ -304,6 +312,14 @@ export function mountApi(app: Hono, roots: Roots): void {
       const cur = roots.config.projects[b.project] ?? {};
       if (b.steering !== undefined) roots.steering.setMode(b.project, b.steering);
       if (b.forward !== undefined) roots.config.projects[b.project] = { ...cur, ...roots.config.projects[b.project], forward: b.forward };
+    }
+    if (b.audit_enabled !== undefined) roots.config.audit.enabled = b.audit_enabled;
+    if (b.audit_directory !== undefined) roots.config.audit.directory = b.audit_directory;
+    if (b.project && b.audit !== undefined) {
+      const project = { ...(Object.hasOwn(roots.config.projects, b.project) ? roots.config.projects[b.project] : {}) };
+      if (b.audit === null) delete project.audit;
+      else project.audit = b.audit;
+      roots.config.projects[b.project] = project;
     }
     if (b.retention_days !== undefined) roots.config.retention.days = Math.round(b.retention_days);
     if (b.retention_max_gb !== undefined) roots.config.retention.maxGb = b.retention_max_gb;
