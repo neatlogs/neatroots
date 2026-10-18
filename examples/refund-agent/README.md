@@ -83,6 +83,12 @@ Advisory mode keeps the agent running. The delay allows findings time to arrive 
 guarantee delivery; a run that finishes before its next guided call can leave an expired note.
 
 To use an actual model instead, run Ollama with `gemma4:latest` available (or set `MODEL` to an
-installed model), enable gate mode again and run
-`LLM_BASE_URL=http://127.0.0.1:11434/v1 uv run agent.py "Refund order 4512"` in the third terminal.
+installed model), then restore gate mode and run in the third terminal with its local collector
+and SDK environment still set:
+
+```bash
+neatroots steering gate --project refund-agent
+LLM_BASE_URL=http://127.0.0.1:11434/v1 uv run agent.py "Refund order 4512"
+```
+
 Model behavior varies; the scripted example above provides the predictable demo.
