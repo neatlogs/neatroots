@@ -36,3 +36,17 @@ Other ways in:
 Configuration: `NEATROOTS_URL` (default: the local `NEATLOGS_ENDPOINT`, else `http://localhost:4100`),
 `NEATROOTS_STEER=off` to disable. No dependencies beyond the standard library; it reads the current
 trace from OpenTelemetry when `opentelemetry-api` is installed (the Neatlogs SDK installs it).
+
+When disabled, or during the five-second backoff after a connection failure, the hook skips
+SDK flushing and per-call claim/check requests. Backoff does not stop the independent SSE
+listener's reconnect loop, and the hook does not disable the SDK's own exporter.
+The first call cannot know that neatroots is down: it can wait up to 500 ms for an SDK flush,
+then for the claim's transport timeout (normally up to 800 ms when discovering the run's mode).
+These are separate waits; the total cold-probe overhead is not limited to 500 ms.
+
+Only one flush worker runs at a time, with the originating call's trace context. If flushing
+takes longer than the wait, it continues in its daemon thread while the agent carries on;
+the latest spans may not reach a check before that call. Concurrent callers share the worker,
+so a flush already in progress may not include spans completed after it started. A timed-out
+worker is not cancelled or replaced with additional workers. This synchronous flush bound
+does not itself make async preparation non-blocking.

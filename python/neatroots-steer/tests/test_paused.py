@@ -2,11 +2,13 @@ import sys
 import threading
 import time
 import types
+import urllib.error
 from unittest.mock import Mock
 
 import pytest
 
 import neatroots_steer
+from neatroots_steer import _client
 
 TRACE = "a" * 32
 
@@ -30,7 +32,11 @@ def test_off_by_env_does_not_flush(monkeypatch, flush):
 
 def test_backing_off_from_a_stopped_neatroots_does_not_flush(monkeypatch, flush):
     monkeypatch.delenv("NEATROOTS_STEER", raising=False)
-    neatroots_steer.configure("http://127.0.0.1:9", listen=False)  # nothing listens: neatroots is stopped
+    def unreachable(*args, **kwargs):
+        raise urllib.error.URLError(ConnectionRefusedError())
+
+    monkeypatch.setattr(_client.urllib.request, "urlopen", unreachable)
+    neatroots_steer.configure("http://local-fixture.invalid", listen=False)
     assert neatroots_steer.guidance() is None
     assert flush.call_count == 1  # the first call can't know yet
     for _ in range(3):

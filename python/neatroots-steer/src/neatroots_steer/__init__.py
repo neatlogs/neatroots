@@ -21,6 +21,7 @@ Steering is opt-in per project in neatroots (neatroots steering advisory --proje
 from __future__ import annotations
 
 import copy
+import contextvars
 import functools
 import inspect
 import logging
@@ -111,7 +112,8 @@ def _flush_sdk() -> None:
     global _flushing
     with _flushing_lock:
         if _flushing is None or not _flushing.is_alive():
-            _flushing = threading.Thread(target=_flush_now, name="neatroots-steer-flush", daemon=True)
+            context = contextvars.copy_context()
+            _flushing = threading.Thread(target=context.run, args=(_flush_now,), name="neatroots-steer-flush", daemon=True)
             _flushing.start()
         flushing = _flushing
     flushing.join(_FLUSH_TIMEOUT_MS / 1000)
