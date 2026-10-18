@@ -18,6 +18,7 @@ import { connectClient, findClient, listClients, serverCommand, CLIENTS } from "
 import { parseChecks } from "./checks/registry.js";
 import { checkWarnings } from "./checks/lint.js";
 import { checkFiles } from "./checks/offline.js";
+import { formatFixtureReport, testCheckFixtures } from "./checks/fixtures.js";
 import { hardwareTier } from "./models/llm.js";
 import { setCloudKey, deleteCloudKey, getCloudKey, getCloudToken } from "./relay/keychain.js";
 import { LAYA_DOWNLOAD_MB } from "./models/laya.js";
@@ -416,7 +417,20 @@ program
 
 // ------------------------------------------------------------------ checks
 
-const checks = program.command("checks").description("List and validate checks");
+const checks = program.command("checks").description("List, validate and test checks");
+
+checks
+  .command("test")
+  .argument("<manifest>", "YAML or JSON custom-check fixture manifest")
+  .option("--json", "print a machine-readable report")
+  .description("Assert custom rule findings against imported trace fixtures, with no server or model")
+  .action((manifest: string, opts: { json?: boolean }) => {
+    const report = testCheckFixtures(manifest);
+    console.log(opts.json ? JSON.stringify(report, null, 2) : formatFixtureReport(report));
+    // Let Node drain piped output before exiting; large JSON reports can exceed
+    // the pipe buffer and are truncated by process.exit().
+    process.exitCode = report.exit_code;
+  });
 
 checks
   .command("list")
