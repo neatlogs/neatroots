@@ -15,6 +15,8 @@ import { go } from "@/lib/router";
 import { runGoal } from "../../runs/_libs/labels";
 import { RunStatusIcon } from "../../runs/_components/run-status-icon";
 
+import { SavedSearches } from "./saved-searches";
+
 const QUICK: { token: string; label: string }[] = [
   { token: "has:problems", label: "With problems" },
   { token: "status:failed", label: "Failed" },
@@ -56,19 +58,28 @@ function useDebounced<T>(v: T, ms: number): T {
  */
 export function SearchPage({ query }: { query: URLSearchParams }) {
   const [q, setQ] = useState(query.get("q") ?? "");
+  const routeQuery = query.get("q") ?? "";
+  const [previousRoute, setPreviousRoute] = useState(routeQuery);
+  const [syncing, setSyncing] = useState(false);
+  if (previousRoute !== routeQuery) {
+    setPreviousRoute(routeQuery);
+    setQ(routeQuery);
+    setSyncing(true);
+  }
   const input = useRef<HTMLInputElement>(null);
-  const dq = useDebounced(q.trim(), 250);
+  const dq = useDebounced(q, 250);
   useEffect(() => {
     input.current?.focus();
   }, []);
   useEffect(() => {
+    if (syncing) { if (dq === q) setSyncing(false); return; }
     const next = dq ? `search?q=${encodeURIComponent(dq)}` : "search";
     if (window.location.hash !== `#/${next}`) window.history.replaceState(null, "", `#/${next}`);
-  }, [dq]);
-  const { data, isFetching } = useQuery({
+  }, [dq, q, routeQuery, syncing]);
+  const { data, isFetching, error } = useQuery({
     queryKey: ["search", dq],
     queryFn: () => api<{ total: number; runs: SearchRun[]; query: { text: string; filters: Record<string, string> } }>(`/api/search/runs?q=${encodeURIComponent(dq)}&limit=60`),
-    enabled: dq.length > 0,
+    enabled: dq.trim().length > 0,
     placeholderData: keepPreviousData,
   });
   const has = (t: string) => q.split(/\s+/).includes(t);
@@ -91,6 +102,7 @@ export function SearchPage({ query }: { query: URLSearchParams }) {
               onChange={(e) => setQ(e.target.value)}
             />
           </div>
+          <SavedSearches query={q} />
           <div className="flex flex-wrap items-center gap-2">
             {QUICK.map((f) => (
               <ToggleChip key={f.token} active={has(f.token)} label={f.label} onToggle={() => toggle(f.token)} />
@@ -112,6 +124,8 @@ export function SearchPage({ query }: { query: URLSearchParams }) {
           />
         ) : isFetching && !data ? (
           Array.from({ length: 4 }, (_, i) => <Skeleton key={i} className="h-24 w-full" />)
+        ) : error ? (
+          <p role="alert" className="text-sm text-destructive">{error.message}</p>
         ) : !data?.runs.length ? (
           <EmptyState
             variant="inline"
