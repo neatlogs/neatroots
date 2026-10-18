@@ -56,7 +56,7 @@ export function ReplayDialog({ traceId, spans, initialSpan, onClose }: { traceId
     const body =
       mode === "llm"
         ? { span_id: spanId, messages, model: model || undefined }
-        : { times: Number(times), input: input ?? opts?.default_input, system: system !== undefined && system !== (opts?.system ?? "") ? system : undefined, model: model || undefined };
+        : { times: Number(times) > 1 ? Number(times) : undefined, input: input ?? opts?.default_input, system: system !== undefined && system !== (opts?.system ?? "") ? system : undefined, model: model || undefined };
     replay.mutate(body, {
       onSuccess: (r) => {
         if ("times" in r) {

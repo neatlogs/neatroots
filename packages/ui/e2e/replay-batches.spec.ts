@@ -71,6 +71,31 @@ test("cancels remaining repeats and discloses active work", async ({ page }) => 
   } finally { await fixture.close(); }
 });
 
+test("keeps the default single replay request and result outside the batch path", async ({ page }, info) => {
+  const fixture = await setup();
+  try {
+    const errors = watchErrors(page);
+    await open(page, `runs/${fixture.trace}`);
+    await page.getByRole("button", { name: "Replay", exact: true }).click();
+    await expect(page.getByRole("spinbutton", { name: "Repeat count" })).toHaveValue("1");
+    for (const [theme, width] of [["light", 1440], ["dark", 1440], ["light", 390], ["dark", 390]] as const) {
+      await page.evaluate(value => { localStorage.setItem("neatroots-theme", value); document.documentElement.classList.toggle("dark", value === "dark"); }, theme);
+      await page.setViewportSize({ width, height: 960 });
+      await expect(page.getByRole("dialog")).toBeVisible();
+      await page.screenshot({ path: info.outputPath(`single-${theme}-${width}.png`), fullPage: true, animations: "disabled" });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    }
+    const response = page.waitForResponse(r => r.url().endsWith(`/api/runs/${fixture.trace}/replay`) && r.request().method() === "POST");
+    await page.getByRole("button", { name: "Re-run agent", exact: true }).click();
+    const r = await response;
+    expect(r.request().postDataJSON()).not.toHaveProperty("times");
+    expect(await r.json()).not.toHaveProperty("times");
+    await expect.poll(fixture.calls).toBe(1);
+    expect(await api(`/api/runs/${fixture.trace}/replay-batches`)).toEqual([]);
+    expect(errors).toEqual([]);
+  } finally { await fixture.close(); }
+});
+
 test("refreshes batch results immediately after replay without interval polling", async ({ page }) => {
   const fixture = await setup();
   let created = false, reads = 0;

@@ -120,6 +120,7 @@ export class Roots {
   close(): void {
     if (!this.store.db.open) return;
     clearInterval(this.sweeper);
+    this.engine?.stopCleanup();
     this.replayBatches.close();
     this.replays.close();
     this.laya.stop();
