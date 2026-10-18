@@ -5,6 +5,7 @@ import YAML from "yaml";
 import { AnyCheck, isQuestion, isRule, type Check, type CheckSource, type LoadedCheck } from "./types.js";
 import type { Store } from "../store/db.js";
 import { log } from "../util/log.js";
+import { removeCheckText } from "./yaml-removal.js";
 
 function findLibraryDir(): string {
   let dir = path.dirname(fileURLToPath(import.meta.url));
@@ -125,7 +126,7 @@ interface FoundCheck {
 function findChecks(text: string, id: string): FoundCheck[] {
   const isOurs = (n: unknown): n is YAML.YAMLMap => YAML.isMap(n) && n.get("id") === id && !!n.range;
   const found: FoundCheck[] = [];
-  for (const doc of YAML.parseAllDocuments(text)) {
+  for (const doc of YAML.parseAllDocuments(text, { keepSourceTokens: true })) {
     if (doc.errors.length) continue;
     const contents = doc.contents;
     if (isOurs(contents)) {
@@ -137,21 +138,6 @@ function findChecks(text: string, id: string): FoundCheck[] {
     for (const node of list?.items ?? []) if (isOurs(node)) found.push({ doc, node, list });
   }
   return found;
-}
-
-/** The text a check takes up: its document, its "- " entry, or its flow entry and one comma. */
-function textOf(text: string, { doc, node, list }: FoundCheck): [number, number] {
-  const [start, end] = node.range!;
-  if (!list) return [doc.range[0], doc.range[2]];
-  if (list.flow) {
-    const after = /^\s*,\s*/.exec(text.slice(end));
-    if (after) return [start, end + after[0].length];
-    const before = /,\s*$/.exec(text.slice(0, start));
-    return [before ? before.index : start, end];
-  }
-  // A block entry runs from the start of its "- " line to the end of its last line.
-  const marker = /(^|\n)[ \t]*-\s+$/.exec(text.slice(0, start));
-  return [marker ? marker.index + marker[1].length : start, end];
 }
 
 /**
@@ -176,9 +162,7 @@ function removeFromYaml(text: string, id: string): string {
       },
     });
   }
-  let out = text;
-  for (const [start, end] of found.map((f) => textOf(text, f)).reverse()) out = out.slice(0, start) + out.slice(end);
-  return out;
+  return removeCheckText(text, id, found, parseChecks);
 }
 
 /**
@@ -348,10 +332,9 @@ export class CheckRegistry {
     if (lc.path && fs.existsSync(lc.path)) {
       const before = fs.readFileSync(lc.path, "utf8");
       const text = removeFromYaml(before, id);
-      const left = parseChecks(text);
       if (text === before) {
         /* edited by hand since it was loaded; nothing of this check left to remove */
-      } else if (!left.checks.length && !left.errors.length) fs.unlinkSync(lc.path);
+      } else if (!text.trim()) fs.unlinkSync(lc.path);
       else fs.writeFileSync(lc.path, text, "utf8");
     }
     this.store.db.prepare("DELETE FROM checks WHERE id = ?").run(id);
