@@ -12,7 +12,7 @@ interface Candidate { trace_id: string; eligible: number; authority: number; cla
 /** One persisted authority for ordinary replays and batch consumers. No span hydration/backfill. */
 export class ReplayCorrelation {
   constructor(private readonly store: Store) {
-    store.db.exec(`
+    store.db.transaction(() => store.db.exec(`
       CREATE TABLE IF NOT EXISTS replay_windows (
         replay_id TEXT PRIMARY KEY, project TEXT, active INTEGER NOT NULL,
         overlapped INTEGER NOT NULL DEFAULT 0, overflow INTEGER NOT NULL DEFAULT 0
@@ -28,9 +28,12 @@ export class ReplayCorrelation {
         trace_id TEXT PRIMARY KEY, value TEXT, has_claim INTEGER NOT NULL DEFAULT 0,
         conflict INTEGER NOT NULL DEFAULT 0
       );
-      CREATE TRIGGER IF NOT EXISTS replay_window_evicted AFTER DELETE ON replay_windows BEGIN
+      CREATE INDEX IF NOT EXISTS replays_generated ON replays(generated_trace_id);
+      DROP TRIGGER IF EXISTS replay_window_evicted;
+      DROP TRIGGER IF EXISTS replay_correlation_deleted;
+      CREATE TRIGGER replay_window_evicted AFTER DELETE ON replay_windows BEGIN
         UPDATE replays SET attribution='unknown', attribution_reason='Replay attribution evidence was pruned or exceeded its capacity.',
-          new_trace_id=NULL, output_preview=NULL WHERE id=OLD.replay_id;
+          new_trace_id=NULL, output_preview=CASE WHEN generated_trace_id IS NOT NULL THEN output_preview ELSE NULL END WHERE id=OLD.replay_id;
         DELETE FROM replay_candidates WHERE replay_id=OLD.replay_id;
         DELETE FROM replay_trace_claims WHERE trace_id NOT IN (SELECT trace_id FROM replay_candidates);
       END;
@@ -39,9 +42,10 @@ export class ReplayCorrelation {
         DELETE FROM replay_trace_claims WHERE trace_id=OLD.trace_id;
         UPDATE replays SET attribution='unknown', attribution_reason='The associated run was deleted; reused trace IDs are not evidence.',
           new_trace_id=NULL, output_preview=NULL WHERE new_trace_id=OLD.trace_id;
+        UPDATE replays SET output_preview=NULL, output_revoked=1 WHERE trace_id=OLD.trace_id OR generated_trace_id=OLD.trace_id;
         DELETE FROM replay_windows WHERE replay_id IN (SELECT id FROM replays WHERE trace_id=OLD.trace_id);
       END;
-    `);
+    `))();
   }
 
   open(id: string, project: string | null): Set<string> {
@@ -163,7 +167,7 @@ export class ReplayCorrelation {
       (Candidate & { has_claim: number; conflict: number })[];
     const claims = rows.filter((r) => r.claimed && r.authority && r.eligible !== 0);
     if (claims.length > 1 || claims.some((r) => r.conflict))
-      return { trace: null, attribution: "ambiguous", reason: "Replay IDs are duplicated or contradictory; the run association was revoked." };
+      return { trace: null, attribution: "ambiguous", reason: "Multiple possible result traces or contradictory replay IDs; the run association was revoked." };
     if (claims.length === 1) {
       const claim = claims[0];
       if (claim.eligible !== 1) return unknown("The claimed run was not first seen during this replay window.");

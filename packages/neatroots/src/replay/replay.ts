@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import type { RootsEvents } from "../bus.js";
 import type { Roots } from "../core.js";
 import { loadTrace, runGoal } from "../engine/trace.js";
 import { toBatches, type SpanNode } from "../ingest/build.js";
@@ -66,7 +67,7 @@ CREATE INDEX IF NOT EXISTS replays_trace ON replays (trace_id);
 CREATE INDEX IF NOT EXISTS replays_new ON replays (new_trace_id);
 `;
 
-type Row = Omit<Replay, "overrides"> & { overrides: string };
+type Row = Omit<Replay, "overrides"> & { overrides: string; generated_trace_id?: string | null; output_revoked?: number };
 
 /** Chat messages as neatroots' LLM client takes them; tool turns become plain text. */
 export function toChat(messages: Plain | undefined): ChatMessage[] {
@@ -94,13 +95,16 @@ export class Replays {
     const columns = roots.store.db.prepare("PRAGMA table_info(replays)").all() as { name: string }[];
     if (!columns.some((c) => c.name === "attribution")) roots.store.db.exec("ALTER TABLE replays ADD COLUMN attribution TEXT NOT NULL DEFAULT 'unknown'");
     if (!columns.some((c) => c.name === "attribution_reason")) roots.store.db.exec("ALTER TABLE replays ADD COLUMN attribution_reason TEXT NOT NULL DEFAULT 'Replay association predates attribution evidence.'");
+    if (!columns.some((c) => c.name === "generated_trace_id")) roots.store.db.exec("ALTER TABLE replays ADD COLUMN generated_trace_id TEXT");
+    if (!columns.some((c) => c.name === "output_revoked")) roots.store.db.exec("ALTER TABLE replays ADD COLUMN output_revoked INTEGER NOT NULL DEFAULT 0");
     this.correlation = new ReplayCorrelation(roots.store);
     roots.store.db.prepare("UPDATE replay_windows SET active=0").run();
     roots.store.onRunsDeleted((traces) => {
       const ids = JSON.stringify(traces);
       const affected = roots.store.db.prepare(`SELECT DISTINCT replay_id AS id,trace_id AS previous FROM replay_candidates
         WHERE trace_id IN (SELECT value FROM json_each(?)) UNION
-        SELECT id,NULL AS previous FROM replays WHERE trace_id IN (SELECT value FROM json_each(?))`).all(ids, ids) as { id: string; previous: string | null }[];
+        SELECT id,generated_trace_id AS previous FROM replays WHERE trace_id IN (SELECT value FROM json_each(?))
+        OR generated_trace_id IN (SELECT value FROM json_each(?))`).all(ids, ids, ids) as { id: string; previous: string | null }[];
       for (const row of affected) {
         const r = this.get(row.id);
         if (r) roots.bus.emit("replay", { id: r.id, trace_id: r.trace_id, state: r.state, new_trace_id: r.new_trace_id,
@@ -115,22 +119,31 @@ export class Replays {
       .run("interrupted by a restart", Date.now());
   }
 
-  private save(r: Replay, previousTrace?: string | null): void {
-    this.roots.store.db
-      .prepare(
-        `INSERT INTO replays (id, trace_id, span_id, kind, via, overrides, state, new_trace_id, output_preview, error, log_tail, created_ms, finished_ms, attribution, attribution_reason)
-         VALUES (@id, @trace_id, @span_id, @kind, @via, @overrides, @state, @new_trace_id, @output_preview, @error, @log_tail, @created_ms, @finished_ms, @attribution, @attribution_reason)
-         ON CONFLICT(id) DO UPDATE SET state = excluded.state, new_trace_id = excluded.new_trace_id, output_preview = excluded.output_preview,
-           error = excluded.error, log_tail = excluded.log_tail, finished_ms = excluded.finished_ms,
-           attribution=excluded.attribution, attribution_reason=excluded.attribution_reason`,
-      )
-      .run({ ...r, overrides: JSON.stringify(r.overrides) });
-    this.roots.bus.emit("replay", { id: r.id, state: r.state, trace_id: r.trace_id, new_trace_id: r.new_trace_id,
-      previous_trace_id: previousTrace, error: r.error, attribution: r.attribution, attribution_reason: r.attribution_reason });
+  private save(r: Replay, previousTrace?: string | null, quiet = false, generatedTrace: string | null = null): RootsEvents["replay"] {
+    const event = this.roots.store.db.transaction(() => {
+      this.roots.store.db
+        .prepare(
+          `INSERT INTO replays (id, trace_id, span_id, kind, via, overrides, state, new_trace_id, output_preview, error, log_tail, created_ms, finished_ms, attribution, attribution_reason, generated_trace_id)
+           VALUES (@id, @trace_id, @span_id, @kind, @via, @overrides, @state, @new_trace_id, @output_preview, @error, @log_tail, @created_ms, @finished_ms, @attribution, @attribution_reason, @generatedTrace)
+           ON CONFLICT(id) DO UPDATE SET state = excluded.state, new_trace_id = CASE WHEN replays.output_revoked=1 THEN NULL ELSE excluded.new_trace_id END, output_preview = CASE WHEN replays.output_revoked=1 THEN NULL ELSE excluded.output_preview END,
+             error = excluded.error, log_tail = excluded.log_tail, finished_ms = excluded.finished_ms,
+             attribution=CASE WHEN replays.output_revoked=1 THEN 'unknown' ELSE excluded.attribution END,
+             attribution_reason=CASE WHEN replays.output_revoked=1 THEN 'The source or generated run was deleted; reused trace IDs cannot restore its result.' ELSE excluded.attribution_reason END,
+             generated_trace_id=COALESCE(excluded.generated_trace_id,replays.generated_trace_id)`,
+        )
+        .run({ ...r, overrides: JSON.stringify(r.overrides), generatedTrace });
+      // Read back inside the writer transaction so callers/events use the guarded value.
+      Object.assign(r, this.get(r.id));
+      return { id: r.id, state: r.state, trace_id: r.trace_id, new_trace_id: r.new_trace_id,
+        previous_trace_id: previousTrace, error: r.error, attribution: r.attribution, attribution_reason: r.attribution_reason };
+    })();
+    if (!quiet) this.roots.bus.emit("replay", event);
+    return event;
   }
 
   private parse(row: Row): Replay {
-    return { ...row, overrides: JSON.parse(row.overrides) as ReplayOverrides };
+    const { generated_trace_id: _generated, output_revoked: _revoked, ...visible } = row;
+    return { ...visible, overrides: JSON.parse(row.overrides) as ReplayOverrides };
   }
 
   /** Replays made from this run, newest first. */
@@ -150,17 +163,19 @@ export class Replays {
   }
 
   /** Raw request evidence survives span replacement; completed associations remain revocable. */
-  observe(batches: ResourceSpansBatch[], updates: TraceUpdate[]): Set<string> {
+  observe(batches: ResourceSpansBatch[], updates: TraceUpdate[]): RootsEvents["replay"][] {
+    const events: RootsEvents["replay"][] = [];
     const ids = this.correlation.observe(batches, updates);
     for (const id of ids) {
       const r = this.get(id);
       if (!r || r.state === "running" || (!r.new_trace_id && r.attribution === "unknown")) continue;
       const association = this.correlation.select(id, r.attribution === "fallback-unverified");
       if (r.new_trace_id === association.trace && r.attribution === association.attribution && r.attribution_reason === association.reason) continue;
-      this.save({ ...r, new_trace_id: association.trace, attribution: association.attribution,
-        attribution_reason: association.reason, output_preview: association.trace ? this.roots.store.getRun(association.trace)?.output_preview ?? null : null }, r.new_trace_id);
+      const owned = this.roots.store.db.prepare("SELECT generated_trace_id FROM replays WHERE id=?").get(id) as { generated_trace_id: string | null };
+      events.push(this.save({ ...r, new_trace_id: association.trace, attribution: association.attribution,
+        attribution_reason: association.reason, output_preview: owned.generated_trace_id ? r.output_preview : association.trace ? this.roots.store.getRun(association.trace)?.output_preview ?? null : null }, r.new_trace_id, true));
     }
-    return ids;
+    return events;
   }
 
   /** How this project's agent can be re-run: a command, an HTTP endpoint, or neither. */
@@ -196,12 +211,12 @@ export class Replays {
     return r;
   }
 
-  private finish(r: Replay, patch: Partial<Replay>): Replay {
+  private finish(r: Replay, patch: Partial<Replay>, generatedTrace: string | null = null): Replay {
     this.correlation.close(r.id);
     if (patch.state === "failed" && patch.attribution === undefined)
       patch = { ...patch, attribution: "unknown", attribution_reason: "Replay execution failed; no run association is certified." };
     Object.assign(r, patch, { finished_ms: Date.now() });
-    this.save(r);
+    this.save(r, undefined, false, generatedTrace);
     return r;
   }
 
@@ -254,10 +269,12 @@ export class Replays {
           attributes: replayAttrs,
         },
       ];
+      // Register ownership before synchronous postcommit trace observers can delete/reuse it.
+      this.roots.store.db.prepare("UPDATE replays SET generated_trace_id=? WHERE id=?").run(newTrace, r.id);
       this.roots.ingest(toBatches(nodes, { project: t.run?.project ?? "replay", source: "replay" }));
       const association = this.correlation.select(r.id);
       return this.finish(r, { state: "succeeded", new_trace_id: association.trace, attribution: association.attribution,
-        attribution_reason: association.reason, output_preview: association.trace ? preview(res.text, 400) : null });
+        attribution_reason: association.reason, output_preview: this.roots.store.getRun(traceId) && this.roots.store.getRun(newTrace) ? preview(res.text, 400) : null }, newTrace);
     } catch (err) {
       return this.finish(r, { state: "failed", error: (err as Error).message });
     }

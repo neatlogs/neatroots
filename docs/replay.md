@@ -123,4 +123,13 @@ choosing another untagged run.
 Correlation retains at most 256 attempt windows, 512 candidate traces per attempt and 4096
 candidate associations overall, inspecting at most 512 attributes per claim and 64 active windows.
 Exceeding a bound yields uncertainty rather than a verified link. Pruning retained evidence clears
-the affected link; deleted original runs prune their owned evidence.
+the affected link and trace-derived preview. Independently generated direct LLM answers remain,
+but deleting their source or generated run clears them even after pruning. Historical links do not
+acquire generated-output provenance. Deleted original runs prune their owned evidence.
+
+
+A process-wide `OTEL_RESOURCE_ATTRIBUTES` replay ID can cover several legitimate traces, such as
+multiple chat turns. It identifies the invocation, not which trace is its result. Multiple eligible
+root/resource matches remain ambiguous; neatroots does not certify the earliest one. Replay commands
+should produce one result trace, or group auxiliary work beneath that root. A root claim does not
+outrank another eligible resource match. Child-only claims remain insufficient.

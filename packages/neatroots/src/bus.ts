@@ -34,6 +34,14 @@ export class Bus {
     this.ee.emit("*", { event, payload });
   }
 
+  /** Postcommit ingest notifications: one observer cannot roll back storage or skip others. */
+  emitSafely<K extends keyof RootsEvents>(event: K, payload: RootsEvents[K], onError: (error: unknown) => void): void {
+    for (const [name, value] of [[event, payload], ["*", { event, payload }]] as const)
+      for (const listener of this.ee.rawListeners(name)) {
+        try { listener.call(this.ee, value); } catch (error) { onError(error); }
+      }
+  }
+
   on<K extends keyof RootsEvents>(event: K, fn: (payload: RootsEvents[K]) => void): () => void {
     this.ee.on(event, fn);
     return () => this.ee.off(event, fn);

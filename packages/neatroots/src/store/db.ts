@@ -487,7 +487,7 @@ export class Store {
   }
 
   /** Stores spans losslessly and updates run, session and search rows. */
-  ingest(batches: ResourceSpansBatch[]): TraceUpdate[] {
+  ingest(batches: ResourceSpansBatch[], onStored?: (updates: TraceUpdate[]) => void): TraceUpdate[] {
     const updates = new Map<string, TraceUpdate>();
     const supersededBlobs = new Set<string>();
     const now = Date.now();
@@ -523,6 +523,7 @@ export class Store {
           if (runFlags.completed) u.completed = true;
         }
       }
+      onStored?.([...updates.values()]);
     });
     tx();
     // Files are reclaimed only after the span replacement commits and no remaining span uses them.
