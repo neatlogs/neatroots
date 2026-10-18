@@ -70,3 +70,33 @@ test("cancels remaining repeats and discloses active work", async ({ page }) => 
     expect(fixture.calls()).toBe(1);
   } finally { await fixture.close(); }
 });
+
+test("refreshes batch results immediately after replay without interval polling", async ({ page }) => {
+  const fixture = await setup();
+  let created = false, reads = 0;
+  const result = { id: "rb_immediate", times: 2, state: "completed", linked: 2, settled: 2, clean: 2,
+    pending: 0, failed: 0, execution_failed: 0, evaluation_failed: 0, unlinked: 0, cancelled: 0, error: null, findings: [] };
+  try {
+    await page.clock.install();
+    await page.route(`**/api/runs/${fixture.trace}/replay-batches`, async route => {
+      reads++;
+      await route.fulfill({ json: created ? [result] : [] });
+    });
+    await page.route(`**/api/runs/${fixture.trace}/replay`, async route => {
+      created = true; await route.fulfill({ json: result });
+    });
+    await open(page, `runs/${fixture.trace}`);
+    await expect.poll(() => reads).toBeGreaterThan(0);
+    await page.getByRole("button", { name: "Replay", exact: true }).click();
+    await page.getByRole("spinbutton", { name: "Repeat count" }).fill("2");
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+    await page.clock.runFor(1500); // Complete one poll; the next interval is 1500ms away.
+    const before = reads;
+    const response = page.waitForResponse(r => r.url().endsWith(`/api/runs/${fixture.trace}/replay`) && r.request().method() === "POST");
+    await page.getByRole("button", { name: "Re-run agent", exact: true }).click();
+    await response;
+    await page.clock.runFor(200); // Notifications may run; the next poll cannot.
+    await expect(page.getByTestId("replay-batches").getByText("2 repeats · completed")).toBeVisible();
+    expect(reads).toBeGreaterThan(before);
+  } finally { await fixture.close(); }
+});

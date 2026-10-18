@@ -445,7 +445,11 @@ export const TOOLS = [
     run: async (roots, a) => {
       const resolved = resolveTraceNoting(roots, a.trace_id);
       const traceId = resolved.traceId;
-      if (a.times !== undefined) return batchTool(roots, traceId, a.times, { input: a.input, model: a.model, system: a.system }, a.timeout_sec);
+      if (a.times !== undefined) {
+        const result = await batchTool(roots, traceId, a.times, { input: a.input, model: a.model, system: a.system }, a.timeout_sec);
+        const note = [fallbackNote(resolved).note, (result as { note?: string }).note].filter(Boolean).join(" ");
+        return note ? { ...result, note } : result;
+      }
       const { replay, done } = roots.replays.startRun(traceId, { input: a.input, model: a.model, system: a.system });
       const r = await Promise.race([done, new Promise<null>((res) => setTimeout(() => res(null), (a.timeout_sec ?? 300) * 1000))]);
       if (!r) return { replay_id: replay.id, state: "running", note: [fallbackNote(resolved).note, "still running; call get_current_run or search_runs later"].filter(Boolean).join(" ") };

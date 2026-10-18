@@ -14,7 +14,12 @@ export async function runBatch(port: number, trace: string, times: number, overr
   console.log(`Batch ${batch.id}; Ctrl+C cancels remaining repeats (active work may finish).`);
   let cancellation: Promise<unknown> | undefined;
   const cancel = () => {
-    cancellation ??= api(port, `/api/replay-batches/${batch.id}/cancel`, { method: "POST" }).catch((e: Error) => {
+    if (cancellation) {
+      console.error(`Stopped waiting for batch ${batch.id}; active server work may continue. Status: http://localhost:${port}/api/replay-batches/${batch.id}`);
+      process.exit(130); // Do not await a stalled cancellation or status request.
+    }
+    console.error("Cancelling remaining repeats; active work may finish. Press Ctrl+C again to stop waiting.");
+    cancellation = api(port, `/api/replay-batches/${batch.id}/cancel`, { method: "POST" }).catch((e: Error) => {
       console.error(`Could not cancel ${batch.id}: ${e.message}`);
     });
   };
