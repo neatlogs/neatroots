@@ -155,6 +155,8 @@ export function mountApi(app: Hono, roots: Roots): void {
 
   app.get("/api/runs", (c) => {
     const q = c.req.query();
+    const sinceMs = q.since === undefined ? undefined : Number(q.since);
+    if (q.since !== undefined && (!q.since.trim() || !Number.isFinite(sinceMs))) return err(c, 400, "since must be a millisecond timestamp");
     const filter = {
       project: q.project || undefined,
       workflow: q.workflow || undefined,
@@ -163,7 +165,7 @@ export function mountApi(app: Hono, roots: Roots): void {
       hasFinding: q.has_finding === "1" || q.has_finding === "true",
       checkId: q.check || undefined,
       text: q.q || undefined,
-      sinceMs: q.since ? Number(q.since) : undefined,
+      sinceMs,
     };
     const runs = roots.store.listRuns({ ...filter, limit: clampInt(q.limit, 100, 1, 500), offset: clampInt(q.offset, 0, 0, Number.MAX_SAFE_INTEGER) });
     // total: every run (the page says "no runs yet" when it's 0); matching: runs these filters match.

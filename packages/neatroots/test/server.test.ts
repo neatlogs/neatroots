@@ -244,6 +244,11 @@ describe("server", () => {
     expect(await get("")).toMatchObject({ total: 3, matching: 3 });
     expect(await get("has_finding=1")).toMatchObject({ total: 3, matching: 1 });
     expect(await get("status=error")).toMatchObject({ total: 3, matching: 1 });
+    for (const since of ["yesterday", "NaN", ""]) {
+      const response = await fetch(`${tb.url}/api/runs?since=${since}`, { headers: origin });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "since must be a millisecond timestamp" });
+    }
     // matching counts every match, not just the page; there was no such count, so with more matches
     // than the page holds (it asks for 150) the runs page read "150 matching" however many matched
     const page = await get("limit=2");
