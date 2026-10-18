@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { BlobStore } from "./blobs.js";
+import { log } from "../util/log.js";
 import { SearchIds } from "./search-ids.js";
 import { sha256, newId } from "../util/ids.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
@@ -1427,7 +1428,9 @@ export class Store {
     });
     tx();
     this.reclaimUnreferencedBlobs(shas);
-    for (const listener of this.deletionListeners) listener(traceIds);
+    for (const listener of this.deletionListeners) {
+      try { listener(traceIds); } catch (err) { log.warn(`run deletion listener failed: ${String(err)}`); }
+    }
   }
 
   /** Deletes candidate payloads only after checking every remaining span reference. */

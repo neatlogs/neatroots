@@ -107,8 +107,9 @@ export class Replays {
         OR generated_trace_id IN (SELECT value FROM json_each(?))`).all(ids, ids, ids) as { id: string; previous: string | null }[];
       for (const row of affected) {
         const r = this.get(row.id);
-        if (r) roots.bus.emit("replay", { id: r.id, trace_id: r.trace_id, state: r.state, new_trace_id: r.new_trace_id,
-          previous_trace_id: row.previous, attribution: r.attribution, attribution_reason: r.attribution_reason });
+        if (r) roots.bus.emitSafely("replay", { id: r.id, trace_id: r.trace_id, state: r.state, new_trace_id: r.new_trace_id,
+          previous_trace_id: row.previous, attribution: r.attribution, attribution_reason: r.attribution_reason },
+          (err) => log.warn(`replay listener failed after deletion: ${String(err)}`));
       }
     });
     // A replay runs in this process (a child command or an HTTP call); it cannot
