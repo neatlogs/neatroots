@@ -216,8 +216,8 @@ export async function mockLlm(
     requests,
     close: () =>
       new Promise((r) => {
-        server.closeAllConnections();
         server.close(() => r());
+        server.closeAllConnections();
       }),
   };
 }

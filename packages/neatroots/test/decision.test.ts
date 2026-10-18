@@ -61,8 +61,8 @@ describe("decision model", () => {
     expect(r.answers.yn.probability).toBeCloseTo(0.9);
     expect(r.answers.ch.choice).toBe("x");
     expect(r.answers.sc.score).toBe(2);
-    server.closeAllConnections();
     server.close();
+    server.closeAllConnections();
   });
 
   it("parses model JSON loosely", () => {
@@ -91,8 +91,8 @@ describe("decision routing", () => {
       port: (server.address() as AddressInfo).port,
       close: () =>
         new Promise<void>((r) => {
-          server.closeAllConnections();
           server.close(() => r());
+          server.closeAllConnections();
         }),
     };
   }
@@ -162,8 +162,8 @@ describe("Laya trust", () => {
     // An untrusted question still goes to the LLM.
     expect((await dm.decide("state three", [{ name: "other", type: "yes_no", ask: "Is this bad?" }])).backend).toBe("llm");
     await until(() => trust.get("other").n >= 1);
-    laya.closeAllConnections();
     laya.close();
+    laya.closeAllConnections();
     await llm.close();
   });
 });

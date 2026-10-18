@@ -114,13 +114,18 @@ const replaceScript = new vm.Script("re.lastIndex = 0; s.replace(re, fn)");
 export function replaceWithin(re: RegExp, s: string, fn: (m: string, ...groups: unknown[]) => string, ms: number): string | undefined {
   sandbox.re = re;
   sandbox.s = s;
-  sandbox.fn = fn;
+  let callbackRan = false;
+  sandbox.fn = (m: string, ...groups: unknown[]) => {
+    callbackRan = true;
+    return fn(m, ...groups);
+  };
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         return String(replaceScript.runInContext(sandbox, { timeout: ms }));
       } catch (e) {
         if ((e as { code?: string }).code !== "ERR_SCRIPT_EXECUTION_TIMEOUT") throw e;
+        if (callbackRan) return undefined;
       }
     }
     return undefined;
