@@ -1488,7 +1488,7 @@ export class Store {
         if (!this.db.open) return;
         if (ready) {
           onIds?.(rows, true);
-          this.reindexSearch(onReindex);
+          if (this.db.open) this.reindexSearch(onReindex);
         } else if (tries < 3) {
           setTimeout(() => this.db.open && attempt(tries + 1), retryMs * tries).unref();
         } else {
