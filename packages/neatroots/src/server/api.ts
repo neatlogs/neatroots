@@ -15,6 +15,7 @@ import { mountModelsApi } from "./api-models.js";
 import { mountChecksApi } from "./api-checks.js";
 import { mountInsightsApi } from "./api-insights.js";
 import { mountAgentsApi } from "./api-agents.js";
+import { streamTiming } from "../semantics/stream-timing.js";
 import { importSource, mountExploreApi } from "./api-explore.js";
 import { checkCoverage } from "./coverage.js";
 import { installInfo } from "../util/install.js";
@@ -78,6 +79,7 @@ export function spanDetail(roots: Roots, traceId: string, spanId: string) {
   const full = roots.store.getOtlpSpan(traceId, spanId);
   if (!full) return undefined;
   const view = buildView(full.span, full.resource.attributes);
+  const timing = view.kind === "LLM" ? streamTiming(full.span) : {};
   return {
     trace_id: traceId,
     span_id: spanId,
@@ -87,7 +89,7 @@ export function spanDetail(roots: Roots, traceId: string, spanId: string) {
     status: full.span.status,
     start_ns: full.span.startTimeUnixNano,
     end_ns: full.span.endTimeUnixNano,
-    view,
+    view: { ...view, ...timing },
     attributes: kvToPlain(full.span.attributes),
     events: full.span.events.map((e) => ({ name: e.name, time_ns: e.timeUnixNano, attributes: kvToPlain(e.attributes) })),
     links: full.span.links,

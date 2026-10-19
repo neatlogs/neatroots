@@ -264,6 +264,8 @@ export interface SpanDetail {
     promptTokens?: number;
     completionTokens?: number;
     totalTokens?: number;
+    firstChunkMs?: number;
+    firstTextMs?: number;
     tools?: string[];
   };
   attributes: Record<string, unknown>;
