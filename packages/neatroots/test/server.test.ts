@@ -239,10 +239,11 @@ describe("server", () => {
     const ids = [hex(16), hex(16), hex(16)];
     ids.forEach((t, i) => tb.roots.ingest([batch([span({ traceId: t, spanId: hex(8), name: "agent", kind: "workflow", status: i === 0 ? 2 : 1 })])]));
     tb.roots.store.insertFinding({ trace_id: ids[0], check_id: "c", check_kind: "rule", title: "F", probability: null, status: "raised", evidence_span_ids: [], detail: {}, model: null, triage_score: null, explanation_id: null });
+    tb.roots.store.insertFinding({ trace_id: ids[1], check_id: "c", check_kind: "rule", title: "F", probability: null, status: "resolved", evidence_span_ids: [], detail: {}, model: null, triage_score: null, explanation_id: null });
     const origin = { origin: tb.url.replace("127.0.0.1", "localhost") };
-    const get = async (q: string) => (await (await fetch(`${tb.url}/api/runs?${q}`, { headers: origin })).json()) as { runs: unknown[]; total: number; matching: number };
+    const get = async (q: string) => (await (await fetch(`${tb.url}/api/runs?${q}`, { headers: origin })).json()) as { runs: { trace_id: string }[]; total: number; matching: number };
     expect(await get("")).toMatchObject({ total: 3, matching: 3 });
-    expect(await get("has_finding=1")).toMatchObject({ total: 3, matching: 1 });
+    expect(await get("has_finding=1")).toMatchObject({ runs: [{ trace_id: ids[0] }], total: 3, matching: 1 });
     expect(await get("status=error")).toMatchObject({ total: 3, matching: 1 });
     // matching counts every match, not just the page; there was no such count, so with more matches
     // than the page holds (it asks for 150) the runs page read "150 matching" however many matched

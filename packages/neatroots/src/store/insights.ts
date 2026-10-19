@@ -119,8 +119,8 @@ function percentile(values: number[], p: number): number | null {
 
 const RUNS_IN = `SELECT trace_id FROM runs WHERE doctor = 0 AND COALESCE(started_ms, received_ms) >= @from AND COALESCE(started_ms, received_ms) < @to`;
 
-/** A problem counts unless the user dismissed it, the check could not run, or it went quiet. */
-const IS_PROBLEM = (f: { status: string }) => f.status !== "dismissed" && f.status !== "failed" && f.status !== "quiet";
+/** A problem counts unless it was resolved or dismissed, the check could not run, or it went quiet. */
+const IS_PROBLEM = (f: { status: string }) => f.status !== "resolved" && f.status !== "dismissed" && f.status !== "failed" && f.status !== "quiet";
 
 function slice(db: Database.Database, from: number, to: number) {
   const p = { from, to };
@@ -225,13 +225,13 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
     const e = byCheck.get(f.check_id) ?? { f: [], runs: new Set<string>(), dismissed: 0, quiet: 0 };
     if (f.status === "dismissed") e.dismissed++;
     else if (f.status === "quiet") e.quiet++;
-    else {
+    else if (IS_PROBLEM(f)) {
       e.f.push(f);
       e.runs.add(f.trace_id);
     }
     byCheck.set(f.check_id, e);
   }
-  // A check has nothing to report when every finding this window is dismissed, failed, or quiet.
+  // A check has nothing to report when every finding this window is resolved, dismissed, failed, or quiet.
   const reportedNothing = (id: string) => {
     const e = byCheck.get(id);
     return !e?.runs.size && !e?.quiet;
