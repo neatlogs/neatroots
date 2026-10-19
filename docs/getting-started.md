@@ -76,7 +76,41 @@ Install [Ollama](https://ollama.com), then pull a model:
 ollama pull qwen3:8b          # 16 GB+ machines; gemma4 and llama3.1:8b also work
 ```
 
-neatroots picks an installed model that fits your machine's memory. To see what it chose, run `neatroots models`.
+With `llm.model: auto`, neatroots ranks supported installed chat models within a memory tier;
+it does not pick the first model returned by the server. To see what it chose, run `neatroots models`.
+
+#### LM Studio, llama.cpp, MLX and other local servers
+
+These servers can be used through their OpenAI-compatible API. Automatic selection has a narrower
+requirement: it needs either an exact supported size-tagged ID (for example, `llama3.2:3b`) or
+Ollama's optional `/api/tags` metadata with a recognized family and usable `details.parameter_size`.
+Without that metadata, an unsized alias such as `llama3.2:latest`, a quantized variant such as
+`qwen3:8b-q4_K_M`, or an ID such as `qwen2.5-7b-instruct` is not automatically selected. A size
+in an arbitrary model name is not enough to establish support or capacity. An embedding-only
+inventory does not supply a chat model.
+
+If auto mode reports `no supported local chat model found`, choose a chat model that fits your
+machine and configure its exact served ID. Run `neatroots llm models` to list IDs at the configured
+local endpoint. Merge these fields into `~/.neatroots/config.yaml` (or `$NEATROOTS_HOME/config.yaml`
+when set), using your server's URL and model ID:
+
+```yaml
+llm:
+  baseUrl: http://127.0.0.1:1234/v1
+  model: qwen2.5-7b-instruct
+```
+
+Restart neatroots after editing the file, then run `neatroots llm` to check the configured endpoint
+and selection. `NEATROOTS_LLM_BASE_URL` and `NEATROOTS_LLM_MODEL`, if set, override these fields.
+Explicit selection bypasses automatic family and capacity checks: you are responsible for choosing
+a chat model your server can run. Discovery confirms configuration, not successful inference or
+model-answer quality.
+
+Automatic tiers use total system memory rounded to the nearest GiB: small below 16, medium from
+16 to below 32, and large from 32. Their parameter ceilings are 4B, 8B and 14B respectively, with 10% tolerance
+for rounded sizes; smaller supported preferences remain eligible. These are selection heuristics,
+not a guarantee of available RAM or VRAM. Missing or unusable metadata never enables an arbitrary
+first-model fallback. Set `llm.model` back to `auto` to restore automatic selection.
 
 ### A hosted LLM (opt-in)
 
