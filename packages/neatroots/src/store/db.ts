@@ -786,6 +786,20 @@ export class Store {
     return this.db.prepare("SELECT * FROM runs WHERE trace_id = ?").get(traceId) as RunRow | undefined;
   }
 
+  /** Runs still marked running that sent nothing for `quietMs` - their end never arrived (issue #569). */
+  quietRuns(quietMs: number, now = Date.now()): RunRow[] {
+    return this.db.prepare("SELECT * FROM runs WHERE status = 'running' AND updated_ms < ?").all(now - quietMs) as RunRow[];
+  }
+
+  /** Marks a quiet run interrupted so the app can say "no end received" instead of showing it running forever. */
+  markRunInterrupted(traceId: string, reason: string, now = Date.now()): void {
+    this.db
+      .prepare(
+        "UPDATE runs SET status = 'interrupted', interrupted = 1, termination_reason = ?, ended_ms = COALESCE(ended_ms, last_span_ms, ?), updated_ms = ? WHERE trace_id = ? AND status = 'running'",
+      )
+      .run(reason, now, now, traceId);
+  }
+
   /** The WHERE clauses and parameters for a run filter, shared by listing and counting. */
   private runFilter(f: RunFilter): { where: string[]; p: Record<string, unknown> } {
     const where: string[] = [];
@@ -1636,4 +1650,4 @@ export class Store {
   setMeta(key: string, value: string): void {
     this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, value);
   }
-}
+            }
