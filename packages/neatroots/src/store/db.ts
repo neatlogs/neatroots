@@ -1650,4 +1650,4 @@ export class Store {
   setMeta(key: string, value: string): void {
     this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, value);
   }
-                   }
+}
