@@ -8,8 +8,10 @@
 //
 // PERF_RUNS sets the store size (default 3000). PERF_BUDGET_FACTOR scales every budget: 0.001 makes
 // them all fail, to check that the script can fail. The budgets are about ten times what a CI runner
-// needs, and far below what the regressions they guard against cost: a scan of the search index for
-// every ingested span took minutes at this size, and 0.2.9's search took seconds.
+// needs, and far below what the regressions they guard against cost here: before #462, scanning the
+// search index for every ingested span made 1,200 spans take 18 s at half this size. Search that
+// reads every match's text only gets slow on stores much larger than this (gigabytes, read from
+// disk), so test/search-ids.test.ts checks that at the SQL level instead.
 
 import fs from "node:fs";
 import os from "node:os";
