@@ -41,6 +41,7 @@ export class Roots {
   readonly replays: Replays;
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
+  private quietSweeper?: NodeJS.Timeout;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
   /** The run and span the app has in focus, for the MCP get_current_run tool. */
@@ -110,6 +111,17 @@ export class Roots {
     run();
     this.sweeper = setInterval(run, 3_600_000);
     this.sweeper.unref();
+    // Runs whose end never arrives (agent died, root span lost) get ended once they go quiet (issue #569).
+    const quiet = async () => {
+      try {
+        await this.engine?.endQuietRuns();
+      } catch (err) {
+        log.warn(`quiet-run sweep failed: ${(err as Error).message}`);
+      }
+    };
+    void quiet();
+    this.quietSweeper = setInterval(quiet, 60_000);
+    this.quietSweeper.unref();
   }
 
   /** Installs (first run) and starts Laya in the background; checks use the LLM until it is ready. */
@@ -122,6 +134,7 @@ export class Roots {
   close(): void {
     clearInterval(this.sweeper);
     this.chats.close();
+    clearInterval(this.quietSweeper);
     this.laya.stop();
     this.store.close();
   }
