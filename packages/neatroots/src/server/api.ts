@@ -187,8 +187,10 @@ export function mountApi(app: Hono, roots: Roots): void {
   });
 
   app.delete("/api/runs/:traceId", (c) => {
-    roots.store.deleteRun(c.req.param("traceId"));
-    if (roots.focus?.trace_id === c.req.param("traceId")) roots.focus = null;
+    const traceId = c.req.param("traceId");
+    engine?.cancelRun(traceId);
+    roots.store.deleteRun(traceId);
+    if (roots.focus?.trace_id === traceId) roots.focus = null;
     return c.json({ ok: true });
   });
 
