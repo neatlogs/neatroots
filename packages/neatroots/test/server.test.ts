@@ -313,6 +313,23 @@ describe("server", () => {
     expect((await fetch(`${tb.url}/api/focus`, { method: "POST", headers, body: "{}" })).status).toBe(200);
   });
 
+  it("rejects non-string span ids on focus before querying the store", async () => {
+    const tb = await served(false);
+    const headers = { "content-type": "application/json" };
+    for (const bad of [{}, 123, true, []]) {
+      const r = await fetch(`${tb.url}/api/focus`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ trace_id: "0123456789abcdef", span_id: bad }),
+      });
+      expect(r.status).toBe(400);
+      expect(((await r.json()) as { error: string }).error).toContain("span_id must be a string or null");
+    }
+    // String span_id and null / undefined are accepted
+    expect((await fetch(`${tb.url}/api/focus`, { method: "POST", headers, body: JSON.stringify({ span_id: null }) })).status).toBe(200);
+    expect((await fetch(`${tb.url}/api/focus`, { method: "POST", headers, body: JSON.stringify({ span_id: "span-1" }) })).status).toBe(200);
+  });
+
   it("refuses retention values it can't use instead of answering ok and ignoring them", async () => {
     const tb = await served();
     const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
