@@ -1,8 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
+import { defaultConfig } from "../src/config.js";
+import { Roots } from "../src/core.js";
 import type { Store } from "../src/store/db.js";
-import { batch, closeTrackedStores, hex, span, tmpHome, toolSpan, trackedStore } from "./helpers.js";
+import { batch, closeTrackedStores, hex, poll, span, tmpHome, toolSpan, trackedStore } from "./helpers.js";
 
 const homes: string[] = [];
 function dataDir(): string {
@@ -226,6 +229,39 @@ describe("search index run ids", () => {
     expect(await reindexed()).toEqual([6, true]);
     idsMatchIndex(st);
     expect(st.searchSpans("invoice").length).toBe(3);
+  });
+
+  it("are filled in before an old store is re-indexed at start, so re-indexing doesn't scan the index for each span", async () => {
+    const dir = dataDir();
+    const st = trackedStore(dir);
+    for (let i = 0; i < 20; i++) run(st, `invoice ${i}`);
+    // A store from before 0.2.5: no run ids and no search_index marker, so both startup jobs are due.
+    st.db.exec("DROP TABLE span_fts_ids");
+    st.db.prepare("DELETE FROM meta WHERE key = 'search_index'").run();
+    st.close();
+    // Every statement prepared while neatroots starts on that store.
+    const seen: string[] = [];
+    const prepare = Database.prototype.prepare;
+    Database.prototype.prepare = function (this: Database.Database, sql: string) {
+      seen.push(sql);
+      return prepare.call(this, sql);
+    } as typeof prepare;
+    const cfg = defaultConfig();
+    cfg.classifier.laya.enabled = false;
+    let roots: Roots | undefined;
+    try {
+      roots = new Roots({ home: path.dirname(dir), config: cfg, noEngine: true });
+      await poll(async () => roots!.store.getMeta("search_index") === "2");
+    } finally {
+      Database.prototype.prepare = prepare;
+    }
+    try {
+      expect(seen.filter((q) => q.startsWith("DELETE FROM span_fts WHERE trace_id"))).toEqual([]);
+      idsMatchIndex(roots.store);
+      expect(roots.store.searchSpans("invoice").length).toBe(20);
+    } finally {
+      roots.close();
+    }
   });
 
   it("keep ingest, search and deletes from reading every index row", async () => {

@@ -1475,6 +1475,18 @@ export class Store {
   }
 
   /**
+   * The search index's startup work, in order: fill in its run ids, then re-index spans stored
+   * before search covered whole values. Re-indexing replaces each span's rows, which goes through
+   * the run ids once they're in; before that, it scans the whole index for every span.
+   */
+  maintainSearch(onIds?: (rows: number, ready: boolean) => void, onReindex?: (n: number, ok: boolean) => void): void {
+    this.rebuildSearchIds((rows, ready) => {
+      onIds?.(rows, ready);
+      this.reindexSearch(onReindex);
+    });
+  }
+
+  /**
    * Re-indexes spans stored before the index covered whole values (it kept 4,000 characters of
    * each), a few hundred at a time so startup isn't held up. Runs once per database.
    */
