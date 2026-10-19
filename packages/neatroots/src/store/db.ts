@@ -1482,7 +1482,8 @@ export class Store {
   maintainSearch(onIds?: (rows: number, ready: boolean) => void, onReindex?: (n: number, ok: boolean) => void): void {
     this.rebuildSearchIds((rows, ready) => {
       onIds?.(rows, ready);
-      this.reindexSearch(onReindex);
+      // This runs on a later turn of the event loop, by when the store may have been closed.
+      if (this.db.open) this.reindexSearch(onReindex);
     });
   }
 
