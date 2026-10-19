@@ -42,6 +42,8 @@ export class Roots {
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
   private quietSweeper?: NodeJS.Timeout;
+  /** The first quiet-run sweep; resumeUnfinished waits on it so a run is not rechecked twice at startup. */
+  private initialQuiet?: Promise<void>;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
   /** The run and span the app has in focus, for the MCP get_current_run tool. */
@@ -76,7 +78,7 @@ export class Roots {
       const engine = new Engine(this, this.llm, this.decisions, this.checks, this.steering);
       this.engine = engine;
       // Finish check work a previous process accepted but didn't complete (a restart or a crash).
-      setTimeout(() => void resumeUnfinished(engine, this).catch((e: Error) => log.warn(`couldn't resume checks: ${e.message}`)), 1500).unref();
+      setTimeout(() => void (this.initialQuiet ?? Promise.resolve()).then(() => resumeUnfinished(engine, this)).catch((e: Error) => log.warn(`couldn't resume checks: ${e.message}`)), 1500).unref();
     }
   }
 
@@ -119,7 +121,7 @@ export class Roots {
         log.warn(`quiet-run sweep failed: ${(err as Error).message}`);
       }
     };
-    void quiet();
+    this.initialQuiet = quiet();
     this.quietSweeper = setInterval(quiet, 60_000);
     this.quietSweeper.unref();
   }
