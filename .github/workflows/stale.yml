@@ -8,6 +8,8 @@ on:
   workflow_dispatch:
 
 permissions:
+  # actions: write lets actions/stale keep its progress in the Actions cache between runs.
+  actions: write
   issues: write
   pull-requests: write
 

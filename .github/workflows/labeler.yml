@@ -16,13 +16,22 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/labeler@v5
+        with:
+          # Area labels follow the paths: one the pull request no longer touches is removed.
+          sync-labels: true
       - uses: actions/github-script@v7
         with:
           script: |
             const types = { fix: "bug", feat: "enhancement", docs: "documentation", perf: "performance" };
+            const typeOf = (title) => types[(title.match(/^(\w+)(?:\([^)]*\))?!?:/) || [])[1]?.toLowerCase()];
             const pr = context.payload.pull_request;
-            const prefix = (pr.title.match(/^(\w+)(?:\([^)]*\))?!?:/) || [])[1];
-            const label = types[prefix?.toLowerCase()];
+            const label = typeOf(pr.title);
+            // A retitled pull request loses the type its old prefix gave it; labels set by hand stay.
+            const before = context.payload.changes?.title?.from;
+            const old = before === undefined ? undefined : typeOf(before);
+            if (old && old !== label && pr.labels.some((l) => l.name === old)) {
+              await github.rest.issues.removeLabel({ ...context.repo, issue_number: pr.number, name: old });
+            }
             if (label && !pr.labels.some((l) => l.name === label)) {
               await github.rest.issues.addLabels({ ...context.repo, issue_number: pr.number, labels: [label] });
             }
