@@ -4,7 +4,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { Store } from "../src/store/db.js";
 import { computeInsights } from "../src/store/insights.js";
-import { tmpHome } from "./helpers.js";
+import { batch, hex, span, tmpHome } from "./helpers.js";
 
 // The run list and Insights order and filter runs by COALESCE(started_ms, received_ms). Without an
 // index on that expression, every page load scanned the whole runs table and sorted it.
@@ -48,6 +48,31 @@ function capture(st: Store, fn: () => void): { sql: string; args: unknown[] }[] 
   return seen;
 }
 
+/**
+ * Fills the store with runs whose start times are all different, ingested out of order so the
+ * table's own order differs from start order. Returns their ids newest first.
+ */
+function fill(st: Store, n = 300): string[] {
+  const ids = Array.from({ length: n }, () => hex(16));
+  const batches = ids.map((t) => batch([span({ traceId: t, name: "agent", kind: "AGENT" })])); // start times increase
+  for (let i = batches.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [batches[i], batches[j]] = [batches[j], batches[i]];
+  }
+  for (const b of batches) st.ingest([b]);
+  return ids.reverse();
+}
+
+/**
+ * A store in use for a while: runs spread over about four months, so most are outside the Insights
+ * window. (When every run is inside the window, reading the whole table is the better plan, and
+ * SQLite picks it once it has statistics.)
+ */
+function fillOverMonths(st: Store, n = 300): void {
+  fill(st, n);
+  st.db.prepare("UPDATE runs SET started_ms = started_ms - (rowid % 120) * 86400000").run();
+}
+
 /** The query plan of each captured statement that orders or filters runs by start time. */
 function plans(st: Store, fn: () => void): string[] {
   const byStart = capture(st, fn).filter((q) => /FROM runs\b/.test(q.sql) && q.sql.includes("COALESCE(started_ms, received_ms)"));
@@ -55,23 +80,39 @@ function plans(st: Store, fn: () => void): string[] {
 }
 
 describe("runs ordered by start time", () => {
-  it("are listed newest first from an index, without scanning and sorting every run", () => {
+  it("are listed newest first", () => {
     const st = open();
-    const list = plans(st, () => st.listRuns({ limit: 50 }));
-    expect(list).toHaveLength(1);
-    expect(list[0]).toContain("USING INDEX runs_sort");
-    expect(list[0]).not.toContain("TEMP B-TREE"); // was: SCAN runs | USE TEMP B-TREE FOR ORDER BY
+    const newest = fill(st);
+    expect(st.listRuns({ limit: 50 }).map((r) => r.trace_id)).toEqual(newest.slice(0, 50));
+    expect(st.listRuns({ limit: 50, offset: 50 }).map((r) => r.trace_id)).toEqual(newest.slice(50, 100));
   });
 
-  it("are picked for an Insights window from the index, without scanning every run", () => {
-    const st = open();
-    const insights = plans(st, () => computeInsights(st.db, "30d", []));
-    expect(insights.length).toBeGreaterThan(0);
-    for (const p of insights) {
-      expect(p).toMatch(/SEARCH runs USING (COVERING )?INDEX runs_sort/);
-      expect(p).not.toMatch(/SCAN runs\b/); // was: SCAN runs
-    }
-  });
+  // neatroots never runs ANALYZE, so real stores have no index statistics; check both cases.
+  for (const analyzed of [false, true]) {
+    const stats = analyzed ? "with index statistics" : "without index statistics";
+
+    it(`are listed from an index, without scanning and sorting every run (${stats})`, () => {
+      const st = open();
+      fillOverMonths(st);
+      if (analyzed) st.db.exec("ANALYZE");
+      const list = plans(st, () => st.listRuns({ limit: 50 }));
+      expect(list).toHaveLength(1);
+      expect(list[0]).toContain("USING INDEX runs_sort");
+      expect(list[0]).not.toContain("TEMP B-TREE"); // was: SCAN runs | USE TEMP B-TREE FOR ORDER BY
+    });
+
+    it(`are picked for an Insights window from the index, without scanning every run (${stats})`, () => {
+      const st = open();
+      fillOverMonths(st);
+      if (analyzed) st.db.exec("ANALYZE");
+      const insights = plans(st, () => computeInsights(st.db, "30d", []));
+      expect(insights.length).toBeGreaterThan(0);
+      for (const p of insights) {
+        expect(p).toMatch(/SEARCH runs USING (COVERING )?INDEX runs_sort/);
+        expect(p).not.toMatch(/SCAN runs\b/); // was: SCAN runs
+      }
+    });
+  }
 
   it("get the index on a store created before it existed", () => {
     const h = tmpHome();
