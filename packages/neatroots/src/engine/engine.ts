@@ -1065,8 +1065,9 @@ ${library}`;
    */
   async endQuietRuns(quietMs = QUIET_RUN_MS): Promise<void> {
     for (const run of this.roots.store.quietRuns(quietMs)) {
-      this.roots.store.markRunInterrupted(run.trace_id, "no end received");
-      await this.recheck(run.trace_id, { resume: true });
+      // Only recheck when this sweep actually marked the run - an overlapping sweep
+      // that already claimed it must not repeat the end-of-run model calls.
+      if (this.roots.store.markRunInterrupted(run.trace_id, "no end received")) await this.recheck(run.trace_id, { resume: true });
     }
   }
 
