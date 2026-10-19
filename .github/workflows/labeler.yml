@@ -11,6 +11,12 @@ permissions:
   contents: read
   pull-requests: write
 
+# A newer push cancels a run that hasn't finished, since it labels from the same files and title. An edit
+# keeps its own run: only the edit's event says what the title was before, which the type step needs.
+concurrency:
+  group: labeler-${{ github.event.pull_request.number }}-${{ github.event.action == 'edited' && github.run_id || 'push' }}
+  cancel-in-progress: true
+
 jobs:
   label:
     runs-on: ubuntu-24.04
