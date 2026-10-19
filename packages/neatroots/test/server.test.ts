@@ -244,6 +244,7 @@ describe("server", () => {
     const get = async (q: string) => (await (await fetch(`${tb.url}/api/runs?${q}`, { headers: origin })).json()) as { runs: { trace_id: string }[]; total: number; matching: number };
     expect(await get("")).toMatchObject({ total: 3, matching: 3 });
     expect(await get("has_finding=1")).toMatchObject({ runs: [{ trace_id: ids[0] }], total: 3, matching: 1 });
+    expect(await get("has_open_finding=1")).toMatchObject({ runs: [{ trace_id: ids[0] }], total: 3, matching: 1 });
     expect(await get("status=error")).toMatchObject({ total: 3, matching: 1 });
     // matching counts every match, not just the page; there was no such count, so with more matches
     // than the page holds (it asks for 150) the runs page read "150 matching" however many matched

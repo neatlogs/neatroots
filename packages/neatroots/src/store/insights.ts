@@ -193,6 +193,9 @@ function models(db: Database.Database, from: number, to: number): ModelAgg[] {
   return [...by].map(([name, m]) => ({ name, calls: m.calls, errors: m.errors, tokens: m.tokens, p50_ms: percentile(m.durs, 0.5) })).sort((a, b) => b.calls - a.calls);
 }
 
+/**
+ * Computes aggregate performance, problem, and project health metrics for a time window.
+ */
 export function computeInsights(db: Database.Database, key: WindowKey, checks: CheckInfo[], now = Date.now()): Insights {
   const w = WINDOWS[key];
   const to = now;
