@@ -63,7 +63,7 @@ export function cloudApiBase(ingest: string, override?: string): string {
   if (override) return trimSlash(override);
   try {
     const u = new URL(ingest);
-    if (u.hostname.endsWith("neatlogs.com")) u.hostname = u.hostname.replace(/(^|\.)ingest\./, "$1app.");
+    if (u.hostname === "neatlogs.com" || u.hostname.endsWith(".neatlogs.com")) u.hostname = u.hostname.replace(/(^|\.)ingest\./, "$1app.");
     return `${u.origin}/api/v1/public`;
   } catch {
     return "https://app.neatlogs.com/api/v1/public";

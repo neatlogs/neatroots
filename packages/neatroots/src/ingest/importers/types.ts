@@ -64,6 +64,4 @@ export async function getJson<T>(url: string, init: RequestInit & { signal: Abor
 
 export const iso = (ms: number) => new Date(ms).toISOString();
 
-export function trimSlash(u: string): string {
-  return u.replace(/\/+$/, "");
-}
+export { trimSlash } from "../../util/url.js";

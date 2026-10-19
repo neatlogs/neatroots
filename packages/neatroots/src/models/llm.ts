@@ -4,6 +4,7 @@ import type { RootsConfig } from "../config.js";
 import { log } from "../util/log.js";
 import { BUILTIN_RULES, compileRules, CREDENTIAL_KINDS, RedactionPatternError, redactString, type RedactionRule } from "../relay/redact.js";
 import { isLocalUrl, llmKeyName, providerById, strictSchema, type ProviderPreset } from "./providers.js";
+import { trimSlash } from "../util/url.js";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -163,7 +164,7 @@ class OpenAiTransport implements Transport {
   }
 
   get baseUrl(): string {
-    return this.t.baseUrl().replace(/\/+$/, "");
+    return trimSlash(this.t.baseUrl());
   }
 
   model(): string | undefined {

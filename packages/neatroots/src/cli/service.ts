@@ -67,16 +67,21 @@ ${env}
   execFileSync("launchctl", ["bootstrap", domain, plistPath()]);
 }
 
+/** A value for a systemd unit, quoted: backslashes and quotes escaped, and % (a unit specifier) doubled. */
+export function systemdQuoted(v: string): string {
+  return `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%")}"`;
+}
+
 function installLinux(): void {
   const env = Object.entries(serviceEnv())
-    .map(([k, v]) => `Environment="${k}=${v.replace(/"/g, '\\"')}"`)
+    .map(([k, v]) => `Environment=${systemdQuoted(`${k}=${v}`)}`)
     .join("\n");
   const unit = `[Unit]
 Description=neatroots
 After=network.target
 
 [Service]
-ExecStart="${process.execPath}" "${cliPath()}" start
+ExecStart=${systemdQuoted(process.execPath)} ${systemdQuoted(cliPath())} start
 ${env}
 Restart=on-failure
 RestartSec=10
