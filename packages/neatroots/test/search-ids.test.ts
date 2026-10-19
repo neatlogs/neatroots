@@ -264,6 +264,53 @@ describe("search index run ids", () => {
     }
   });
 
+  it("are tried again when filling them in fails, and an old store is re-indexed only through them", async () => {
+    // An old store (no run ids, no search_index marker) whose first fill-in attempts fail.
+    const oldStore = () => {
+      const dir = dataDir();
+      const st = trackedStore(dir);
+      for (let i = 0; i < 20; i++) run(st, `invoice ${i}`);
+      st.db.exec("DROP TABLE span_fts_ids");
+      st.db.prepare("DELETE FROM meta WHERE key = 'search_index'").run();
+      st.close();
+      return trackedStore(dir);
+    };
+    const failing = (st: Store, failures: number) => {
+      const seen: string[] = [];
+      const prepare = st.db.prepare.bind(st.db);
+      let left = failures;
+      st.db.prepare = ((sql: string) => {
+        seen.push(sql);
+        if (sql.includes("WHERE rowid > ?") && left-- > 0) return { all: () => { throw new Error("database is locked"); } };
+        return prepare(sql);
+      }) as unknown as typeof st.db.prepare;
+      return { seen, restore: () => (st.db.prepare = prepare) };
+    };
+    const scans = (seen: string[]) => seen.filter((q) => q.startsWith("DELETE FROM span_fts WHERE trace_id"));
+
+    // Fails once, then works: the re-index runs after, through the run ids.
+    let st = oldStore();
+    let spy = failing(st, 1);
+    const reindexed = await new Promise<boolean>((resolve) => st.maintainSearch(undefined, (_n, ok) => resolve(ok), 10));
+    spy.restore();
+    expect(reindexed).toBe(true);
+    expect(scans(spy.seen)).toEqual([]);
+    idsMatchIndex(st);
+    expect(st.getMeta("search_index")).toBe("2");
+
+    // Fails every time: reported once, and the re-index waits for the next start.
+    st = oldStore();
+    spy = failing(st, 3);
+    let reindexCalled = false;
+    const ids = await new Promise<boolean>((resolve) => st.maintainSearch((_n, ready) => resolve(ready), () => (reindexCalled = true), 10));
+    await new Promise((r) => setTimeout(r, 50));
+    spy.restore();
+    expect(ids).toBe(false);
+    expect(reindexCalled).toBe(false);
+    expect(scans(spy.seen)).toEqual([]);
+    expect(st.getMeta("search_index")).toBeUndefined();
+  });
+
   it("keep ingest, search and deletes from reading every index row", async () => {
     // Filtering span_fts on trace_id or span_id (unindexed columns) loads every row's text.
     const scan = /FROM span_fts WHERE trace_id|SELECT trace_id(, span_id)? FROM span_fts |MATCH \? AND trace_id/;
