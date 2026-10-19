@@ -3,6 +3,8 @@ name: labeler
 # Labels pull requests: an area from the paths they change (.github/labeler.yml) and a type from the
 # title's prefix (fix → bug, feat → enhancement, docs → documentation, perf → performance).
 # pull_request_target with no checkout of the pull request: the write token never runs its code.
+# From 2026-11-02 GitHub blocks pull_request_target in public repositories unless an Actions policy
+# allows it. The policy (Settings → Actions → Policies) allows it for this file only.
 on:
   pull_request_target:
     types: [opened, edited, synchronize, reopened]
