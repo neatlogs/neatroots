@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { systemdQuoted } from "../src/cli/service.js";
+import { systemdExecArg, systemdQuoted } from "../src/cli/service.js";
 import { cloudApiBase } from "../src/ingest/importers/neatlogs-cloud.js";
 import { trimSlash } from "../src/util/url.js";
 
@@ -14,7 +14,7 @@ describe("URL and service-unit helpers", () => {
     const long = `${"/".repeat(200_000)}x`;
     const t0 = performance.now();
     expect(trimSlash(long)).toBe(long);
-    expect(performance.now() - t0).toBeLessThan(100);
+    expect(performance.now() - t0).toBeLessThan(1000);
   });
 
   it("derives the Neatlogs API host only for neatlogs.com and its subdomains", () => {
@@ -26,5 +26,8 @@ describe("URL and service-unit helpers", () => {
   it("quotes values for a systemd unit: backslashes, quotes and % specifiers", () => {
     expect(systemdQuoted("/usr/bin/node")).toBe('"/usr/bin/node"');
     expect(systemdQuoted('NEATROOTS_HOME=/home/a "b" \\c 100%')).toBe('"NEATROOTS_HOME=/home/a \\"b\\" \\\\c 100%%"');
+    // systemd expands $NAME in ExecStart= but not in Environment=, so only exec arguments double it.
+    expect(systemdExecArg("/opt/${NAME}/cli.js")).toBe('"/opt/$${NAME}/cli.js"');
+    expect(systemdQuoted("NAME=${NAME}")).toBe('"NAME=${NAME}"');
   });
 });

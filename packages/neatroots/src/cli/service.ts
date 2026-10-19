@@ -72,6 +72,11 @@ export function systemdQuoted(v: string): string {
   return `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%")}"`;
 }
 
+/** An ExecStart= argument: quoted like any value, and $ doubled, since systemd expands $NAME there. */
+export function systemdExecArg(v: string): string {
+  return systemdQuoted(v.replace(/\$/g, () => "$$"));
+}
+
 function installLinux(): void {
   const env = Object.entries(serviceEnv())
     .map(([k, v]) => `Environment=${systemdQuoted(`${k}=${v}`)}`)
@@ -81,7 +86,7 @@ Description=neatroots
 After=network.target
 
 [Service]
-ExecStart=${systemdQuoted(process.execPath)} ${systemdQuoted(cliPath())} start
+ExecStart=${systemdExecArg(process.execPath)} ${systemdExecArg(cliPath())} start
 ${env}
 Restart=on-failure
 RestartSec=10
