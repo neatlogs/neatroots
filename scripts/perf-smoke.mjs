@@ -22,6 +22,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUNS = Number(process.env.PERF_RUNS ?? 3000);
 const FACTOR = Number(process.env.PERF_BUDGET_FACTOR ?? 1);
+// A NaN budget would pass every check, so a bad value stops the test instead.
+if (!Number.isInteger(RUNS) || RUNS < 1) throw new Error(`PERF_RUNS must be a positive whole number, not ${JSON.stringify(process.env.PERF_RUNS)}`);
+if (!Number.isFinite(FACTOR) || FACTOR <= 0) throw new Error(`PERF_BUDGET_FACTOR must be a positive number, not ${JSON.stringify(process.env.PERF_BUDGET_FACTOR)}`);
 
 // A home of its own, with Laya off and on a port nothing uses: never a neatroots or Laya on this machine.
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "neatroots-perf-"));
@@ -114,7 +117,7 @@ measure(`build a store of ${RUNS} runs (${RUNS * 12} spans)`, 180_000, () => {
 
 const total = store().countRuns();
 const common = measure("text search for a common word (100 newest)", 300, () => store().listRuns({ text: "refund", limit: 100 }));
-expect("the common-word search lists 100 runs", common.length === 100);
+expect(`the common-word search lists ${Math.min(100, RUNS)} runs`, common.length === Math.min(100, RUNS));
 const matching = measure("count of runs matching a common word", 300, () => store().countMatchingRuns({ text: "refund" }));
 expect(`every run matches the common word (${matching} of ${total})`, matching === total);
 const rare = measure("text search for a rare word", 100, () => store().listRuns({ text: RARE, limit: 100 }));
