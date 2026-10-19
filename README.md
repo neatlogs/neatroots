@@ -290,6 +290,7 @@ pnpm --filter @neatlogs/neatroots-ui e2e     # UI end-to-end tests (Playwright; 
 (cd python/neatroots-steer && python -m pytest)
 pnpm typecheck                # all pnpm workspaces
 sh examples/run-all.sh        # agent and HTTP API examples against a running neatroots; browser, import-files, refund-agent, samples by hand
+node scripts/perf-smoke.mjs   # performance smoke test on a generated store (runs nightly)
 pnpm --filter @neatlogs/neatroots dev        # server with reload on 4100
 pnpm --filter @neatlogs/neatroots-ui dev     # UI on 5173 (set NEATROOTS_DEV_ORIGIN=http://localhost:5173 on the server)
 ```
