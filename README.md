@@ -296,7 +296,8 @@ pnpm --filter @neatlogs/neatroots-ui dev     # UI on 5173 (set NEATROOTS_DEV_ORI
 
 neatroots is built from public inputs: the public Neatlogs SDKs and their telemetry schema,
 OpenTelemetry, MCP, publicly documented APIs, and openly licensed models. Issues and pull requests
-are welcome; [AGENTS.md](AGENTS.md) has the conventions.
+are welcome: [CONTRIBUTING.md](CONTRIBUTING.md) says how, and [AGENTS.md](AGENTS.md) has the
+conventions. Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes.
 
 neatroots is maintained by [@akshay-neatlogs](https://github.com/akshay-neatlogs), with
 [@harshk-neatlogs](https://github.com/harshk-neatlogs) and [@taranum-neatlogs](https://github.com/taranum-neatlogs)
