@@ -97,6 +97,14 @@ function first(attrs: Attrs, keys: string[]): Plain | undefined {
   return undefined;
 }
 
+function firstInt(attrs: Attrs, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = int(attrs[key]);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
 /**
  * Collects `prefix.N.field` (and `prefix.N.field.M.sub`) attributes into an array
  * of objects, as the SDKs flatten message lists.
@@ -274,10 +282,10 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
   view.agentName = str(first(attrs, ["neatlogs.agent.name", "agent.name", "gen_ai.agent.name"]));
   view.model = str(first(attrs, ["neatlogs.llm.model_name", "gen_ai.response.model", "gen_ai.request.model", "llm.model_name", "ai.response.model", "ai.model.id", "neatlogs.embedding.model_name"]));
   view.provider = str(first(attrs, ["neatlogs.llm.provider", "neatlogs.provider", "gen_ai.system", "gen_ai.provider.name", "llm.provider", "ai.model.provider"]));
-  view.promptTokens = int(first(attrs, ["neatlogs.llm.token_count.prompt", "gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens", "llm.token_count.prompt", "ai.usage.promptTokens", "ai.usage.inputTokens"]));
-  view.completionTokens = int(first(attrs, ["neatlogs.llm.token_count.completion", "gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens", "llm.token_count.completion", "ai.usage.completionTokens", "ai.usage.outputTokens"]));
+  view.promptTokens = firstInt(attrs, ["neatlogs.llm.token_count.prompt", "gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens", "llm.token_count.prompt", "ai.usage.promptTokens", "ai.usage.inputTokens"]);
+  view.completionTokens = firstInt(attrs, ["neatlogs.llm.token_count.completion", "gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens", "llm.token_count.completion", "ai.usage.completionTokens", "ai.usage.outputTokens"]);
   view.totalTokens =
-    int(first(attrs, ["neatlogs.llm.token_count.total", "gen_ai.usage.total_tokens", "llm.token_count.total"])) ??
+    firstInt(attrs, ["neatlogs.llm.token_count.total", "gen_ai.usage.total_tokens", "llm.token_count.total"]) ??
     (view.promptTokens !== undefined || view.completionTokens !== undefined
       ? (view.promptTokens ?? 0) + (view.completionTokens ?? 0)
       : undefined);

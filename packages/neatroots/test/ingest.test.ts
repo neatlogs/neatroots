@@ -265,6 +265,23 @@ describe("other conventions", () => {
     expect(buildView({ ...tool, attributes: tool.attributes.filter((a) => a.key !== "neatlogs.span.kind") }, [])).toMatchObject({ kind: "TOOL", toolName: "weather", input: { city: "Paris" }, output: "sunny" });
   });
 
+  it("falls back when a preferred token attribute is unreadable", () => {
+    const llm = span({
+      traceId: hex(16),
+      name: "chat",
+      kind: "llm",
+      attrs: [
+        s("neatlogs.llm.token_count.prompt", "unknown"),
+        s("gen_ai.usage.input_tokens", 42),
+        s("neatlogs.llm.token_count.completion", "unknown"),
+        s("gen_ai.usage.output_tokens", 8),
+        s("neatlogs.llm.token_count.total", "unknown"),
+        s("gen_ai.usage.total_tokens", 50),
+      ],
+    });
+    expect(buildView(llm, [])).toMatchObject({ promptTokens: 42, completionTokens: 8, totalTokens: 50 });
+  });
+
   it("reads OpenTelemetry GenAI parts and OpenLLMetry entity input", () => {
     const tid = hex(16);
     const llm = span({ traceId: tid, name: "chat", kind: "", attrs: [s("gen_ai.operation.name", "chat"), s("gen_ai.input.messages", JSON.stringify([{ role: "user", parts: [{ type: "text", content: "Q?" }] }]))] });
