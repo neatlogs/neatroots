@@ -7,6 +7,41 @@ A check is anything neatroots watches for. Checks are YAML, loaded from (later w
 3. each project's `.neatroots/checks/` registered with `neatroots init`,
 4. questions the planner or a coding agent wrote (kept in the database until you save them).
 
+## Saved traces in CI
+
+Run the existing offline rule checker and redirect its JUnit output to a file:
+
+```sh
+neatroots check traces.json traces.jsonl --junit > agent-checks.xml
+```
+
+No server, model or API keys are needed. `--checks <dir...>` adds check folders and
+`--only id1,id2` limits the rules, just as with text or `--json` output. `--junit`
+and `--json` are mutually exclusive.
+
+Each trace run becomes one test case, identified by its source file, root name, full
+trace ID and occurrence number for that identity, so repeated IDs or file arguments
+remain distinct and reordering unrelated files preserves their case names. Each
+file is checked independently; traces split across files are not combined.
+A run with findings fails; its failure includes every
+check ID, title and evidence span IDs. Finding parameters are omitted because they
+can contain captured inputs and errors. A clean run passes the
+selected applicable rules only; this means no findings, not proof that every rule
+had sufficient evidence. Model-based questions are not evaluated. Invalid
+input or configuration produces error test cases. Exit codes remain 0 (clean),
+1 (findings), and 2 (input/configuration error). A fatal input error aborts checking
+and reports that error rather than partial results.
+
+The repository's [CI workflow](https://github.com/neatlogs/neatroots/blob/main/.github/workflows/ci.yml) runs the bundled saved
+trace through the built CLI's `secret-in-output` rule and uploads `agent-checks.xml`
+with `if: always()`, so the report is retained even when the check step fails.
+Replace the sample path with
+your agent's exported traces, select your rules (omit `--only` for all rules), and
+configure your CI test-results viewer to ingest the JUnit file.
+Reports still contain paths, names, check titles and error diagnostics; they are
+not redacted diagnostic bundles. Uploading them is an explicit
+choice to share that data with your CI provider.
+
 ## Rules
 
 Code, no model, every span.

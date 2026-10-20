@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { checkFiles } from "../src/checks/offline.js";
 
@@ -57,7 +57,7 @@ function checks(name: string, body: string) {
   fs.writeFileSync(path.join(folder, "rule.yaml"), body);
   return folder;
 }
-function cli(folder: string, json = false, finding = false) {
+function cli(folder: string, json = false, finding = false, extra: string[] = [], files = [trace], nodeArgs: string[] = []) {
   if (finding)
     fs.writeFileSync(
       path.join(folder, "hit.yaml"),
@@ -68,21 +68,80 @@ function cli(folder: string, json = false, finding = false) {
     [
       "--import",
       "tsx",
+      ...nodeArgs,
       "src/cli.ts",
       "check",
-      trace,
+      ...files,
       "--checks",
       folder,
       ...(json ? ["--json"] : []),
+      ...extra,
     ],
     {
       cwd: fileURLToPath(new URL("..", import.meta.url)),
       env: { ...process.env, NEATROOTS_HOME: path.join(dir, "home") },
       encoding: "utf8",
+      timeout: 15000,
+      maxBuffer: 8 * 1024 * 1024,
     },
   );
 }
 describe("offline check configuration errors", () => {
+  it("keeps exit 2 when writing the JUnit error report also fails", () => {
+    const hook = path.join(dir, "fail-report.mjs");
+    fs.writeFileSync(hook, 'console.log = () => { throw new Error("report sink unavailable"); };');
+    const result = cli(checks("xml-report-failure", good), false, false, ["--junit"], [trace], ["--import", pathToFileURL(hook).href]);
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Could not write JUnit report: report sink unavailable");
+  });
+  it("keeps repeated trace IDs isolated and distinct in JUnit", () => {
+    const folder = checks("xml-isolated", good.replace("never-matches", "^bad$"));
+    const badTrace = path.join(dir, "bad-trace.json");
+    fs.writeFileSync(badTrace, fs.readFileSync(trace, "utf8").replace('"name":"done"', '"name":"bad"').replace('"spanId":"0123456789abcdef"', '"spanId":"fedcba9876543210"'));
+    for (const files of [[badTrace, trace], [trace, badTrace]]) {
+      const result = cli(folder, false, false, ["--junit", "--only", "clean"], files);
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('tests="2" failures="1" errors="0"');
+      expect(result.stdout.match(/<failure /g)).toHaveLength(1);
+      expect(result.stdout).toContain("fedcba9876543210");
+    }
+  });
+
+  it("flushes a large JUnit report completely through a pipe", () => {
+    const folder = checks("xml-large", good.replace("never-matches", "done") + `title: ${"x".repeat(150000)}\n`);
+    const result = cli(folder, false, false, ["--junit", "--only", "clean"]);
+    expect(result.status).toBe(1);
+    expect(result.stdout.length).toBeGreaterThan(300000);
+    expect(result.stdout.trimEnd()).toMatch(/<\/testsuite>\n<\/testsuites>$/);
+  });
+  it("emits JUnit for passing runs, findings, configuration and input errors", () => {
+    for (const [name, body, hit, status] of [
+      ["xml-clean", good, false, 0],
+      ["xml-hit", good, true, 1],
+      ["xml-bad", bad[0], false, 2],
+      ["xml-mixed", bad[0], true, 2],
+    ] as const) {
+      const result = cli(checks(name, body), false, hit, ["--junit"]);
+      expect(result.status).toBe(status);
+      expect(result.stdout).toMatch(/^<\?xml/);
+      expect(result.stdout).toContain(`failures="${hit ? 1 : 0}"`);
+      expect(result.stdout).toContain(`errors="${status === 2 ? 1 : 0}"`);
+      if (hit) expect(result.stdout).toContain("hit: hit");
+    }
+    const folder = checks("xml-input", good);
+    const malformed = path.join(dir, "malformed.json");
+    fs.writeFileSync(malformed, "{invalid");
+    for (const extra of [["--only", "missing-rule"], [path.join(dir, "missing.json")], [malformed]]) {
+      const result = cli(folder, false, false, ["--junit", ...extra]);
+      expect(result.status).toBe(2);
+      expect(result.stdout).toContain('<error type="check-error"');
+    }
+    const conflict = cli(folder, true, false, ["--junit"]);
+    expect(conflict.status).toBe(2);
+    expect(conflict.stdout).toBe("");
+    expect(conflict.stderr).toContain("cannot be used together");
+  });
   for (const [i, body] of bad.entries()) {
     it(`returns 2 for invalid configuration ${i + 1}, text and JSON`, () => {
       const folder = checks(`invalid-${i}`, body);
