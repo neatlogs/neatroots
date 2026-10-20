@@ -96,7 +96,10 @@ export function spanDetail(roots: Roots, traceId: string, spanId: string) {
   };
 }
 
+/** Project settings and activity, counting both open and resolved findings for Settings. */
 function projects(roots: Roots) {
+  // Intentionally counts any finding (finding_count > 0, including resolved)
+  // as Settings labels this "N with findings" (projects-section.tsx).
   const rows = roots.store.db
     .prepare("SELECT project, COUNT(*) AS runs, MAX(started_ms) AS last_ms, SUM(finding_count > 0) AS with_findings FROM runs WHERE doctor = 0 GROUP BY project ORDER BY last_ms DESC")
     .all() as { project: string; runs: number; last_ms: number; with_findings: number }[];
@@ -109,6 +112,7 @@ function projects(roots: Roots) {
 }
 
 
+/** Register the local HTTP API, including run queries with distinct any- and open-finding filters. */
 export function mountApi(app: Hono, roots: Roots): void {
   const engine = roots.engine;
   mountModelsApi(app, roots);
@@ -164,6 +168,7 @@ export function mountApi(app: Hono, roots: Roots): void {
         q.has_finding === undefined || q.has_finding === ""
           ? undefined
           : q.has_finding === "1" || q.has_finding === "true",
+      hasOpenFinding: q.has_open_finding === "1" || q.has_open_finding === "true",
       checkId: q.check || undefined,
       text: q.q || undefined,
       sinceMs: q.since ? Number(q.since) : undefined,
