@@ -1,3 +1,4 @@
+import asyncio
 import json
 import threading
 import time
@@ -111,6 +112,37 @@ def test_wrap_injects_into_chat_completions(stub):
     assert "<neatroots-guidance>" in seen["messages"][-1]["content"]
     # wrapping twice is harmless
     neatroots_steer.wrap(c)
+
+
+def test_async_wrap_does_not_block_the_event_loop(stub, monkeypatch):
+    calls = []
+    loop_thread = threading.get_ident()
+
+    def slow_guidance():
+        calls.append(threading.get_ident())
+        time.sleep(0.1)
+        return None
+
+    monkeypatch.setattr(neatroots_steer, "guidance", slow_guidance)
+
+    class Completions:
+        async def create(self, **kw):
+            return "ok"
+
+    class Chat:
+        completions = Completions()
+
+    class Client:
+        chat = Chat()
+
+    async def run():
+        task = asyncio.create_task(neatroots_steer.wrap(Client()).chat.completions.create(messages=[]))
+        await asyncio.sleep(0.02)
+        assert not task.done()
+        assert await task == "ok"
+
+    asyncio.run(run())
+    assert calls and calls[0] != loop_thread
 
 
 def test_wrap_covers_stream_and_parse(stub):

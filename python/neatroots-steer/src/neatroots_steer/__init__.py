@@ -20,11 +20,13 @@ Steering is opt-in per project in neatroots (neatroots steering advisory --proje
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import functools
 import inspect
 import logging
 import os
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ._client import RootsClient, Note, configure, get_client
@@ -53,6 +55,9 @@ logger = logging.getLogger("neatroots_steer")
 
 GUIDANCE_OPEN = "<neatroots-guidance>"
 GUIDANCE_CLOSE = "</neatroots-guidance>"
+
+# How long a flush before a claim or a self-check may hold up the agent's call.
+_FLUSH_TIMEOUT_MS = 500
 
 
 class NeatrootsHalt(RuntimeError):
@@ -93,8 +98,27 @@ def current_trace() -> Tuple[Optional[str], Optional[str]]:
         return None, None
 
 
+_flushing: Optional[threading.Thread] = None
+_flushing_lock = threading.Lock()
+
+
 def _flush_sdk() -> None:
-    """Pushes finished spans to neatroots now, so gate mode and self-checks see the latest step."""
+    """Pushes finished spans to neatroots now, so gate mode and self-checks see the latest step.
+
+    Waits at most _FLUSH_TIMEOUT_MS. With its collector down, the SDK's flush takes seconds
+    whatever timeout it is given, so it runs on its own thread and the agent doesn't wait for it.
+    A flush that is still running isn't started again.
+    """
+    global _flushing
+    with _flushing_lock:
+        if _flushing is None or not _flushing.is_alive():
+            _flushing = threading.Thread(target=_flush_now, name="neatroots-steer-flush", daemon=True)
+            _flushing.start()
+        flushing = _flushing
+    flushing.join(_FLUSH_TIMEOUT_MS / 1000)
+
+
+def _flush_now() -> None:
     try:
         import neatlogs  # type: ignore
 
@@ -110,7 +134,7 @@ def _flush_sdk() -> None:
         provider = trace.get_tracer_provider()
         force = getattr(provider, "force_flush", None)
         if callable(force):
-            force(500)
+            force(_FLUSH_TIMEOUT_MS)
     except Exception:  # noqa: BLE001
         pass
 
@@ -150,6 +174,10 @@ def guidance(trace_id: Optional[str] = None) -> Optional[Note]:
     Raises NeatrootsHalt when the note is a stop from one of your own halt rules.
     """
     client = get_client()
+    if client.paused():
+        # The claim would be skipped anyway; skip the flush too, so a stopped neatroots (or
+        # NEATROOTS_STEER=off) costs nothing per LLM call.
+        return None
     span_id = None
     if trace_id is None:
         trace_id, span_id = current_trace()
@@ -315,7 +343,8 @@ def _wrap_method(
 
         @functools.wraps(original)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            return await original(*args, **prepare(kwargs))
+            prepared = await asyncio.to_thread(prepare, kwargs)
+            return await original(*args, **prepared)
 
         async_wrapper.__neatroots_wrapped__ = True  # type: ignore[attr-defined]
         setattr(owner, name, async_wrapper)
@@ -414,8 +443,11 @@ def check_my_work(question: str, *, trace_id: Optional[str] = None, timeout: flo
         trace_id, _ = current_trace()
     if not trace_id:
         return {"answer": "unknown", "probability_yes": None, "reason": "no active trace; is the Neatlogs SDK initialized?"}
-    _flush_sdk()
-    res = get_client().check(trace_id, question, timeout=timeout)
+    client = get_client()
+    res = None
+    if not client.paused():
+        _flush_sdk()
+        res = client.check(trace_id, question, timeout=timeout)
     if res is None:
         return {"answer": "unknown", "probability_yes": None, "reason": "neatroots is not reachable"}
     return {

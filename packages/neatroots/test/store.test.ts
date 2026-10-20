@@ -386,6 +386,26 @@ describe("store", () => {
     expect(st.listRuns({ text: "nope-nothing" }).length).toBe(0);
   });
 
+  it("filters runs by hasFinding true and false (#230)", () => {
+    const st = store();
+    const clean = hex(16);
+    const withFinding = hex(16);
+    st.ingest([batch([span({ traceId: clean, spanId: hex(8), name: "clean-run", kind: "workflow" })])]);
+    st.ingest([batch([span({ traceId: withFinding, spanId: hex(8), name: "failing-run", kind: "workflow" })])]);
+    st.insertFinding({ trace_id: withFinding, check_id: "c", check_kind: "rule", title: "F", probability: null, status: "raised", evidence_span_ids: [], detail: {}, model: null, triage_score: null, explanation_id: null });
+
+    const cleanRuns = st.listRuns({ hasFinding: false }).map((r) => r.trace_id);
+    expect(cleanRuns).toContain(clean);
+    expect(cleanRuns).not.toContain(withFinding);
+
+    const findingRuns = st.listRuns({ hasFinding: true }).map((r) => r.trace_id);
+    expect(findingRuns).toContain(withFinding);
+    expect(findingRuns).not.toContain(clean);
+
+    expect(st.countMatchingRuns({ hasFinding: false })).toBe(1);
+    expect(st.countMatchingRuns({ hasFinding: true })).toBe(1);
+  });
+
   it("serves the doctor read-back shape", () => {
     const st = store();
     const t = hex(16);

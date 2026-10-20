@@ -87,6 +87,8 @@ interface LiveRun {
   ruleGrace: Map<string, boolean>;
   ended: boolean;
   endHandled: boolean;
+  /** Bumped when a hand-back invalidates the end pass in flight; that pass stops at its next await. */
+  endPass: number;
   doctor: boolean;
   /** Resuming after a restart: answers already stored are not asked again. */
   answered?: { traceChecks: Set<string>; toolSpans: Set<string> };
@@ -264,6 +266,7 @@ export class Engine {
       ruleGrace: new Map(),
       ended: false,
       endHandled: false,
+      endPass: 0,
       doctor: row.doctor === 1,
     };
     this.live.set(traceId, r);
@@ -277,9 +280,28 @@ export class Engine {
       this.live.delete(u.traceId);
       return;
     }
+    // The caller's own span arrived after the run ended on a span that only qualified through its
+    // remote parent (#157). End-of-run work already ran on the callee's slice of the trace, so it is
+    // allowed to run again on the full one. While the caller is still open there is more to come, so
+    // the run is running again and the end waits for the next rootEnded. The run's final stored state
+    // decides, not this update's flags: one batch can carry the callee's end and the caller's open
+    // span together. This runs before the spans are processed, so a rule the caller's span raises
+    // sees the reopened run and can still steer.
+    const reopened = u.rootHandedBack && !u.completed && this.roots.store.getRun(u.traceId)?.status === "running";
+    if (u.rootHandedBack) {
+      run.endHandled = false;
+      // An end pass already running was for the callee's slice of the trace. The root has moved, so
+      // that pass stops at its next await instead of writing end-of-run state the next pass would
+      // then skip (a stored summary, say).
+      run.endPass++;
+    }
+    if (reopened) {
+      run.ended = false;
+      clearTimeout(run.endTimer);
+    }
     const fresh = u.spans.filter((s) => s.isNew && !s.view.isMarker);
     if (fresh.length) this.track(u.traceId, this.handleSpans(run, fresh.map((s) => s.row.span_id)));
-    if (u.rootEnded || u.completed) {
+    if (!reopened && (u.rootEnded || u.completed)) {
       run.ended = true;
       // Trailing spans can arrive in the next batch; give them a moment.
       clearTimeout(run.endTimer);
@@ -417,6 +439,7 @@ export class Engine {
     for (const lc of this.registry.rules()) {
       const rule = lc.check as RuleCheck;
       if (!this.appliesTo(rule, run)) continue;
+      if (this.roots.store.latestFindingFor(run.traceId, rule.id)?.status === "dismissed") continue;
       if (rule.rule.type === "run_end" && !atEnd) continue;
       let hit: RuleHit | null;
       try {
@@ -528,6 +551,8 @@ export class Engine {
     snap: TraceSnapshot,
     spanId: string | null,
   ): Promise<"unavailable" | void> {
+    const dismissed = () => this.roots.store.latestFindingFor(run.traceId, check.id)?.status === "dismissed";
+    if (dismissed()) return;
     let result: DecisionResult;
     try {
       result = await this.decisions.decide(evidence, [toQuestion(check, params)]);
@@ -538,6 +563,7 @@ export class Engine {
         this.decisionDown = true;
         return "unavailable";
       }
+      if (dismissed()) return;
       // A model error or timeout is a failed check, never a "no".
       const existing = this.roots.store.latestFindingFor(run.traceId, check.id);
       if (!existing || existing.status !== "failed") {
@@ -558,6 +584,7 @@ export class Engine {
       }
       return;
     }
+    if (dismissed()) return;
     const answer = result.answers[check.id];
     const verdict = flagged(check, result);
     this.roots.store.insertDecision({
@@ -587,9 +614,24 @@ export class Engine {
       // A second look, with a quote that must be in the run, before anything is raised.
       if ((run.rejected.get(check.id) ?? 0) >= 3) return;
       const check2 = check.kind === "yes_no" ? await verifyFlag(this.llm, fillTemplate(check.ask, params) || check.ask, evidence) : undefined;
+      if (dismissed()) return;
       if (check2 && !check2.verified) {
         run.rejected.set(check.id, (run.rejected.get(check.id) ?? 0) + 1);
         log.debug(`${check.id}: flag not confirmed on a second look${check2.quote ? ` (quote: ${clip(check2.quote, 80)})` : ""}`);
+        return;
+      }
+      // Another evaluation may have raised this finding while the model calls above were in
+      // flight. Re-check immediately before the synchronous insert so only one open row wins.
+      const raced = this.findOpen(run.traceId, check.id, spanId) ?? (spanId ? this.roots.store.openFindingFor(run.traceId, check.id) : undefined);
+      if (raced) {
+        if (spanId && !findingSpans(raced).includes(spanId)) {
+          const f = addOccurrence(this.roots.store, raced, spanId, spanIds);
+          if (f) this.roots.bus.emit("finding", f);
+        } else {
+          const spans = spanId && findingSpans(raced).length > 1 ? [...new Set([...raced.evidence_span_ids, ...spanIds])] : spanIds;
+          const f = this.roots.store.updateFinding(raced.id, { probability: Math.max(verdict.probability, raced.probability ?? 0), evidence_span_ids: spans });
+          if (f) this.roots.bus.emit("finding", f);
+        }
         return;
       }
       const evidenceSpans = snap.spans.filter((s) => spanIds.includes(s.id));
@@ -1015,6 +1057,11 @@ ${library}`;
   private async handleEnd(run: LiveRun): Promise<void> {
     if (run.endHandled) return;
     run.endHandled = true;
+    // A hand-back bumps endPass while this pass is awaiting something: the pass was for the
+    // callee's slice of the trace, so it stops rather than writing end-of-run state the next pass
+    // would then skip.
+    const pass = run.endPass;
+    const stale = () => run.endPass !== pass;
     // Notes the agent never picked up can no longer help this run.
     for (const n of this.roots.store.notesForTrace(run.traceId, "pending")) {
       this.roots.store.updateNote(n.id, { status: "expired" });
@@ -1024,6 +1071,7 @@ ${library}`;
     let snap = loadTrace(this.roots.store, run.traceId);
     if (!run.plan) this.ensurePlan(run, snap);
     if (run.planning) await run.planning;
+    if (stale()) return;
     snap = loadTrace(this.roots.store, run.traceId);
     this.applyRules(run, snap, true);
     // Final pass: end-only questions, and live questions with evidence they have not seen.
@@ -1043,17 +1091,41 @@ ${library}`;
         await this.askTrace(run, check, params, snap);
       }
     }
+    if (stale()) return;
     snap = loadTrace(this.roots.store, run.traceId);
     const findings = this.roots.store.findingsForTrace(run.traceId).filter((f) => f.status !== "failed" && f.status !== "dismissed");
+    if (stale()) return;
     // A failed run with no finding still gets triaged as a whole.
     if (snap.run && (snap.run.status === "error" || snap.run.interrupted) && !findings.some((f) => f.check_id === "run-failed")) {
       await this.triageRun(run, snap);
     }
-    for (const work of run.deferred.splice(0)) await work();
-    await this.summarize(run, snap);
-    setTimeout(() => {
-      if (!this.pending(run.traceId)) this.live.delete(run.traceId);
-    }, 60_000);
+    if (stale()) return;
+    // Deferred investigations await models too, so a hand-back during one leaves the rest for the
+    // next pass instead of running them over the callee's slice of the trace.
+    const pending = run.deferred.splice(0);
+    let next = 0;
+    for (; next < pending.length; next++) {
+      if (stale()) break;
+      await pending[next]();
+    }
+    run.deferred.push(...pending.slice(next));
+    if (stale()) return;
+    await this.summarize(run, snap, stale);
+    this.scheduleLiveRelease(run);
+  }
+
+  /**
+   * Releases a finished run's live state after a grace period for trailing spans. A hand-back
+   * reopens the run (endHandled false) after this was scheduled, and its live state (plan, decided
+   * spans, budgets) is needed again, so the release only applies to the run it was scheduled for,
+   * while that run is still ended.
+   */
+  private scheduleLiveRelease(run: LiveRun): void {
+    setTimeout(() => this.releaseLive(run), 60_000);
+  }
+
+  private releaseLive(run: LiveRun): void {
+    if (run.endHandled && this.live.get(run.traceId) === run && !this.pending(run.traceId)) this.live.delete(run.traceId);
   }
 
   private async triageRun(run: LiveRun, snap: TraceSnapshot): Promise<void> {
@@ -1110,10 +1182,14 @@ ${library}`;
     return exp;
   }
 
-  private async summarize(run: LiveRun, snap: TraceSnapshot): Promise<void> {
+  private async summarize(run: LiveRun, snap: TraceSnapshot, stale: () => boolean = () => false): Promise<void> {
     if (run.used.summaries >= this.roots.config.budgets.summariesPerRun) return;
     if (this.roots.store.getSummary(run.traceId)) return;
     if (!(await this.llm.isAvailable())) return;
+    // The pass can be invalidated while the model is being asked for the summary, or while it
+    // answers: either way the text would describe the callee's slice of the trace, and the real
+    // pass would skip the summary it should have written.
+    if (stale()) return;
     run.used.summaries++;
     const findings = this.roots.store.findingsForTrace(run.traceId).filter((f) => f.status !== "dismissed" && f.status !== "failed");
     const ev = buildEvidence(snap, { fields: ["input", "output", "status", "error"], final_output: true, last: 12 }, { budget: 5000 });
@@ -1126,6 +1202,12 @@ ${library}`;
         ],
         { schema: { name: "summary", schema: SUMMARY_SCHEMA }, maxTokens: 220, priority: "low" },
       );
+      if (stale()) {
+        // Nothing is written and the budget the discarded summary used goes back, so the next pass
+        // can still write one.
+        run.used.summaries--;
+        return;
+      }
       const lines = (r.json as { lines?: string[] } | undefined)?.lines?.filter((l) => typeof l === "string" && l.trim());
       if (!lines?.length) return;
       const text = lines.slice(0, 3).map((l) => clip(l.trim().replace(/^\d+[.)]\s*/, ""), 200)).join("\n");

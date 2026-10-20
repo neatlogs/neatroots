@@ -5,7 +5,7 @@ import { BlobStore } from "./blobs.js";
 import { SearchIds } from "./search-ids.js";
 import { sha256, newId } from "../util/ids.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
-import { kvToPlain, type KeyValue, type OtlpResource, type OtlpScope, type OtlpSpan, type Plain, type ResourceSpansBatch } from "../otlp/types.js";
+import { hasRemoteParent, kvToPlain, type KeyValue, type OtlpResource, type OtlpScope, type OtlpSpan, type Plain, type ResourceSpansBatch } from "../otlp/types.js";
 import type {
   Annotation,
   DecisionRow,
@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS runs (
   updated_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS runs_started ON runs (started_ms DESC);
+-- The run list and Insights sort and filter by this expression; an index on started_ms alone can't serve them.
+CREATE INDEX IF NOT EXISTS runs_sort ON runs (COALESCE(started_ms, received_ms) DESC);
 CREATE INDEX IF NOT EXISTS runs_session ON runs (session_id);
 CREATE INDEX IF NOT EXISTS runs_workflow ON runs (workflow);
 CREATE INDEX IF NOT EXISTS runs_project ON runs (project);
@@ -275,6 +277,8 @@ export interface TraceUpdate {
   spans: IngestedSpan[];
   runCreated: boolean;
   rootEnded: boolean;
+  /** A parentless span took the root back from one that only qualified through its remote parent (#157). */
+  rootHandedBack: boolean;
   completed: boolean;
 }
 
@@ -474,6 +478,12 @@ export class Store {
     return json<OtlpResource>(r?.json, { attributes: [] });
   }
 
+  /** The resources a run's spans were sent with (one per sender, usually one). */
+  resourcesFor(traceId: string): OtlpResource[] {
+    const rows = this.db.prepare("SELECT DISTINCT resource_id FROM spans WHERE trace_id = ?").all(traceId) as { resource_id: string }[];
+    return rows.map((r) => this.getResource(r.resource_id));
+  }
+
   getScope(id: string): OtlpScope {
     const r = this.db.prepare("SELECT json FROM scopes WHERE id = ?").get(id) as { json: string } | undefined;
     return json<OtlpScope>(r?.json, { name: "" });
@@ -505,7 +515,7 @@ export class Store {
           }
           let u = updates.get(span.traceId);
           if (!u) {
-            u = { traceId: span.traceId, spans: [], runCreated: false, rootEnded: false, completed: false };
+            u = { traceId: span.traceId, spans: [], runCreated: false, rootEnded: false, rootHandedBack: false, completed: false };
             updates.set(span.traceId, u);
           }
           const row = this.writeSpan(span, view, resourceId, scopeId, now, !previous);
@@ -513,6 +523,7 @@ export class Store {
           const runFlags = this.updateRun(span, view, row, resAttrs, now, previous);
           if (runFlags.created) u.runCreated = true;
           if (runFlags.rootEnded) u.rootEnded = true;
+          if (runFlags.rootHandedBack) u.rootHandedBack = true;
           if (runFlags.completed) u.completed = true;
         }
       }
@@ -592,6 +603,20 @@ export class Store {
     return row;
   }
 
+  /** Whether a span id is already stored for this trace. */
+  private spanStored(traceId: string, spanId: string): boolean {
+    return this.db.prepare("SELECT 1 FROM spans WHERE trace_id = ? AND span_id = ?").get(traceId, spanId) !== undefined;
+  }
+
+  /**
+   * Whether a stored span has a parent outside the trace, which means it only became the root
+   * through the remote-parent read (#157). A root without a parent id never qualifies.
+   */
+  private rootCameFromRemoteParent(traceId: string, spanId: string): boolean {
+    const row = this.db.prepare("SELECT parent_span_id FROM spans WHERE trace_id = ? AND span_id = ?").get(traceId, spanId) as { parent_span_id: string | null } | undefined;
+    return !!row?.parent_span_id;
+  }
+
   private updateRun(
     span: OtlpSpan,
     view: SpanView,
@@ -599,8 +624,8 @@ export class Store {
     resAttrs: Record<string, Plain>,
     now: number,
     previous: AggregateSpan | undefined,
-  ): { created: boolean; rootEnded: boolean; completed: boolean } {
-    const flags = { created: false, rootEnded: false, completed: false };
+  ): { created: boolean; rootEnded: boolean; rootHandedBack: boolean; completed: boolean } {
+    const flags = { created: false, rootEnded: false, rootHandedBack: false, completed: false };
     let run = this.getRun(span.traceId);
     if (!run) {
       const project = String(resAttrs["service.name"] ?? view.workflow ?? "unknown");
@@ -659,7 +684,25 @@ export class Store {
         p.reason = view.terminationReason;
       }
     }
-    if (!span.parentSpanId && !view.isMarker) {
+    // A span is the run's top when it has no parent, or when it declares a remote parent that never
+    // reached this trace (#157). A remote parent on its own isn't enough. With propagated context
+    // both processes export here, so the callee's top span carries a remote parent while the
+    // caller's parentless span sits in the same trace; taking the callee as the root ends the run on
+    // it while the caller is still open, which fires end-of-run work too early. A run that already
+    // has a root keeps it: only a parentless span can take that place, or the root itself being
+    // re-sent (a streaming exporter sends it open first, then with its end).
+    const isTop =
+      !span.parentSpanId ||
+      ((!run.root_span_id || run.root_span_id === span.spanId) && hasRemoteParent(span) && !this.spanStored(span.traceId, span.parentSpanId));
+    // Exporters that send a span when it ends (the OTel default) deliver the callee before the
+    // caller, so the run ended on a span whose parent simply had not arrived yet. The caller's own
+    // span is the real root, and taking it back has to undo that end: while the caller is open the
+    // run is running again, and once the caller ends the run ends on the full trace rather than on
+    // the callee's slice of it.
+    const handedBack = !span.parentSpanId && !!run.root_span_id && this.rootCameFromRemoteParent(span.traceId, run.root_span_id);
+    if (isTop && !view.isMarker) {
+      // Reported only when the root is really replaced: a parentless marker doesn't take it.
+      if (handedBack) flags.rootHandedBack = true;
       sets.push("root_span_id = @root", "root_name = @rootName", "input_preview = @inp", "output_preview = @out");
       p.root = span.spanId;
       p.rootName = span.name;
@@ -676,17 +719,28 @@ export class Store {
           sets.push("status = @status");
           p.status = span.status.code === 2 ? "error" : "ok";
         }
-        if (!run.root_ended) flags.rootEnded = true;
+        // A hand-back reports the end again even though the run already had one: end-of-run checks
+        // and forwarding ran on the callee's spans, and they have to run on the full trace now.
+        if (handedBack || !run.root_ended) flags.rootEnded = true;
+      } else if (handedBack && !view.interrupted && run.status !== "interrupted") {
+        sets.push("root_ended = 0", "ended_ms = NULL", "status = 'running'");
       }
     }
-    if (view.sessionId && (!run.session_id || !span.parentSpanId)) {
-      sets.push("session_id = @session");
-      p.session = view.sessionId;
+    // A re-sent root reports the same session again (a streaming exporter sends it open, then with
+    // its end): the session's last-seen moves, but the run is not counted in it twice.
+    let sessionSeen = false;
+    if (view.sessionId && (!run.session_id || isTop)) {
+      if (view.sessionId !== run.session_id) {
+        sets.push("session_id = @session");
+        p.session = view.sessionId;
+      } else {
+        sessionSeen = true;
+      }
     }
     this.db.prepare(`UPDATE runs SET ${sets.join(", ")} WHERE trace_id = @trace`).run(p);
     const after = this.getRun(span.traceId)!;
     const sessionId = after.session_id ?? after.trace_id;
-    if (flags.created || p.session) this.touchSession(sessionId, after, now, flags.created || !!p.session);
+    if (flags.created || p.session || sessionSeen) this.touchSession(sessionId, after, now, flags.created || !!p.session);
     return flags;
   }
 
@@ -752,6 +806,7 @@ export class Store {
       where.push("session_id = @session");
       p.session = f.sessionId;
     }
+    if (f.hasFinding === false) where.push("finding_count = 0");
     if (f.hasOpenFinding) where.push("open_finding_count > 0");
     else if (f.hasFinding) where.push("finding_count > 0");
     if (f.checkId) {
@@ -1473,6 +1528,30 @@ export class Store {
   /** Fills in the run and span of each search-index row, for a store from an older version. */
   rebuildSearchIds(onDone?: (rows: number, ready: boolean) => void): void {
     this.searchIds.rebuild(onDone);
+  }
+
+  /**
+   * The search index's startup work, in order: fill in its run ids, then re-index spans stored
+   * before search covered whole values. Re-indexing replaces each span's rows, which goes through
+   * the run ids once they're in; without them, it scans the whole index for every span. So if the
+   * run ids can't be filled in (a locked or failing database), it tries again twice, a minute and
+   * then two later, and the re-index waits for them or for the next start.
+   */
+  maintainSearch(onIds?: (rows: number, ready: boolean) => void, onReindex?: (n: number, ok: boolean) => void, retryMs = 60_000): void {
+    const attempt = (tries: number) =>
+      this.rebuildSearchIds((rows, ready) => {
+        // These run on later turns of the event loop, by when the store may have been closed.
+        if (!this.db.open) return;
+        if (ready) {
+          onIds?.(rows, true);
+          if (this.db.open) this.reindexSearch(onReindex);
+        } else if (tries < 3) {
+          setTimeout(() => this.db.open && attempt(tries + 1), retryMs * tries).unref();
+        } else {
+          onIds?.(rows, false);
+        }
+      });
+    attempt(1);
   }
 
   /**

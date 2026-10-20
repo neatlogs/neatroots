@@ -18,8 +18,8 @@ reviews moving and put your work where it helps people using neatroots most.
 
 ## Limits
 
-- At most **5 open pull requests** per contributor. A new pull request over the limit is turned into a
-  draft automatically; mark it ready for review once another of yours is merged or closed.
+- At most **5 open pull requests** per contributor, drafts included. GitHub won't let you open another
+  until one of yours is merged or closed.
 - Small, focused changes are reviewed first. Aim for under 400 changed lines, and split bigger work into
   steps agreed on the issue.
 

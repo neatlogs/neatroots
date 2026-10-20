@@ -9,6 +9,7 @@ import { getCloudKey } from "./keychain.js";
 import { projectSettings } from "../config.js";
 import type { ForwardRow } from "../types.js";
 import { log } from "../util/log.js";
+import { trimSlash } from "../util/url.js";
 import { VERSION } from "../version.js";
 import { endpointProblem } from "./endpoint.js";
 
@@ -63,7 +64,7 @@ export class Relay {
   }
 
   endpoint(): string {
-    return this.roots.config.cloud.endpoint.replace(/\/+$/, "").replace(/\/v1\/traces$/, "");
+    return trimSlash(this.roots.config.cloud.endpoint).replace(/\/v1\/traces$/, "");
   }
 
   private prepared(traceIds: string[]): { batches: ResourceSpansBatch[]; hits: RedactionHit[]; markers: ResourceSpansBatch[]; spanCount: number } {
@@ -184,7 +185,7 @@ export class Relay {
   }
 
   async forward(traceIds: string[], initiatedBy: string, opts: { endpoint?: string; apiKey?: string } = {}): Promise<ForwardRow> {
-    const endpoint = (opts.endpoint ?? this.endpoint()).replace(/\/+$/, "");
+    const endpoint = trimSlash(opts.endpoint ?? this.endpoint());
     const key = opts.apiKey ?? (await getCloudKey());
     const base = { trace_ids: traceIds, endpoint, initiated_by: initiatedBy };
     const problem = endpointProblem(endpoint, !!this.roots.config.cloud.trustEndpoint);

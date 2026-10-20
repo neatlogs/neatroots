@@ -46,7 +46,7 @@ export class Roots {
   /** The run and span the app has in focus, for the MCP get_current_run tool. */
   focus: { trace_id: string; span_id: string | null; at: number } | null = null;
   /** Cloud pushes a coding agent asked for, waiting for the user to confirm in the app. */
-  readonly pushes = new Map<string, { id: string; trace_ids: string[]; requested_by: string; created_ms: number; status: "pending" | "sent" | "failed" | "declined"; forward_id?: string; error?: string }>();
+  readonly pushes = new Map<string, { id: string; trace_ids: string[]; requested_by: string; created_ms: number; status: "pending" | "sending" | "sent" | "failed" | "declined"; forward_id?: string; error?: string }>();
 
   constructor(opts: RootsOptions = {}) {
     this.home = opts.home ?? rootsHome();
@@ -67,8 +67,10 @@ export class Roots {
     this.imports = new ImportJobs(this);
     this.replays = new Replays(this);
     this.chats = new AgentChats(this);
-    this.store.reindexSearch((n, ok) => (ok ? n && log.info(`search now covers whole inputs and outputs (${n} spans re-indexed)`) : log.warn("couldn't finish re-indexing search; it starts over at the next start")));
-    this.store.rebuildSearchIds((n, ready) => (ready ? n && log.info(`search index ready for fast lookups (${n} rows)`) : log.warn("search index lookups couldn't be prepared; search works but is slower on a large store")));
+    this.store.maintainSearch(
+      (n, ready) => (ready ? n && log.info(`search index ready for fast lookups (${n} rows)`) : log.warn("search index lookups couldn't be prepared; search works but is slower on a large store")),
+      (n, ok) => (ok ? n && log.info(`search now covers whole inputs and outputs (${n} spans re-indexed)`) : log.warn("couldn't finish re-indexing search; it starts over at the next start")),
+    );
     if (!opts.noEngine) {
       const engine = new Engine(this, this.llm, this.decisions, this.checks, this.steering);
       this.engine = engine;
@@ -112,6 +114,7 @@ export class Roots {
 
   close(): void {
     clearInterval(this.sweeper);
+    this.chats.close();
     this.laya.stop();
     this.store.close();
   }

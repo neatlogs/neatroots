@@ -30,8 +30,9 @@ The maintainer co-owns every area.
 - **One problem per pull request**, linked to its issue, with a test that fails without the change.
 - **One pull request per issue.** If someone already has a fix up for an issue, review it instead of
   opening another.
-- **At most 5 open pull requests per contributor.** New ones over the limit are turned into drafts
-  automatically.
+- **At most 5 open pull requests per contributor, drafts included.** GitHub's pull request limit
+  (Settings → Moderation options → Interaction limits) blocks a sixth until one is merged or closed.
+  Trusted contributors can go on its bypass list.
 - **Review decisions are final for that pull request.** The team may close pull requests that
   duplicate another, change behaviour the project decided against, touch `.github/` or release
   scripts without being asked, or don't change code for a code bug.
