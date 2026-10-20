@@ -11,17 +11,14 @@ import { body, clampInt, err } from "./util.js";
 import { runSummary } from "./api.js";
 import { bodyLimit } from "hono/body-limit";
 import type { RunFilter } from "../store/db.js";
+import { importedSource } from "../ingest/import-source.js";
 
 // Run views (chat, conversation), search, imports, cloud import, replays and the in-app coding
 // agent. Everything here is local; the cloud and import routes call out only when the user asks.
 
-/** Where an imported run came from (neatroots.import.source on its resource), if it was imported. */
+/** Trusted local import provenance only; historical unclassified origins also return null. */
 export function importSource(roots: Roots, traceId: string): string | null {
-  const run = roots.store.getRun(traceId);
-  if (!run?.root_span_id) return null;
-  const full = roots.store.getOtlpSpan(traceId, run.root_span_id);
-  const v = full?.resource.attributes.find((a) => a.key === "neatroots.import.source")?.value;
-  return v && "stringValue" in v && v.stringValue !== "http" && v.stringValue !== "replay" ? v.stringValue : null;
+  return importedSource(roots.store, traceId);
 }
 
 /** The filters search understands. Any other word:value (a URL, host:port) is text to find. */
@@ -129,7 +126,7 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
     if (!b.content) return err(c, 400, "content is required");
     try {
       const batches = parseTraceFile(b.content, b.name ?? "upload.json", b.project || undefined);
-      const updates = roots.ingest(batches);
+      const updates = roots.ingest(batches, { importSource: "file" });
       return c.json({ traces: updates.length, spans: batches.reduce((n, x) => n + x.spans.length, 0), trace_ids: updates.map((u) => u.traceId).slice(0, 50) });
     } catch (e) {
       return err(c, e instanceof ImportError ? 400 : 500, (e as Error).message);

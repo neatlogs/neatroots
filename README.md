@@ -249,6 +249,7 @@ can read) and never in the database.
 | `neatroots init` | In your agent's repo: `.env`, a `.neatroots/checks/` folder, steering and MCP setup |
 | `neatroots connect` | Give coding agents neatroots' MCP tools and skills |
 | `neatroots import <files>` | Bring in trace files, or `neatroots import neatlogs-cloud` for your cloud project |
+| `neatroots audit export <trace>`, `neatroots audit verify` | Save original local OTLP plus a historical sidecar; verify the archive hash chain ([audit guide](docs/audit.md)) |
 | `neatroots replay <trace> [--span <id>]` | Replay a run, or one LLM call in it |
 | `neatroots rerun add <project> "<command>"` | How to start your agent for replays (`--url` for an HTTP endpoint) |
 | `neatroots mock-llm` | A stand-in LLM on port 4110, so agents run without API keys |

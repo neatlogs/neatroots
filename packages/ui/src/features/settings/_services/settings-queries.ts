@@ -1,3 +1,4 @@
+import type { AuditStatus } from "@/lib/audit-types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, del, post, type AgentClient, type LlmInfo, type ProjectRow } from "@/lib/api";
@@ -11,6 +12,20 @@ export interface ForwardRow {
   created_ms: number;
   span_count: number;
   redactions: number;
+}
+
+export const auditKey = ["audit-status"] as const;
+export function useAuditStatus() {
+  return useQuery({ queryKey: auditKey, queryFn: async () => {
+    const data = await api<AuditStatus>("/api/audit/status");
+    const c = data?.coverage;
+    if (!c || c.scope !== "current_local_store" || !Array.isArray(c.projects) || !Array.isArray(c.connections?.clients)
+      || !Array.isArray(data.failures) || !Array.isArray(data.verification_errors) || !data.hold_reasons
+      || ![c.observed_runs, c.traced_runs, c.imported_runs, c.unclassified_runs, c.guidance_delivered_runs].every(Number.isSafeInteger)) {
+      throw new Error("Audit coverage is unavailable on this server");
+    }
+    return data;
+  }, refetchInterval: 15_000, retry: false });
 }
 
 export function useProjects() {
@@ -31,6 +46,7 @@ export function useSaveSettings() {
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: appKeys.status });
       void qc.invalidateQueries({ queryKey: appKeys.projects });
+      void qc.invalidateQueries({ queryKey: auditKey });
     },
   });
 }
