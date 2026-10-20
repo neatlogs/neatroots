@@ -45,6 +45,15 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
   const projects = [...new Set([...(known?.projects ?? []).map((p) => p.project), params.project].filter(Boolean))] as string[];
   const filtered = !!(params.q || params.status || params.hasFinding || params.project || params.check);
   const clear = () => setParams({ q: "", status: "", hasFinding: false, project: "" });
+  /** Remove the problem chip from the link too, retaining the tab and other filters on reload. */
+  const clearProblemFilter = () => {
+    setParams((p) => ({ ...p, check: undefined, label: undefined }));
+    const [path, search] = window.location.hash.split("?");
+    const q = new URLSearchParams(search);
+    q.delete("check");
+    q.delete("label");
+    window.history.replaceState(null, "", `${path}${q.size ? `?${q}` : ""}`);
+  };
   /** Keep a Home link's open-finding filter consistent with the selected tab on reload. */
   const selectTab = (value: string) => {
     const hasFinding = value === "problems";
@@ -121,7 +130,7 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
               <span className="truncate" title={params.label ?? params.check}>
                 Problem: {params.label ?? params.check}
               </span>
-              <button type="button" aria-label="Clear the problem filter" onClick={() => setParams({ ...params, check: undefined, label: undefined })} className="flex size-5 cursor-pointer items-center justify-center rounded-full hover:bg-info-fg/10">
+              <button type="button" aria-label="Clear the problem filter" onClick={clearProblemFilter} className="flex size-5 cursor-pointer items-center justify-center rounded-full hover:bg-info-fg/10">
                 <Icon icon={Cancel01Icon} size="xs" />
               </button>
             </span>
