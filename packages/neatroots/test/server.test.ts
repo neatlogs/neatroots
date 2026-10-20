@@ -411,6 +411,28 @@ describe("server", () => {
     expect(await r.json()).toEqual({ error: "text is required" });
   });
 
+  it("rejects malformed import options before creating a job", async () => {
+    const tb = await served();
+    const post = (body: unknown) =>
+      fetch(`${tb.url}/api/imports`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    for (const body of [
+      { source: 3 },
+      { source: "neatlogs-cloud", values: { traceIds: 3 } },
+      { source: "neatlogs-cloud", project: false },
+      { source: "neatlogs-cloud", limit: null },
+      { source: "neatlogs-cloud", limit: 1.5 },
+      { source: "neatlogs-cloud", since_ms: "yesterday" },
+      { source: "neatlogs-cloud", since_ms: 20, until_ms: 10 },
+    ]) {
+      expect((await post(body)).status).toBe(400);
+    }
+    expect(tb.roots.imports.list()).toEqual([]);
+  });
+
   it("returns 404 JSON for unknown /api and /v1 routes, not the SPA", async () => {
     const tb = await served();
     for (const path of ["/api/anything-unknown", "/api/imports/abc", "/v1/unknown"]) {
