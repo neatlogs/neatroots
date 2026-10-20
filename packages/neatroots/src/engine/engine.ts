@@ -70,6 +70,7 @@ interface LiveRun {
   planning?: Promise<void>;
   used: { plans: number; investigations: number; notes: number; summaries: number };
   deferred: (() => Promise<void>)[];
+  triageJobs: Set<Promise<unknown>>;
   spanDone: Set<string>;
   /** Per span-scope check: spans waiting to be asked about, newest last. */
   spanQueue: Map<string, string[]>;
@@ -253,6 +254,7 @@ export class Engine {
       workflow: row.workflow ?? row.project ?? "unknown",
       used: { plans: 0, investigations: 0, notes: 0, summaries: 0 },
       deferred: [],
+      triageJobs: new Set(),
       spanDone: new Set(),
       spanQueue: new Map(),
       spanBusy: new Set(),
@@ -715,7 +717,9 @@ export class Engine {
       });
       this.roots.bus.emit("note", note);
     }
-    void this.track(run.traceId, this.triage(run, f));
+    const job = this.track(run.traceId, this.triage(run, f));
+    run.triageJobs.add(job);
+    void job.finally(() => run.triageJobs.delete(job));
     void snap;
   }
 
@@ -1047,9 +1051,24 @@ ${library}`;
     const findings = this.roots.store.findingsForTrace(run.traceId).filter((f) => f.status !== "failed" && f.status !== "dismissed");
     // A failed run with no finding still gets triaged as a whole.
     if (snap.run && (snap.run.status === "error" || snap.run.interrupted) && !findings.some((f) => f.check_id === "run-failed")) {
-      await this.triageRun(run, snap);
+      try {
+        await this.triageRun(run, snap);
+      } catch (err) {
+        log.warn(`run explanation failed for ${run.traceId.slice(0, 8)}: ${(err as Error).message}`);
+      }
     }
-    for (const work of run.deferred.splice(0)) await work();
+    // End-pass findings start triage asynchronously. Wait for it before draining deferred
+    // investigations, and keep draining in case a finishing triage queues more work.
+    while (run.triageJobs.size || run.deferred.length) {
+      await Promise.all([...run.triageJobs]);
+      for (const work of run.deferred.splice(0)) {
+        try {
+          await work();
+        } catch (err) {
+          log.warn(`deferred investigation failed for ${run.traceId.slice(0, 8)}: ${(err as Error).message}`);
+        }
+      }
+    }
     await this.summarize(run, snap);
     setTimeout(() => {
       if (!this.pending(run.traceId)) this.live.delete(run.traceId);
