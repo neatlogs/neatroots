@@ -1,5 +1,5 @@
 import { CloudIcon } from "@hugeicons/core-free-icons";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { PendingButton } from "@/components/pending-button";
 import { StatusPill } from "@/components/ui/status-pill";
 import { Textarea } from "@/components/ui/textarea";
@@ -18,8 +18,32 @@ export function CloudSection({ status }: { status: Status }) {
   const save = useSaveSettings();
   const keys = useKeyActions("/api/cloud/key", "Neatlogs Cloud");
   const { data } = useForwards();
-  const [endpoint, setEndpoint] = useState(status.cloud.endpoint);
-  const [patterns, setPatterns] = useState("");
+  const savedPatterns = (status.cloud.redact_patterns ?? []).join("\n");
+  const [draft, setDraft] = useState({ endpoint: status.cloud.endpoint, patterns: savedPatterns, revision: 0, dirty: false });
+  const { endpoint, patterns } = draft;
+  useEffect(() => {
+    setDraft((current) => current.dirty || (current.endpoint === status.cloud.endpoint && current.patterns === savedPatterns)
+      ? current
+      : { ...current, endpoint: status.cloud.endpoint, patterns: savedPatterns, revision: current.revision + 1 });
+  }, [status.cloud.endpoint, savedPatterns]);
+  const edit = (value: Partial<Pick<typeof draft, "endpoint" | "patterns">>) => {
+    setDraft((current) => ({ ...current, ...value, revision: current.revision + 1, dirty: true }));
+  };
+  const saveDraft = () => {
+    const submittedRevision = draft.revision;
+    const submittedPatterns = patterns.split("\n").map((x) => x.trim()).filter(Boolean);
+    save.mutate({
+      body: { cloud_endpoint: endpoint, redact_patterns: submittedPatterns },
+      message: "Cloud settings saved",
+    }, {
+      onSuccess: () => {
+        // A save only acknowledges the submitted draft, never edits made while it was pending.
+        setDraft((current) => current.revision === submittedRevision
+          ? { ...current, patterns: submittedPatterns.join("\n"), dirty: false }
+          : current);
+      },
+    });
+  };
   const regions = REGIONS.some((r) => r.value === endpoint) ? REGIONS : [...REGIONS, { value: endpoint, label: endpoint }];
   const connected = status.cloud.has_key;
   return (
@@ -51,25 +75,17 @@ export function CloudSection({ status }: { status: Status }) {
       <SettingsCard title="Region and redaction" description="Emails, phone numbers and keys are always redacted before a send.">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <SettingField label="Ingest region" htmlFor="nl-endpoint">
-            <OptionSelect id="nl-endpoint" className="h-8" value={endpoint} onValueChange={setEndpoint} options={regions} />
+            <OptionSelect id="nl-endpoint" className="h-8" value={endpoint} onValueChange={(endpoint) => edit({ endpoint })} options={regions} />
           </SettingField>
           <SettingField label="Extra redaction patterns" htmlFor="nl-patterns" hint="One regex per line.">
-            <Textarea id="nl-patterns" rows={2} className="resize-none font-mono text-xs" placeholder="cust_[0-9]+" value={patterns} onChange={(e) => setPatterns(e.target.value)} />
+            <Textarea id="nl-patterns" rows={2} className="resize-none font-mono text-xs" placeholder="cust_[0-9]+" value={patterns} onChange={(e) => edit({ patterns: e.target.value })} />
           </SettingField>
         </div>
         <div>
           <PendingButton
             variant="secondary"
             pending={save.isPending}
-            onClick={() =>
-              save.mutate({
-                body: {
-                  cloud_endpoint: endpoint,
-                  ...(patterns.trim() ? { redact_patterns: patterns.split("\n").map((x) => x.trim()).filter(Boolean) } : {}),
-                },
-                message: "Cloud settings saved",
-              })
-            }
+            onClick={saveDraft}
           >
             Save cloud settings
           </PendingButton>
