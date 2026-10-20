@@ -1,3 +1,4 @@
+import { compareRuns } from "../server/run-comparison.js";
 import { z } from "zod";
 import type { Roots } from "../core.js";
 import { loadTrace, type SpanInfo } from "../engine/trace.js";
@@ -144,26 +145,10 @@ export const EXPLORE_TOOLS = [
     readOnly: true,
     input: { a: z.string(), b: z.string() },
     run: async (roots, args) => {
-      const one = (id: string) => {
-        const traceId = resolveTrace(roots, id);
-        const t = loadTrace(roots.store, traceId);
-        const run = t.run!;
-        return {
-          summary: runSummary(roots, run),
-          tools: t.spans.filter((s) => s.kind === "TOOL" || s.kind === "MCP_TOOL").sort((x, y) => x.startMs - y.startMs).map((s) => `${s.toolName ?? s.name}${s.status === "error" ? " (failed)" : ""}`),
-          output: clip(run.output_preview, 1200),
-          problems: roots.store.listFindings({ traceId }).filter((f) => f.status === "raised" || f.status === "active").map((f) => f.title),
-        };
-      };
-      const x = one(args.a);
-      const y = one(args.b);
-      return {
-        a: x,
-        b: y,
-        fixed: x.problems.filter((p) => !y.problems.includes(p)),
-        new_problems: y.problems.filter((p) => !x.problems.includes(p)),
-        same_tool_sequence: JSON.stringify(x.tools) === JSON.stringify(y.tools),
-      };
+      const result = compareRuns(roots, resolveTrace(roots, args.a), resolveTrace(roots, args.b));
+      // Preserve the MCP output preview and response shape; the UI uses the full recorded output.
+      const brief = ({ summary, tools, output, problems }: typeof result.a) => ({ summary, tools, output, problems });
+      return { a: brief(result.a), b: brief(result.b), fixed: result.fixed, new_problems: result.new_problems, same_tool_sequence: result.same_tool_sequence };
     },
   }),
   def({
