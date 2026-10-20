@@ -318,7 +318,10 @@ class PyReader {
         const n = e === "x" ? 2 : e === "u" ? 4 : 8;
         const hex = s.slice(this.i + 1, this.i + 1 + n);
         if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length !== n) throw FAIL;
-        out += String.fromCodePoint(parseInt(hex, 16));
+        const cp = parseInt(hex, 16);
+        // Python never prints a code point past U+10FFFF; String.fromCodePoint would throw on one.
+        if (cp > 0x10ffff) throw FAIL;
+        out += String.fromCodePoint(cp);
         this.i += n;
       } else if (e in ESCAPES) out += ESCAPES[e];
       else out += "\\" + e;

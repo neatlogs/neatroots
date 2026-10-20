@@ -707,9 +707,10 @@ export class Store {
       p.root = span.spanId;
       p.rootName = span.name;
       p.inp = view.input !== undefined ? (currentRequest(view.input) ?? preview(view.input, 300)) : null;
-      // A root that ends with the conversation (a LangGraph state) is previewed by its answer.
+      // A root that ends with the conversation (a LangGraph state) is previewed by its answer, and
+      // a conversation without one (an empty last reply, a stop on a tool result) by nothing.
       const answer = finalReply(view.output);
-      p.out = view.output !== undefined ? preview(answer || view.output, 300) : null;
+      p.out = answer !== undefined ? (answer ? preview(answer, 300) : null) : view.output !== undefined ? preview(view.output, 300) : null;
       if (view.workflow) {
         sets.push("workflow = @wf");
         p.wf = view.workflow;

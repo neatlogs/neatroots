@@ -186,11 +186,15 @@ function replyText(output: Plain | undefined): string | undefined {
  * The run's final answer: the root output, or the text of the last LLM reply. Undefined when empty.
  * A root whose output is the conversation (a LangGraph state) answered with its last message, and
  * only if the assistant spoke last: an empty last reply, or a run that stopped on a tool result,
- * reads as no answer, the same as an empty root output.
+ * is no answer, and the last LLM reply does not stand in, since it is part of that conversation.
  */
 export function finalOutput(t: TraceSnapshot): string | undefined {
   const root = runRoot(t.spans);
-  const rootOut = finalReply(root?.output) ?? textOf(root?.output);
+  // A conversation is the whole run, so it decides: an empty last reply, or a stop on a tool
+  // result, is no answer, and an earlier LLM reply in the same conversation must not stand in.
+  const reply = finalReply(root?.output);
+  if (reply !== undefined) return reply || undefined;
+  const rootOut = textOf(root?.output);
   if (rootOut && rootOut !== '""' && rootOut !== "null") return rootOut;
   const llms = t.spans.filter((s) => s.kind === "LLM" && s.output !== undefined);
   const last = llms[llms.length - 1];

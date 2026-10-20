@@ -232,6 +232,23 @@ describe.each(SENDERS)("LangGraph runs traced with %s", (sender) => {
     }
   });
 
+  it("a conversation that ends without an answer is not answered by an earlier LLM reply", () => {
+    // The LLM said something before calling the tool; the graph then stopped on the tool result.
+    const st = store();
+    const t = hex(16);
+    const root = hex(8);
+    const spans = spansOf(sender, t, root, STOPPED_ON_TOOL).map((sp) => {
+      const attrs = sp.attributes.map((a) => (/^(llm\.output_messages\.0\.message\.content|gen_ai\.completion\.0\.content|neatlogs\.llm\.output_messages\.0\.content)$/.test(a.key) ? { key: a.key, value: { stringValue: "Let me check the weather for you." } } : a));
+      return { ...sp, attributes: attrs };
+    });
+    st.ingest([batch(spans, `langgraph-${sender}`)]);
+    const snap = loadTrace(st, t);
+    expect(snap.spans.some((s) => s.kind === "LLM" && JSON.stringify(s.output).includes("Let me check"))).toBe(true);
+    expect(finalOutput(snap)).toBeUndefined();
+    expect(fires(st, t, "empty-final-answer", true)).toBe(true);
+    expect(st.getRun(t)!.output_preview).toBeNull();
+  });
+
   it("empty-final-answer stays quiet when the graph answered", () => {
     const st = store();
     expect(fires(st, ingest(st, sender, LOOP), "empty-final-answer", true)).toBe(false);
@@ -441,6 +458,11 @@ describe("reading LangChain's serialized messages", () => {
     expect(pythonLiteral("{'a': [1, 2.5, -3], 'b': None, 'c': (True, False), 'd': {'e': \"it's\"}}")).toEqual({ a: [1, 2.5, -3], b: null, c: [true, false], d: { e: "it's" } });
     expect(pythonLiteral("'line\\none \\'quoted\\' \\\\ \\x41\\u00e9\\U0001F600'")).toBe("line\none 'quoted' \\ Aé😀");
     expect(pythonLiteral("datetime.datetime(2026, 1, 1)")).toBeUndefined();
+    // Past U+10FFFF: not something Python prints, and String.fromCodePoint would throw on it.
+    expect(pythonLiteral("'\\UFFFFFFFF'")).toBeUndefined();
+    expect(pythonLiteral("'\\U0010FFFF'")).toBe("\u{10FFFF}");
+    expect(toolInput("{'a': '\\UFFFFFFFF'}")).toBe("{'a': '\\UFFFFFFFF'}");
+    expect(reprFields("content='\\UFFFFFFFF' tool_call_id='c'")).toBeUndefined();
     expect(pythonLiteral("{1, 2}")).toBeUndefined();
     expect(pythonLiteral("'unterminated")).toBeUndefined();
     expect(reprFields("content='It\\'s sunny' name='w' tool_call_id='c1'")).toEqual({ content: "It's sunny", name: "w", tool_call_id: "c1" });
