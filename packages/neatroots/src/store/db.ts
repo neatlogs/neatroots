@@ -479,7 +479,7 @@ export class Store {
   }
 
   /** Stores spans losslessly and updates run, session and search rows. */
-  ingest(batches: ResourceSpansBatch[]): TraceUpdate[] {
+  ingest(batches: ResourceSpansBatch[], beforeCommit?: (updates: TraceUpdate[]) => void): TraceUpdate[] {
     const updates = new Map<string, TraceUpdate>();
     const supersededBlobs = new Set<string>();
     const now = Date.now();
@@ -515,6 +515,8 @@ export class Store {
           if (runFlags.completed) u.completed = true;
         }
       }
+      // Persist trusted provenance in this transaction, before replaced payloads can be reclaimed.
+      beforeCommit?.([...updates.values()]);
     });
     tx();
     // Files are reclaimed only after the span replacement commits and no remaining span uses them.
@@ -1293,8 +1295,23 @@ export class Store {
 
   // --------------------------------------------------------------- retention
 
-  /** Deletes the oldest unpinned runs past the age or size limit. Returns how many runs were removed. */
+  /** The running server supplies its local audit policy; standalone stores have no policy. */
+  deletionGuard?: (traceId: string) => void;
+  afterDelete?: (traceIds: string[]) => void;
+  /** Optional server policy lifetime; standalone stores retain ordinary sweep behavior. */
+  sweepScope?: (work: () => number) => number;
+
+  private releasable(traceId: string): boolean {
+    try { this.deletionGuard?.(traceId); return true; } catch { return false; }
+  }
+
+  /** Deletes eligible unpinned runs past the age or size limit; returns the number removed. */
   sweep(maxAgeDays: number, maxBytes: number): number {
+    const work = () => this.sweepRuns(maxAgeDays, maxBytes);
+    return this.sweepScope ? this.sweepScope(work) : work();
+  }
+
+  private sweepRuns(maxAgeDays: number, maxBytes: number): number {
     let removed = 0;
     // Skip the age sweep for a non-positive age: a cutoff of "now" (days = 0)
     // would delete every unpinned run. maxBytes pruning below still runs.
@@ -1303,8 +1320,9 @@ export class Store {
       const old = this.db
         .prepare("SELECT trace_id FROM runs WHERE pinned = 0 AND COALESCE(ended_ms, received_ms) < ?")
         .all(cutoff) as { trace_id: string }[];
-      this.deleteRuns(old.map((r) => r.trace_id));
-      removed += old.length;
+      const ids = old.map((r) => r.trace_id).filter((id) => this.releasable(id));
+      this.deleteRuns(ids);
+      removed += ids.length;
     }
     // Measure what the database holds, not the file size: SQLite keeps the file (and WAL) at its
     // high-water mark after a delete and reuses the freed pages, so the file size never drops
@@ -1362,6 +1380,11 @@ export class Store {
     let freed = 0;
     for (let i = 0; i < rows.length; i++) {
       if (rows[i].pinned) continue;
+      // Only archive candidates we actually reach. A held row keeps every shared blob.
+      if (!this.releasable(rows[i].t)) {
+        for (const sha of shas[i]) lastRef.set(sha, Infinity);
+        continue;
+      }
       pick.push(rows[i].t);
       freed += rows[i].w * rowScale;
       for (const sha of shas[i]) if (lastRef.get(sha) === i) freed += this.blobs.sizeOf(sha);
@@ -1406,6 +1429,7 @@ export class Store {
    */
   deleteRuns(traceIds: string[]): void {
     if (!traceIds.length) return;
+    for (const id of traceIds) this.deletionGuard?.(id);
     const ids = JSON.stringify(traceIds);
     const inIds = "trace_id IN (SELECT value FROM json_each(?))";
     const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
@@ -1415,9 +1439,11 @@ export class Store {
         this.db.prepare(`DELETE FROM ${t} WHERE ${inIds}`).run(ids);
       }
       this.db.prepare(`DELETE FROM runs WHERE ${inIds}`).run(ids);
+      this.db.prepare("DELETE FROM meta WHERE key IN (SELECT 'import-source:' || value FROM json_each(?))").run(ids);
     });
     tx();
     this.reclaimUnreferencedBlobs(shas);
+    this.afterDelete?.(traceIds);
   }
 
   /** Deletes candidate payloads only after checking every remaining span reference. */

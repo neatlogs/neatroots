@@ -14,6 +14,7 @@ import { AgentChats } from "./agents/chat.js";
 import { Relay } from "./relay/relay.js";
 import { LayaManager } from "./models/laya.js";
 import { getSecret } from "./relay/keychain.js";
+import { AuditHold } from "./audit/hold.js";
 import { log } from "./util/log.js";
 
 export interface RootsOptions {
@@ -38,6 +39,7 @@ export class Roots {
   readonly relay: Relay;
   readonly laya: LayaManager;
   readonly imports: ImportJobs;
+  readonly audit: AuditHold;
   readonly replays: Replays;
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
@@ -77,17 +79,36 @@ export class Roots {
       // Finish check work a previous process accepted but didn't complete (a restart or a crash).
       setTimeout(() => void resumeUnfinished(engine, this).catch((e: Error) => log.warn(`couldn't resume checks: ${e.message}`)), 1500).unref();
     }
+    this.audit = new AuditHold(this);
+    this.store.deletionGuard = (id) => this.audit.beforeDelete(id);
+    this.store.sweepScope = (work) => this.audit.withinSweep(work);
+    this.store.afterDelete = (ids) => {
+      this.audit.forgotten(ids);
+      for (const id of ids) {
+        if (this.focus?.trace_id === id) this.focus = null;
+        if (this.engine && !this.engine.pending(id)) {
+          this.engine.resetForImport(id);
+          this.engine.progress.done(id);
+        }
+      }
+    };
   }
 
-  ingest(batches: ResourceSpansBatch[]): TraceUpdate[] {
-    const updates = this.store.ingest(batches);
+  ingest(batches: ResourceSpansBatch[], opts: { importSource?: string } = {}): TraceUpdate[] {
+    if (opts.importSource) {
+      const ids = new Set(batches.flatMap((b) => b.spans.map((s) => s.traceId)));
+      for (const id of ids) if (!this.store.getRun(id)) this.engine?.resetForImport(id);
+    }
+    const updates = this.store.ingest(batches, opts.importSource ? (ingested) => {
+      for (const u of ingested) this.store.setMeta(`import-source:${u.traceId}`, opts.importSource!);
+    } : undefined);
     for (const u of updates) this.bus.emit("trace", u);
     return updates;
   }
 
   /** Saves to this instance's own home (the one it was opened with), never another one. */
-  saveConfig(): void {
-    saveConfig(this.config, path.join(this.home, "config.yaml"));
+  saveConfig(candidate: RootsConfig = this.config): void {
+    saveConfig(candidate, path.join(this.home, "config.yaml"));
   }
 
   /** Applies retention now and every hour. */
@@ -114,6 +135,7 @@ export class Roots {
 
   close(): void {
     clearInterval(this.sweeper);
+    this.audit.close();
     this.laya.stop();
     this.store.close();
   }

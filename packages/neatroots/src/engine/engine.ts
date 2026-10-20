@@ -158,6 +158,17 @@ export class Engine {
   private jobs = new Map<string, number>();
   private idleWaiters = new Map<string, (() => void)[]>();
   private decisionDown = false;
+  private auditJobs = new Map<string, number>();
+
+  private async auditJob<T>(traceId: string, work: () => Promise<T>): Promise<T> {
+    this.auditJobs.set(traceId, (this.auditJobs.get(traceId) ?? 0) + 1);
+    try { return await work(); }
+    finally {
+      const remaining = (this.auditJobs.get(traceId) ?? 1) - 1;
+      if (remaining) this.auditJobs.set(traceId, remaining);
+      else this.auditJobs.delete(traceId);
+    }
+  }
   readonly progress: CheckProgress;
 
   constructor(
@@ -200,6 +211,21 @@ export class Engine {
     let n = 0;
     for (const v of this.jobs.values()) n += v;
     return n;
+  }
+
+  /** Audit release must include the delayed end work as well as tracked jobs. */
+  auditReady(traceId: string): boolean {
+    const run = this.live.get(traceId);
+    return !this.auditJobs.has(traceId) && !this.pending(traceId) && !this.progress.state(traceId) && (!run || run.endHandled);
+  }
+
+  /** A deleted run may be imported again before its old in-memory state expires. */
+  resetForImport(traceId: string): void {
+    if (this.pending(traceId)) throw new Error("previous checks for this deleted run are still active; retry the import when they finish");
+    const previous = this.live.get(traceId);
+    clearTimeout(previous?.debounce);
+    clearTimeout(previous?.endTimer);
+    this.live.delete(traceId);
   }
 
   /** Resolves true when nothing is pending for the trace, false on timeout. */
@@ -777,7 +803,11 @@ export class Engine {
   }
 
   /** LLM investigation of a finding: cause, evidence spans, fix; checked for grounding. */
-  async investigate(traceId: string, findingId: string): Promise<Explanation | undefined> {
+  investigate(traceId: string, findingId: string): Promise<Explanation | undefined> {
+    return this.auditJob(traceId, () => this.investigateWork(traceId, findingId));
+  }
+
+  private async investigateWork(traceId: string, findingId: string): Promise<Explanation | undefined> {
     const f = this.roots.store.getFinding(findingId);
     if (!f) return undefined;
     const snap = loadTrace(this.roots.store, traceId);
@@ -1052,7 +1082,7 @@ ${library}`;
     for (const work of run.deferred.splice(0)) await work();
     await this.summarize(run, snap);
     setTimeout(() => {
-      if (!this.pending(run.traceId)) this.live.delete(run.traceId);
+      if (this.live.get(run.traceId) === run && !this.pending(run.traceId)) this.live.delete(run.traceId);
     }, 60_000);
   }
 
@@ -1072,7 +1102,11 @@ ${library}`;
   }
 
   /** Explains a whole run: likely cause, the spans that show it, and a fix. */
-  async explainRun(traceId: string, opts: { force?: boolean; priority?: "interactive" | "low" } = {}): Promise<Explanation | undefined> {
+  explainRun(traceId: string, opts: { force?: boolean; priority?: "interactive" | "low" } = {}): Promise<Explanation | undefined> {
+    return this.auditJob(traceId, () => this.explainRunWork(traceId, opts));
+  }
+
+  private async explainRunWork(traceId: string, opts: { force?: boolean; priority?: "interactive" | "low" }): Promise<Explanation | undefined> {
     if (!opts.force) {
       const existing = this.roots.store.explanationFor("run", traceId);
       if (existing) return existing;
@@ -1206,7 +1240,11 @@ ${library}`;
   }
 
   /** Re-runs the checks for a finished run, e.g. after checks changed. `resume` keeps stored answers. */
-  async recheck(traceId: string, opts: { resume?: boolean } = {}): Promise<void> {
+  recheck(traceId: string, opts: { resume?: boolean } = {}): Promise<void> {
+    return this.auditJob(traceId, () => this.recheckWork(traceId, opts));
+  }
+
+  private async recheckWork(traceId: string, opts: { resume?: boolean }): Promise<void> {
     const row = this.roots.store.getRun(traceId);
     if (!row) return;
     this.live.delete(traceId);
