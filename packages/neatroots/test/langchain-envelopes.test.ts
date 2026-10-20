@@ -299,6 +299,8 @@ describe("the traces from #251, as recorded from a real LangGraph run with OpenI
 describe("labeled smoke: 180 generated LangGraph runs, no misses and no false alarms", () => {
   it("repeated-tool-call across the three senders", () => {
     let tp = 0, fn = 0, fp = 0, tn = 0;
+    // One store for the 180 runs: each run is its own trace.
+    const st = store();
     for (let i = 0; i < 180; i++) {
       const sender = SENDERS[i % 3];
       const kind = Math.floor(i / 3) % 4;
@@ -311,7 +313,6 @@ describe("labeled smoke: 180 generated LangGraph runs, no misses and no false al
       else if (kind === 1) { calls = Array.from({ length: n }, (_, k) => call(k, `{"hits": ${i}, "page": ${k}}`)); expectFire = false; }
       else if (kind === 2) { calls = Array.from({ length: n }, (_, k) => call(k, "Error: HTTP 503\n Please fix your mistakes.")); expectFire = true; }
       else { calls = Array.from({ length: n }, (_, k) => call(k, `{"hits": ${i}}`, { args: { q: `item-${i}-${k}` } })); expectFire = false; }
-      const st = store();
       const fired = fires(st, ingest(st, sender, { question: "find it", calls, answer: "done" }), "repeated-tool-call");
       if (expectFire && fired) tp++; else if (expectFire) fn++; else if (fired) fp++; else tn++;
     }
@@ -447,6 +448,26 @@ describe("reading LangChain's serialized messages", () => {
     expect(reprFields("content='Sunny' name='w' tool_call_id='c1' trailing")).toBeUndefined();
     expect(reprFields("content='Sunny'  name='w'")).toBeUndefined();
     expect(reprFields("content=[{'type': 'text', 'text': 'hi'}] additional_kwargs={} response_metadata={}")).toEqual({ content: [{ type: "text", text: "hi" }], additional_kwargs: {}, response_metadata: {} });
+  });
+
+  it("reads an empty content-block list as no answer", () => {
+    expect(finalReply([{ role: "user", content: "hi" }, { role: "assistant", content: [] }])).toBe("");
+    expect(finalReply([langChainMessage({ type: "ai", data: { content: [], type: "ai" } })!])).toBe("");
+    expect(finalReply([{ role: "assistant", content: [{ type: "image", url: "x" }] }])).toBe('[{"type":"image","url":"x"}]');
+  });
+
+  it("keeps a __proto__ key in a parsed dict or repr as an own field, not a prototype", () => {
+    const parsed = pythonLiteral("{'__proto__': {'tool_call_id': 'c'}, 'a': 1}") as Record<string, Plain>;
+    expect(Object.hasOwn(parsed, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+    expect(parsed.a).toBe(1);
+    const fields = reprFields("content='x' __proto__={'tool_call_id': 'c'}")!;
+    expect(Object.hasOwn(fields, "__proto__")).toBe(true);
+    expect("tool_call_id" in fields).toBe(false);
+    // So the message is not read as a tool message.
+    expect(langChainMessage("content='x' __proto__={'tool_call_id': 'c'}")?.role).toBe("user");
+    expect(toolInput("{'__proto__': {'polluted': True}}")).toEqual(JSON.parse('{"__proto__": {"polluted": true}}'));
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
   it("a tool output clipped by the sender mid-envelope is left as text", () => {

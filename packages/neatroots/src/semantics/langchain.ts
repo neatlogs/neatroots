@@ -1,4 +1,4 @@
-import type { Plain } from "../otlp/types.js";
+import { setOwn, type Plain } from "../otlp/types.js";
 
 // LangChain and LangGraph put their own message objects in span values, and each instrumentation
 // serializes them its own way. Checks that compare tool results or read the run's answer need the
@@ -184,6 +184,8 @@ export function contentText(content: Plain | undefined): string {
   if (content === undefined || content === null) return "";
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
+    // A provider can return no content blocks at all: that is an empty reply, not the text "[]".
+    if (!content.length) return "";
     const texts = content.map((p) => (typeof p === "string" ? p : isObj(p) && (p.type === "text" || p.type === undefined) && typeof p.text === "string" ? p.text : undefined)).filter((x): x is string => x !== undefined);
     if (texts.length) return texts.join("\n");
   }
@@ -356,7 +358,8 @@ class PyReader {
       if (this.s[this.i] !== ":") throw FAIL;
       this.i++;
       this.spaces();
-      out[typeof key === "string" ? key : String(key)] = this.value();
+      // Defined, not assigned: a "__proto__" key stays a field (span values are untrusted).
+      setOwn(out, typeof key === "string" ? key : String(key), this.value());
       this.spaces();
       if (this.s[this.i] === ",") {
         this.i++;
@@ -390,7 +393,7 @@ export function reprFields(s: string): Obj | undefined {
       const key = /^([A-Za-z_]\w*)=/.exec(s.slice(r.i, r.i + 64));
       if (!key) return undefined;
       r.i += key[0].length;
-      out[key[1]] = r.value();
+      setOwn(out, key[1], r.value());
       if (r.i >= s.length) break;
       if (s[r.i] !== " ") return undefined;
       r.i++;
