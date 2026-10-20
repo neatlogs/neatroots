@@ -14,8 +14,8 @@ type Step = { kind: "tool" | "llm"; name: string; ok?: boolean; input?: string; 
 const tool = (name: string, ok = true, input = '{"q":1}'): Step => ({ kind: "tool", name, ok, input, out: "ok" });
 const llm = (out = "fine"): Step => ({ kind: "llm", name: "chat", out });
 
-function trace(steps: Step[]): string {
-  const t = hex(16);
+function trace(steps: Step[], traceId = hex(16)): string {
+  const t = traceId;
   const root = hex(8);
   const n = 1_700_000_000_000_000_000;
   const spans = steps.map((s, i) => {
@@ -45,9 +45,9 @@ const GOOD: Step[][] = [
 ];
 
 let seq = 0;
-const write = (steps: Step[]) => {
+const write = (steps: Step[], traceId?: string) => {
   const p = path.join(dir, `t${seq++}.json`);
-  fs.writeFileSync(p, trace(steps));
+  fs.writeFileSync(p, trace(steps, traceId));
   return p;
 };
 
@@ -67,6 +67,22 @@ describe("checkFiles", () => {
     const r = checkFiles([write(BAD[0]), write(GOOD[0])]);
     expect(r.runs.map((x) => x.findings.length > 0)).toEqual([true, false]);
     expect(r.runs[0].findings[0].check_id).toBe("repeated-tool-call");
+  });
+
+  it("keeps each file verdict isolated when two files repeat a trace id", () => {
+    const checks = path.join(dir, "same-id-checks");
+    fs.mkdirSync(checks, { recursive: true });
+    fs.writeFileSync(path.join(checks, "bad-span.yaml"), "id: bad-span\nkind: rule\nrule: {type: match, field: name, pattern: '^bad$'}\n");
+    const traceId = "0123456789abcdef0123456789abcdef";
+    const bad = write([tool("bad")], traceId);
+    const clean = write([tool("clean")], traceId);
+    const options = { dirs: [checks], only: ["bad-span"] };
+
+    const badFirst = checkFiles([bad, clean], options);
+    expect(badFirst.runs.map((run) => run.findings.map((finding) => finding.check_id))).toEqual([["bad-span"], []]);
+
+    const cleanFirst = checkFiles([clean, bad], options);
+    expect(cleanFirst.runs.map((run) => run.findings.map((finding) => finding.check_id))).toEqual([[], ["bad-span"]]);
   });
 
   it("limits to the rules asked for", () => {
