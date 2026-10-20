@@ -1,0 +1,111 @@
+name: release
+
+# Push a tag like v0.2.0 to publish neatroots.tar.gz, the bundle install.sh downloads.
+# Tags with a suffix (v0.2.0-rc.1) are published as pre-releases, which `latest` skips.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+      - name: Version matches the tag
+        run: |
+          v="$(node -p 'require("./packages/neatroots/package.json").version')"
+          case "$GITHUB_REF_NAME" in "v$v"|"v$v"-*) ;; *) echo "tag $GITHUB_REF_NAME does not match package version $v"; exit 1 ;; esac
+      - run: node scripts/package.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: release/neatroots.tar.gz*
+
+  # The one bundle must start on every platform install.sh supports. Publishing waits for the
+  # runners every repository has; arm64 Linux and Intel macOS runners may be unavailable while the
+  # repository is private, so those checks run alongside without holding the release.
+  verify:
+    needs: bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: release
+      - name: Install with no Node on PATH (the installer downloads its own)
+        run: |
+          env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin NEATROOTS_INSTALL_DIR="$RUNNER_TEMP/nb" NEATROOTS_BIN_DIR="$RUNNER_TEMP/bin" \
+            sh install.sh --bundle release/neatroots.tar.gz --no-connect --no-modify-path
+          "$RUNNER_TEMP/bin/neatroots" --version
+      - name: Start, store a trace, read it back
+        run: |
+          NEATROOTS_HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/bin/neatroots" start --port 4199 --no-laya --no-engine &
+          for i in $(seq 1 30); do curl -sf localhost:4199/api/status >/dev/null && break; sleep 1; done
+          now=$(date +%s)000000000
+          curl -sf -X POST localhost:4199/v1/traces -H 'content-type: application/json' \
+            -d "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"ci\"}}]},\"scopeSpans\":[{\"scope\":{\"name\":\"ci\"},\"spans\":[{\"traceId\":\"0af7651916cd43dd8448eb211c80319c\",\"spanId\":\"b7ad6b7169203331\",\"name\":\"agent\",\"kind\":1,\"startTimeUnixNano\":\"$now\",\"endTimeUnixNano\":\"$now\",\"status\":{\"code\":1}}]}]}]}"
+          sleep 2
+          curl -sf "localhost:4199/api/runs?limit=1" | grep -q 0af7651916cd43dd8448eb211c80319c
+
+  verify-more:
+    needs: bundle
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: release
+      - name: Install with no Node on PATH (the installer downloads its own)
+        run: |
+          env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin NEATROOTS_INSTALL_DIR="$RUNNER_TEMP/nb" NEATROOTS_BIN_DIR="$RUNNER_TEMP/bin" \
+            sh install.sh --bundle release/neatroots.tar.gz --no-connect --no-modify-path
+          "$RUNNER_TEMP/bin/neatroots" --version
+      - name: Start, store a trace, read it back
+        run: |
+          NEATROOTS_HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/bin/neatroots" start --port 4199 --no-laya --no-engine &
+          for i in $(seq 1 30); do curl -sf localhost:4199/api/status >/dev/null && break; sleep 1; done
+          now=$(date +%s)000000000
+          curl -sf -X POST localhost:4199/v1/traces -H 'content-type: application/json' \
+            -d "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"ci\"}}]},\"scopeSpans\":[{\"scope\":{\"name\":\"ci\"},\"spans\":[{\"traceId\":\"0af7651916cd43dd8448eb211c80319c\",\"spanId\":\"b7ad6b7169203331\",\"name\":\"agent\",\"kind\":1,\"startTimeUnixNano\":\"$now\",\"endTimeUnixNano\":\"$now\",\"status\":{\"code\":1}}]}]}]}"
+          sleep 2
+          curl -sf "localhost:4199/api/runs?limit=1" | grep -q 0af7651916cd43dd8448eb211c80319c
+
+  publish:
+    needs: [bundle, verify]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: release
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""
+          case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" release/neatroots.tar.gz release/neatroots.tar.gz.sha256 \
+            --repo "$GITHUB_REPOSITORY" --title "neatroots $GITHUB_REF_NAME" --generate-notes $pre

@@ -1,0 +1,18 @@
+# Groups the notes the release workflow generates (gh release create --generate-notes) by label.
+# For a final release, a maintainer replaces them with curated notes by hand (docs/releasing.md).
+changelog:
+  exclude:
+    labels: [duplicate, invalid, wontfix]
+  categories:
+    - title: Security
+      labels: [security]
+    - title: Bug fixes
+      labels: [bug]
+    - title: Features
+      labels: [enhancement]
+    - title: Performance
+      labels: [performance]
+    - title: Docs
+      labels: [documentation]
+    - title: Other changes
+      labels: ["*"]

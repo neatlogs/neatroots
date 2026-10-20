@@ -1,0 +1,10 @@
+# Pull requests ask each area's owners for a review; the maintainer co-owns everything. See MAINTAINERS.md.
+*                               @akshay-neatlogs
+/docs/                          @harshk-neatlogs @akshay-neatlogs
+/packages/neatroots/library/    @harshk-neatlogs @akshay-neatlogs
+/packages/neatroots/src/checks/ @harshk-neatlogs @akshay-neatlogs
+/packages/neatroots/src/store/  @taranum-neatlogs @akshay-neatlogs
+/packages/neatroots/src/ingest/ @taranum-neatlogs @akshay-neatlogs
+/.github/                       @akshay-neatlogs
+/scripts/                       @akshay-neatlogs
+/install.sh                     @akshay-neatlogs

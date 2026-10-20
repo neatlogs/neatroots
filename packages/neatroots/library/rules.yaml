@@ -1,0 +1,157 @@
+# neatroots starter rules. Rules run in code with no model, on every span, in microseconds.
+# Copy any of these into ~/.neatroots/checks/ or <repo>/.neatroots/checks/ to change them;
+# a check with the same id there replaces the one here.
+
+- id: repeated-tool-call
+  kind: rule
+  group: loop
+  title: Same tool called repeatedly with identical arguments
+  rule:
+    type: repeat
+    span: { type: [tool, mcp_tool] }
+    same: [tool, input, output]
+    at_least: 3
+  guidance: >-
+    You have called {tool} {count} times with the same arguments ({args}) and the result did
+    not change. Do not call it again with these arguments. Check whether the arguments are
+    right, try a different approach, or tell the user what is blocking you.
+
+- id: tool-error-streak
+  kind: rule
+  group: loop
+  title: Several tool calls failed in a row
+  rule:
+    type: errors
+    span: { type: [tool, mcp_tool] }
+    consecutive: 3
+  guidance: >-
+    Your last {count} tool calls failed (latest: {tool}: {error}). Stop and work out why before
+    calling more tools, or explain the problem to the user.
+
+- id: llm-call-failed
+  kind: rule
+  title: An LLM call returned an error
+  rule:
+    type: errors
+    span: { type: llm }
+    consecutive: 1
+
+- id: runaway-loop
+  kind: rule
+  group: loop
+  title: Unusually many LLM calls in one run
+  rule:
+    type: count
+    span: { type: llm }
+    at_least: 25
+  guidance: >-
+    This run has made {count} LLM calls. Check whether you are making progress; if not, stop and
+    summarize what you have for the user.
+
+- id: token-budget
+  kind: rule
+  title: Run used more than 200k tokens
+  rule:
+    type: threshold
+    metric: total_tokens
+    at_least: 200000
+
+- id: reply-truncated
+  kind: rule
+  title: A model reply was cut off at its token limit
+  rule:
+    type: match
+    span: { type: llm }
+    field: finish_reason
+    pattern: '^(max_tokens|length|MAX_TOKENS)$'
+    flags: 'i'
+  guidance: The reply was truncated at the token limit and is incomplete. Raise max_tokens for this call or ask the model to continue before using the reply.
+
+- id: secret-in-output
+  kind: rule
+  title: Something that looks like a secret key in model output
+  rule:
+    type: match
+    span: { type: llm }
+    field: output
+    flags: ''
+    pattern: '(sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
+  guidance: Do not repeat credentials or keys in your replies. Refer to them by name instead.
+
+- id: unrecovered-tool-failure
+  kind: rule
+  group: tool-result
+  title: A tool call failed and the run still ended with an answer
+  rule:
+    type: unrecovered_error
+    span: { type: [tool, mcp_tool] }
+  guidance: >-
+    {tool} failed ({error}) and was not called again successfully, but you gave a final answer.
+    Do not say the task is done. Retry {tool} or tell the user it failed.
+
+- id: secret-in-tool-output
+  kind: rule
+  title: A tool returned something that looks like a secret key
+  rule:
+    type: match
+    span: { type: [tool, mcp_tool] }
+    field: output
+    pattern: '(sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|Bearer [A-Za-z0-9._~+/=-]{24,})'
+    flags: ''
+  guidance: A tool result contains what looks like a credential. Do not repeat it in your reply or pass it to other tools. Refer to it by name instead.
+
+- id: soft-tool-failure
+  kind: rule
+  group: tool-result
+  title: A tool reported success but its output looks like a failure
+  rule:
+    type: match
+    span: { type: [tool, mcp_tool], status: ok }
+    field: output
+    pattern: '"(error|errors|exception)"\s*:\s*("[^"\s]|\{|\[\s*[^\]\s])|"(status|status_code|http_status)"\s*:\s*"?[45]\d\d\b|rate limit(ed)? exceeded|too many requests|internal server error|service unavailable|traceback \(most recent call last\)|(^|\n)[^\S\n]*error:|\bHTTP [45]\d\d\b'
+  guidance: >-
+    The output of {span} looks like an error even though the call did not fail. Do not treat it as a
+    result. Check it, retry or tell the user.
+
+- id: context-growth
+  kind: rule
+  title: The model calls keep getting bigger
+  rule:
+    type: growth
+    span: { type: llm }
+    min_calls: 5
+    rising: 0.8
+    factor: 3
+    min_tokens: 4000
+  guidance: >-
+    The model calls in this run grew from {first} to {last} tokens over {count} calls. Context is piling
+    up. Summarize or drop old messages before it hits the limit.
+
+- id: tool-cycle
+  kind: rule
+  group: loop
+  title: Two or more tools are going around in a circle
+  rule:
+    type: cycle
+    span: { type: [tool, mcp_tool] }
+    max_period: 3
+    min_cycles: 4
+  guidance: >-
+    The last calls repeat {pattern} {count} times and keep returning the same results, even if the
+    inputs differ. This is not making progress. Stop, change the approach or ask the user.
+
+- id: run-failed
+  kind: rule
+  group: ending
+  title: Run ended with an error
+  rule:
+    type: run_end
+    when: error
+
+- id: empty-final-answer
+  kind: rule
+  group: ending
+  title: Run ended without an answer
+  rule:
+    type: run_end
+    when: no_output

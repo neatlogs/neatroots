@@ -1,0 +1,157 @@
+{
+ "resourceSpans": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "example-imported-otlp"
+      }
+     }
+    ]
+   },
+   "scopeSpans": [
+    {
+     "scope": {
+      "name": "openinference.instrumentation.openai"
+     },
+     "spans": [
+      {
+       "traceId": "bb398732484bc3efdf86f3794b24c006",
+       "spanId": "a0c7a38229ded435",
+       "name": "plan-trip",
+       "kind": 1,
+       "startTimeUnixNano": "1791540754822840064",
+       "endTimeUnixNano": "1791540755722840064",
+       "attributes": [
+        {
+         "key": "openinference.span.kind",
+         "value": {
+          "stringValue": "CHAIN"
+         }
+        },
+        {
+         "key": "input.value",
+         "value": {
+          "stringValue": "Plan a weekend in Kyoto"
+         }
+        },
+        {
+         "key": "output.value",
+         "value": {
+          "stringValue": "Day 1: Fushimi Inari. Day 2: Arashiyama."
+         }
+        }
+       ],
+       "status": {
+        "code": 1
+       }
+      },
+      {
+       "traceId": "bb398732484bc3efdf86f3794b24c006",
+       "spanId": "cd870acc3556914f",
+       "parentSpanId": "a0c7a38229ded435",
+       "name": "ChatCompletion",
+       "kind": 3,
+       "startTimeUnixNano": "1791540754832840064",
+       "endTimeUnixNano": "1791540755422840064",
+       "attributes": [
+        {
+         "key": "openinference.span.kind",
+         "value": {
+          "stringValue": "LLM"
+         }
+        },
+        {
+         "key": "llm.model_name",
+         "value": {
+          "stringValue": "gpt-4o-mini"
+         }
+        },
+        {
+         "key": "llm.input_messages.0.message.role",
+         "value": {
+          "stringValue": "user"
+         }
+        },
+        {
+         "key": "llm.input_messages.0.message.content",
+         "value": {
+          "stringValue": "Plan a weekend in Kyoto"
+         }
+        },
+        {
+         "key": "llm.output_messages.0.message.role",
+         "value": {
+          "stringValue": "assistant"
+         }
+        },
+        {
+         "key": "llm.output_messages.0.message.content",
+         "value": {
+          "stringValue": "Day 1: Fushimi Inari. Day 2: Arashiyama."
+         }
+        },
+        {
+         "key": "llm.token_count.prompt",
+         "value": {
+          "intValue": "22"
+         }
+        },
+        {
+         "key": "llm.token_count.completion",
+         "value": {
+          "intValue": "14"
+         }
+        }
+       ],
+       "status": {
+        "code": 1
+       }
+      },
+      {
+       "traceId": "bb398732484bc3efdf86f3794b24c006",
+       "spanId": "bbd5058570ef49e3",
+       "parentSpanId": "a0c7a38229ded435",
+       "name": "weather",
+       "kind": 1,
+       "startTimeUnixNano": "1791540755432840064",
+       "endTimeUnixNano": "1791540755702840064",
+       "attributes": [
+        {
+         "key": "openinference.span.kind",
+         "value": {
+          "stringValue": "TOOL"
+         }
+        },
+        {
+         "key": "tool.name",
+         "value": {
+          "stringValue": "weather"
+         }
+        },
+        {
+         "key": "input.value",
+         "value": {
+          "stringValue": "{\"city\": \"Kyoto\"}"
+         }
+        },
+        {
+         "key": "output.value",
+         "value": {
+          "stringValue": "{\"error\": \"rate limited\"}"
+         }
+        }
+       ],
+       "status": {
+        "code": 2,
+        "message": "rate limited"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

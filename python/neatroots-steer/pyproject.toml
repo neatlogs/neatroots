@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "neatroots-steer"
+version = "0.2.9"
+description = "Steering hook for neatroots: adds neatroots' guidance notes to your agent's next LLM call and gives it a check_my_work tool."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["agents", "llm", "observability", "neatlogs", "neatroots", "opentelemetry"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+otel = ["opentelemetry-api>=1.20"]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/neatlogs/neatroots"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/neatroots_steer"]

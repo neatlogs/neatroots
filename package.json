@@ -1,0 +1,16 @@
+{
+  "name": "neatroots",
+  "private": true,
+  "description": "neatroots: local, private checks for AI agents while they run",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "build": "pnpm --filter @neatlogs/neatroots-ui build && pnpm --filter @neatlogs/neatroots build && pnpm --filter @neatlogs/neatroots-steer build",
+    "dev": "pnpm --filter @neatlogs/neatroots dev",
+    "test": "pnpm --filter @neatlogs/neatroots test && pnpm --filter @neatlogs/neatroots-steer test",
+    "typecheck": "pnpm -r typecheck"
+  }
+}

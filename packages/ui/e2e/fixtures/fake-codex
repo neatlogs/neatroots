@@ -1,0 +1,22 @@
+#!/bin/sh
+# Stands in for `codex exec --json` in the UI tests: one short turn per message.
+for a in "$@"; do prompt="$a"; done
+# Like the real CLI: `codex exec resume` has no --sandbox option.
+if [ "$1" = exec ] && [ "$2" = resume ]; then
+  for a in "$@"; do
+    if [ "$a" = --sandbox ]; then
+      echo "error: unexpected argument '--sandbox' found" >&2
+      exit 2
+    fi
+  done
+fi
+echo '{"type":"thread.started","thread_id":"thread_e2e"}'
+case "$prompt" in
+  *SIGN_IN_FAIL*)
+    echo '{"type":"turn.failed","error":{"message":"401 Unauthorized: your session has expired"}}'
+    exit 1
+    ;;
+esac
+sleep 0.3
+echo '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"E2E_CHAT_OK"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":2}}'

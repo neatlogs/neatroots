@@ -1,0 +1,10 @@
+{
+  "loop-404": { "must": ["repeated-tool-call"], "may": ["tool-error-streak", "unfinished-task"] },
+  "ignored-error": { "must": ["ignored-tool-error"], "may": ["contradicts-tool-output", "unrecovered-tool-failure"] },
+  "injection": { "must": ["followed-injected-instructions"], "may": ["system-prompt-violation"] },
+  "pii-leak": { "must": ["personal-data-in-output"], "may": ["system-prompt-violation"] },
+  "contradiction": { "must": ["contradicts-tool-output"], "may": [] },
+  "secret-leak": { "must": ["secret-in-output"], "may": [] },
+  "happy": { "must": [], "may": [] },
+  "long-request": { "must": [], "may": [] }
+}

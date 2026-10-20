@@ -1,0 +1,46 @@
+<!doctype html>
+<!--
+  A front-end app sending traces to neatroots from the browser. This page uses fetch against the
+  Neatlogs HTTP trace API directly; with the Neatlogs Browser SDK (npm install neatlogs, then
+  import { Neatlogs } from "neatlogs/browser") pass endpoint: "http://localhost:4100" instead.
+
+  Open it from a local server (python3 -m http.server 8000) and click the button.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>neatroots browser example</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; color: #18181b; }
+      button { padding: 0.5rem 1rem; border-radius: 0.5rem; border: 1px solid #d4d4d8; background: #fff; cursor: pointer; }
+      pre { background: #f4f4f5; padding: 0.75rem; border-radius: 0.5rem; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>Send a trace from the browser</h1>
+    <p>Simulates a chat widget answering a question, then sends the trace to neatroots.</p>
+    <button id="send">Ask the widget</button>
+    <pre id="out"></pre>
+    <script type="module">
+      // Another neatroots? Open this page with ?endpoint=http://localhost:4200
+      const ENDPOINT = new URLSearchParams(location.search).get("endpoint") ?? "http://localhost:4100";
+      document.getElementById("send").onclick = async () => {
+        const started = new Date();
+        const question = "Do you ship to Canada?";
+        const answer = "Yes, we ship to Canada in 5 to 7 business days.";
+        const trace = {
+          name: "chat-widget",
+          project: "example-browser",
+          session_id: sessionStorage.getItem("sid") ?? (sessionStorage.setItem("sid", crypto.randomUUID()), sessionStorage.getItem("sid")),
+          input: question,
+          output: answer,
+          start: started.toISOString(),
+          children: [{ name: "answer", kind: "LLM", model: "gpt-4o-mini", input: question, output: answer, tokens: { prompt: 18, completion: 14 }, duration_ms: 420 }],
+        };
+        const res = await fetch(`${ENDPOINT}/v1/trace`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer neatroots-local" }, body: JSON.stringify(trace) });
+        document.getElementById("out").textContent = `${res.status} ${await res.text()}`;
+      };
+    </script>
+  </body>
+</html>

@@ -1,0 +1,88 @@
+name: Tester report
+description: How a session with neatroots went (docs/tester-guide.md)
+title: "Tester report: "
+labels: ["tester-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying neatroots. Please don't paste API keys or customer data from your runs.
+  - type: input
+    id: machine
+    attributes:
+      label: Machine and setup
+      description: Machine, OS, the LLM neatroots used, your coding agent
+      placeholder: M3 Pro 36 GB, macOS 26 · Ollama qwen3:8b · Claude Code
+    validations:
+      required: true
+  - type: textarea
+    id: install
+    attributes:
+      label: Install
+      description: Did it work? How long did it take? Did you download Laya or choose Jev cloud, and was the reason for the choice clear? Log lines from ~/.neatroots/install.log if it failed.
+    validations:
+      required: true
+  - type: textarea
+    id: samples
+    attributes:
+      label: Samples
+      description: Which of the six problems were caught? Any false alarm on `happy`?
+  - type: textarea
+    id: agent
+    attributes:
+      label: Your agent
+      description: Framework and how it sends runs. Real problems found, false alarms, misses.
+  - type: textarea
+    id: before-after
+    attributes:
+      label: Before and after
+      description: How you debugged a bad run before, and how long it took. How long the same kind of problem took with neatroots. Did your coding agent fix it in one go?
+    validations:
+      required: true
+  - type: dropdown
+    id: understood
+    attributes:
+      label: I understood what went wrong in a run without reading the raw trace
+      options: ["5 (strongly agree)", "4", "3", "2", "1 (strongly disagree)", "Didn't try"]
+    validations:
+      required: true
+  - type: dropdown
+    id: found
+    attributes:
+      label: neatroots found problems I would have missed
+      options: ["5 (strongly agree)", "4", "3", "2", "1 (strongly disagree)", "Didn't try"]
+    validations:
+      required: true
+  - type: dropdown
+    id: false-alarms
+    attributes:
+      label: False alarms were rare
+      options: ["5 (strongly agree)", "4", "3", "2", "1 (strongly disagree)", "Didn't try"]
+    validations:
+      required: true
+  - type: dropdown
+    id: replay
+    attributes:
+      label: Replaying let me test ideas without changing code
+      options: ["5 (strongly agree)", "4", "3", "2", "1 (strongly disagree)", "Didn't try"]
+    validations:
+      required: true
+  - type: dropdown
+    id: coding-agent
+    attributes:
+      label: My coding agent fixed problems faster with neatroots than without
+      options: ["5 (strongly agree)", "4", "3", "2", "1 (strongly disagree)", "Didn't try"]
+    validations:
+      required: true
+  - type: dropdown
+    id: keep
+    attributes:
+      label: I would keep neatroots running while I build agents
+      options: ["5 (strongly agree)", "4", "3", "2", "1 (strongly disagree)"]
+    validations:
+      required: true
+  - type: textarea
+    id: confusing
+    attributes:
+      label: Confusing or slow
+      description: Anything in the app or the docs that wasn't obvious, or took more than a few seconds.
