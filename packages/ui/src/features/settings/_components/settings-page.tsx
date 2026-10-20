@@ -1,5 +1,6 @@
 import { AiBrain01Icon, CloudIcon, CommandLineIcon, Folder01Icon, Settings01Icon, Target02Icon } from "@hugeicons/core-free-icons";
 import type { Status } from "@/lib/api";
+import { AuditSection } from "./audit-section";
 import { AgentsSection } from "./agents-section";
 import { CloudSection } from "./cloud-section";
 import { DecisionSection } from "./decision-section";
@@ -14,6 +15,7 @@ const GROUPS: SettingsNavGroup[] = [
     items: [
       { id: "general", label: "General", icon: Settings01Icon },
       { id: "projects", label: "Projects", icon: Folder01Icon },
+      { id: "audit", label: "Audit", icon: Folder01Icon },
     ],
   },
   {
@@ -34,6 +36,7 @@ const GROUPS: SettingsNavGroup[] = [
 
 const PAGES: Record<string, { title: string; description: string }> = {
   general: { title: "General", description: "Where neatroots listens, where it keeps your runs, and for how long." },
+  audit: { title: "Audit", description: "Capture evidence, local archive protection and the limits of what is recorded." },
   projects: { title: "Projects", description: "Steering, cloud forwarding and replays, per agent." },
   models: { title: "LLM", description: "Plans which questions fit each agent, explains problems, writes notes for the agent and summarizes runs." },
   decisions: { title: "Decision model", description: "Answers each check's yes/no question with a probability." },
@@ -47,11 +50,13 @@ export function SettingsPage({ status, tab: raw }: { status?: Status; tab?: stri
   const page = PAGES[tab];
   return (
     <SettingsLayout groups={GROUPS} active={tab}>
-      <SettingsPageShell header={<SettingsPageHeader icon={icon} title={page.title} description={page.description} />} contentWidth={tab === "projects" || tab === "agents" ? "full" : "form"}>
+      <SettingsPageShell header={<SettingsPageHeader icon={icon} title={page.title} description={page.description} />} contentWidth={tab === "projects" || tab === "agents" || tab === "audit" ? "full" : "form"}>
         {!status ? (
           <SettingsLoading />
         ) : tab === "general" ? (
           <GeneralSection status={status} />
+        ) : tab === "audit" ? (
+          <AuditSection status={status} />
         ) : tab === "projects" ? (
           <ProjectsSection hooks={status.steering.hooks_connected} steerPython={status.install?.steer_python} steerTs={status.install?.steer_ts} />
         ) : tab === "models" ? (

@@ -9,7 +9,7 @@ import { hardwareTier, llmErrorMessage } from "../models/llm.js";
 import { regexProblem } from "../util/regex.js";
 import { allowedEndpoint } from "../relay/endpoint.js";
 import { RedactionPatternError } from "../relay/redact.js";
-import { projectSettings, type SteeringMode } from "../config.js";
+import { projectSettings, type RootsConfig, type SteeringMode } from "../config.js";
 import { getCloudKey, setCloudKey, deleteCloudKey, getCloudToken, getSecret } from "../relay/keychain.js";
 import { mountModelsApi } from "./api-models.js";
 import { mountChecksApi } from "./api-checks.js";
@@ -25,6 +25,7 @@ import { loadTrace } from "../engine/trace.js";
 import { UnknownSpanError } from "../engine/engine.js";
 import type { RunRow } from "../types.js";
 import { VERSION } from "../version.js";
+import { mountAuditApi } from "./api-audit.js";
 
 export { checkFromInput } from "./api-checks.js";
 
@@ -110,6 +111,7 @@ function projects(roots: Roots) {
 
 
 export function mountApi(app: Hono, roots: Roots): void {
+  mountAuditApi(app, roots);
   const engine = roots.engine;
   mountModelsApi(app, roots);
   mountChecksApi(app, roots);
@@ -146,6 +148,7 @@ export function mountApi(app: Hono, roots: Roots): void {
         classifier: { backend: roots.config.classifier.backend, baseUrl: roots.config.classifier.baseUrl, model: roots.config.classifier.model },
         budgets: roots.config.budgets,
         retention: roots.config.retention,
+        audit: roots.config.audit,
         grpc_port: roots.config.grpcPort,
       },
     });
@@ -187,7 +190,8 @@ export function mountApi(app: Hono, roots: Roots): void {
   });
 
   app.delete("/api/runs/:traceId", (c) => {
-    roots.store.deleteRun(c.req.param("traceId"));
+    try { roots.store.deleteRun(c.req.param("traceId")); }
+    catch (e) { return err(c, 409, (e as Error).message); }
     if (roots.focus?.trace_id === c.req.param("traceId")) roots.focus = null;
     return c.json({ ok: true });
   });
@@ -264,6 +268,9 @@ export function mountApi(app: Hono, roots: Roots): void {
       cloud_endpoint?: string;
       redact_patterns?: string[];
       check_dir?: string;
+      audit_enabled?: boolean;
+      audit_directory?: string;
+      audit?: boolean | null;
       retention_days?: number;
       retention_max_gb?: number;
     }>(c);
@@ -272,9 +279,12 @@ export function mountApi(app: Hono, roots: Roots): void {
     const inRange = (v: unknown, min: number, max: number, minOpen = false) => typeof v === "number" && Number.isFinite(v) && (minOpen ? v > min : v >= min) && v <= max;
     if (b.retention_days !== undefined && !inRange(b.retention_days, 1, 3650)) return err(c, 400, "Keep runs for must be between 1 and 3650 days");
     if (b.retention_max_gb !== undefined && !inRange(b.retention_max_gb, 0, 10_000, true)) return err(c, 400, "Size cap must be more than 0 GB and at most 10000 GB");
-    for (const field of ["forward", "steering_enabled", "jev_cloud_enabled", "laya_enabled"] as const) {
+    for (const field of ["audit_enabled", "forward", "steering_enabled", "jev_cloud_enabled", "laya_enabled"] as const) {
       if (b[field] !== undefined && typeof b[field] !== "boolean") return err(c, 400, `${field} must be a boolean`);
     }
+    if (b.project !== undefined && (typeof b.project !== "string" || ["__proto__", "constructor", "prototype"].includes(b.project))) return err(c, 400, "invalid project name");
+    if (b.audit !== undefined && (typeof b.project !== "string" || !b.project.trim() || (b.audit !== null && typeof b.audit !== "boolean"))) return err(c, 400, "audit requires a project and must be boolean or null (inherit)");
+    if (b.audit_directory !== undefined && (typeof b.audit_directory !== "string" || (b.audit_directory !== "" && (!path.isAbsolute(b.audit_directory) || b.audit_directory.includes("\0") || b.audit_directory.split(/[\\/]/).includes(".."))))) return err(c, 400, "audit_directory must be an absolute directory without traversal, or empty for the default");
     if (b.project && b.steering !== undefined && !STEERING_MODES.includes(b.steering)) return err(c, 400, `steering must be one of ${STEERING_MODES.join(", ")}`);
     if (b.classifier_backend && !["auto", "laya", "jev", "jev-cloud", "llm"].includes(b.classifier_backend)) return err(c, 400, "classifier_backend must be auto, laya, jev, jev-cloud or llm");
     if (b.cloud_endpoint && !allowedEndpoint(b.cloud_endpoint)) return err(c, 400, "cloud endpoint must be an https://*.neatlogs.com URL (or localhost for testing)");
@@ -298,33 +308,52 @@ export function mountApi(app: Hono, roots: Roots): void {
       const state = checkDirState(checkDir);
       if (!state.ok && !state.creatable) return err(c, 400, `check_dir ${checkDir} ${state.reason}`);
     }
-    if (b.project) {
-      const cur = roots.config.projects[b.project] ?? {};
-      if (b.steering !== undefined) roots.steering.setMode(b.project, b.steering);
-      if (b.forward !== undefined) roots.config.projects[b.project] = { ...cur, ...roots.config.projects[b.project], forward: b.forward };
-    }
-    if (b.retention_days !== undefined) roots.config.retention.days = Math.round(b.retention_days);
-    if (b.retention_max_gb !== undefined) roots.config.retention.maxGb = b.retention_max_gb;
-    if (b.steering_enabled !== undefined) roots.config.steering.enabled = b.steering_enabled;
-    if (b.llm_model) roots.config.llm.model = b.llm_model;
-    if (b.llm_base_url) roots.config.llm.baseUrl = b.llm_base_url;
-    if (b.classifier_backend) roots.config.classifier.backend = b.classifier_backend;
-    if (b.classifier_url) roots.config.classifier.baseUrl = b.classifier_url;
-    if (b.jev_cloud_enabled !== undefined) roots.config.classifier.jevCloud.enabled = b.jev_cloud_enabled;
+    // Build and persist the candidate before changing live policy or emitting settings.
+    // Apply to existing nested objects afterwards: model clients retain those references.
+    const apply = (config: RootsConfig) => {
+      if (b.project) {
+        const cur = config.projects[b.project] ?? {};
+        if (b.steering !== undefined) config.projects[b.project] = { ...cur, steering: b.steering };
+        if (b.forward !== undefined) config.projects[b.project] = { ...cur, ...config.projects[b.project], forward: b.forward };
+      }
+      if (b.audit_enabled !== undefined) config.audit.enabled = b.audit_enabled;
+      if (b.audit_directory !== undefined) config.audit.directory = b.audit_directory;
+      if (b.project && b.audit !== undefined) {
+        const project = { ...(Object.hasOwn(config.projects, b.project) ? config.projects[b.project] : {}) };
+        if (b.audit === null) delete project.audit;
+        else project.audit = b.audit;
+        config.projects[b.project] = project;
+      }
+      if (b.retention_days !== undefined) config.retention.days = Math.round(b.retention_days);
+      if (b.retention_max_gb !== undefined) config.retention.maxGb = b.retention_max_gb;
+      if (b.steering_enabled !== undefined) config.steering.enabled = b.steering_enabled;
+      if (b.llm_model) config.llm.model = b.llm_model;
+      if (b.llm_base_url) config.llm.baseUrl = b.llm_base_url;
+      if (b.classifier_backend) config.classifier.backend = b.classifier_backend;
+      if (b.classifier_url) config.classifier.baseUrl = b.classifier_url;
+      if (b.jev_cloud_enabled !== undefined) config.classifier.jevCloud.enabled = b.jev_cloud_enabled;
+      if (b.laya_enabled !== undefined) {
+        config.classifier.laya.enabled = b.laya_enabled;
+      }
+      if (b.cloud_endpoint) config.cloud.endpoint = b.cloud_endpoint;
+      if (b.redact_patterns) config.cloud.redactPatterns = b.redact_patterns;
+      if (checkDir && !config.checkDirs.includes(checkDir)) {
+        // Validated above, and reload() records anything it can't load instead of throwing.
+        config.checkDirs.push(checkDir);
+      }
+    };
+    const candidate = structuredClone(roots.config);
+    apply(candidate);
+    roots.saveConfig(candidate);
+    const addedCheckDir = !!checkDir && !roots.config.checkDirs.includes(checkDir);
+    apply(roots.config);
+    if (b.project && b.steering !== undefined) roots.steering.setMode(b.project, b.steering);
     if (b.laya_enabled !== undefined) {
-      roots.config.classifier.laya.enabled = b.laya_enabled;
       if (b.laya_enabled) roots.startModels();
       else roots.laya.stop();
     }
     roots.decisions.reset();
-    if (b.cloud_endpoint) roots.config.cloud.endpoint = b.cloud_endpoint;
-    if (b.redact_patterns) roots.config.cloud.redactPatterns = b.redact_patterns;
-    if (checkDir && !roots.config.checkDirs.includes(checkDir)) {
-      // Validated above, and reload() records anything it can't load instead of throwing.
-      roots.config.checkDirs.push(checkDir);
-      roots.checks.reload();
-    }
-    roots.saveConfig();
+    if (addedCheckDir) roots.checks.reload();
     if (b.llm_model || b.llm_base_url) await roots.llm.probe(true);
     roots.bus.emit("settings", { project: b.project });
     return c.json({ ok: true, projects: projects(roots) });

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
@@ -10,6 +11,8 @@ export interface ProjectSettings {
   steering: SteeringMode;
   /** Re-export this project's runs to Neatlogs Cloud as they finish. */
   forward: boolean;
+  /** Inherit global audit.enabled when omitted in project config. */
+  audit: boolean;
 }
 
 export interface RootsConfig {
@@ -73,6 +76,7 @@ export interface RootsConfig {
     notesPerRun: number;
     summariesPerRun: number;
   };
+  audit: { enabled: boolean; directory: string };
   retention: {
     days: number;
     maxGb: number;
@@ -149,6 +153,7 @@ export function defaultConfig(): RootsConfig {
       notesPerRun: 3,
       summariesPerRun: 1,
     },
+    audit: { enabled: false, directory: "" },
     retention: { days: 14, maxGb: 5 },
     steering: { enabled: true, maxNotesPerRun: 3, gateWaitMs: 300 },
     cloud: { endpoint: "https://ingest.neatlogs.com", appUrl: "https://app.neatlogs.com", redactPatterns: [] },
@@ -234,15 +239,27 @@ export function loadConfig(): RootsConfig {
   cfg.retention.days = Math.min(Math.round(cfg.retention.days), 3650);
   if (!Number.isFinite(cfg.retention.maxGb) || cfg.retention.maxGb <= 0) cfg.retention.maxGb = 5;
   cfg.retention.maxGb = Math.min(cfg.retention.maxGb, 10_000);
+  cfg.audit.enabled = cfg.audit.enabled === true;
+  if (typeof cfg.audit.directory !== "string") cfg.audit.directory = "";
   return cfg;
 }
 
 export function saveConfig(cfg: RootsConfig, file = configPath()): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, YAML.stringify(cfg), "utf8");
+  // A failed or partial write must leave the previous saved policy intact.
+  const pending = `${file}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(pending, YAML.stringify(cfg), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    const fd = fs.openSync(pending, "r+");
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(pending, file);
+  } finally {
+    if (fs.existsSync(pending)) fs.unlinkSync(pending);
+  }
 }
 
 export function projectSettings(cfg: RootsConfig, project: string): ProjectSettings {
-  const p = cfg.projects[project] ?? {};
-  return { steering: p.steering ?? "off", forward: p.forward ?? false };
+  const p = Object.hasOwn(cfg.projects, project) ? cfg.projects[project] : undefined;
+  const audit = p && Object.hasOwn(p, "audit") ? p.audit : undefined;
+  return { steering: p?.steering ?? "off", forward: p?.forward ?? false, audit: typeof audit === "boolean" ? audit : cfg.audit.enabled };
 }
