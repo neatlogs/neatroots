@@ -37,6 +37,8 @@ export interface Span {
   span_kind: string;
   start_ms: number;
   end_ms: number;
+  /** Raw OTLP start time, retained even when stored millisecond times are clamped. */
+  start_ns?: string;
   /** The raw OTLP end time; "0" means the span hasn't ended. */
   end_ns?: string;
   duration_ms: number;

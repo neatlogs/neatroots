@@ -4,6 +4,8 @@ import { Icon } from "@/components/ui/icon";
 import type { Span } from "@/lib/api";
 import { dur } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { analyzeTiming, recordedInterval } from "./timeline-analysis";
+import { TimingBreakdown } from "./timing-breakdown";
 import { isGuidance, KIND_ICON, treeOrder } from "../trace-tree";
 
 const BAR: Record<string, string> = {
@@ -15,9 +17,10 @@ const BAR: Record<string, string> = {
   AGENT: "bg-foreground-subtle",
 };
 
+/** Choose at most nine axis marks for a positive display extent, including long recorded runs. */
 function ticks(total: number): number[] {
   const steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000];
-  const step = steps.find((s) => total / s <= 8) ?? 600_000;
+  const step = steps.find((s) => total / s <= 8) ?? Math.ceil(total / 8 / 600_000) * 600_000;
   const out: number[] = [];
   for (let t = 0; t <= total; t += step) out.push(t);
   return out;
@@ -25,24 +28,26 @@ function ticks(total: number): number[] {
 
 /**
  * The run on a time axis, one row per span in tree order: where time went, what ran in
- * parallel, and what waited. Zoom stretches the axis; the box scrolls both ways.
+ * parallel, and gaps in recorded activity. Zoom stretches the axis; the box scrolls both ways.
  */
 export function TimelineView({ spans, flagged, selected, onSelect }: { spans: Span[]; flagged: Set<string>; selected?: string; onSelect: (id: string) => void }) {
   const rows = useMemo(() => treeOrder(spans), [spans]);
+  const analysis = useMemo(() => analyzeTiming(spans), [spans]);
   const [zoom, setZoom] = useState(1);
   if (!rows.length) return <p className="px-6 py-4 text-sm text-muted-foreground">Spans appear here as the agent runs.</p>;
-  const start = Math.min(...spans.map((s) => s.start_ms));
-  const total = Math.max(1, Math.max(...spans.map((s) => s.end_ms)) - start);
+  const start = analysis.start;
+  const total = analysis.total;
   const marks = ticks(total);
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="timeline">
       <div className="flex h-9 shrink-0 items-center justify-end gap-2 border-b border-border px-6 text-xs text-muted-foreground">
         <span className="mr-auto tabular-nums">
-          {spans.length} spans · {dur(total)}
+          {spans.length} spans · {analysis.rows.some((row) => row.interval) ? dur(analysis.elapsed) : "Timing unavailable"}
         </span>
         <label htmlFor="tl-zoom">Zoom</label>
         <input id="tl-zoom" type="range" min={1} max={8} step={0.5} value={zoom} onChange={(e) => setZoom(Number(e.target.value))} className="w-28 accent-foreground" />
       </div>
+      <TimingBreakdown spans={spans} onSelect={onSelect} />
       <div className="min-h-0 flex-1 overflow-auto">
         <div className="grid min-w-full grid-cols-[16rem_minmax(0,1fr)]" style={{ width: `calc(16rem + ${zoom} * (100% - 16rem))` }}>
           <div className="sticky top-0 left-0 z-20 h-7 border-b border-border bg-surface-subtle" />
@@ -59,8 +64,9 @@ export function TimelineView({ spans, flagged, selected, onSelect }: { spans: Sp
             const failed = s.status_code === 2;
             const guidance = isGuidance(s);
             const isSel = selected === s.span_id;
-            const left = ((s.start_ms - start) / total) * 100;
-            const width = Math.max(0.3, (s.duration_ms / total) * 100);
+            const interval = recordedInterval(s);
+            const left = interval ? ((interval.start - start) / total) * 100 : 0;
+            const width = interval ? Math.max(0.3, ((interval.end - interval.start) / total) * 100) : 0;
             const rowCls = cn("h-8 cursor-pointer transition-colors", isSel ? "bg-surface-active" : "hover:bg-surface-subtle");
             return (
               <div key={s.span_id} className="contents" onClick={() => onSelect(s.span_id)}>
@@ -74,7 +80,7 @@ export function TimelineView({ spans, flagged, selected, onSelect }: { spans: Sp
                     <span key={t} aria-hidden className="absolute inset-y-0 w-px bg-border/50" style={{ left: `${(t / total) * 100}%` }} />
                   ))}
                   <span
-                    title={`${s.tool_name ?? s.name} · ${dur(s.duration_ms)} · starts at ${dur(s.start_ms - start)}`}
+                    title={interval ? `${s.tool_name ?? s.name} · ${dur(interval.end - interval.start)} · starts at ${dur(interval.start - start)}` : "Timing unavailable"}
                     className={cn("absolute top-1/2 h-4 -translate-y-1/2 rounded-sm", failed ? "bg-danger-fg" : guidance ? "bg-brand-violet" : (BAR[s.span_kind] ?? "bg-muted-foreground/40"), isSel && "ring-2 ring-foreground/40")}
                     style={{ left: `${left}%`, width: `${Math.min(width, 100 - left)}%` }}
                   />
@@ -82,7 +88,7 @@ export function TimelineView({ spans, flagged, selected, onSelect }: { spans: Sp
                     className="absolute top-1/2 -translate-y-1/2 px-1 font-mono text-2xs whitespace-nowrap text-muted-foreground"
                     style={left + width > 85 ? { right: `${100 - left}%` } : { left: `${left + width}%` }}
                   >
-                    {dur(s.duration_ms)}
+                    {interval ? dur(interval.end - interval.start) : "Timing unavailable"}
                   </span>
                 </div>
               </div>
