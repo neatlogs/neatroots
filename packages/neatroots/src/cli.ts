@@ -39,7 +39,7 @@ program
   .option("--no-engine", "collect and show runs without running checks")
   .option("--no-laya", "do not install or start Laya (the local decision model)")
   .action(async (opts) => {
-    const roots = new Roots({ noEngine: opts.engine === false });
+    const roots = new Roots({ noEngine: opts.engine === false, recoverBlobs: true });
     if (opts.laya === false) roots.config.classifier.laya.enabled = false;
     // Laya is a big download: ask once, when someone is at the terminal, before downloading it.
     if (shouldAskForLaya(roots.config, roots.laya.installed()) && process.stdin.isTTY && process.stdout.isTTY) {

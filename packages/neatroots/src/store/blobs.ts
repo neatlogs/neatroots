@@ -66,6 +66,34 @@ export class BlobStore {
     return total;
   }
 
+  /** Owner recovery must exclude ingest writers across its reference snapshot and this scan. */
+  reclaimExcept(used: ReadonlySet<string>): number {
+    let removed = 0;
+    if (!fs.lstatSync(this.dir).isDirectory()) throw new Error("blob recovery requires a real directory");
+    for (const sub of fs.readdirSync(this.dir)) {
+      if (!/^[0-9a-f]{2}$/.test(sub)) continue;
+      const dir = path.join(this.dir, sub);
+      if (!fs.lstatSync(dir).isDirectory()) continue;
+      for (const name of fs.readdirSync(dir)) {
+        const final = /^[0-9a-f]{62}$/.test(name);
+        // Both published atomic writer formats: pid + 4-byte or 16-byte random suffix.
+        const temporary = /^[0-9a-f]{62}\.[1-9][0-9]*\.(?:[0-9a-f]{8}|[0-9a-f]{32})\.tmp$/.test(name);
+        if ((!final && !temporary) || (final && used.has(sub + name))) continue;
+        const file = path.join(dir, name);
+        if (!fs.lstatSync(file).isFile()) continue;
+        fs.unlinkSync(file);
+        removed++;
+      }
+      try {
+        fs.rmdirSync(dir);
+      } catch (err) {
+        // Unknown files and referenced payloads intentionally keep their directory alive.
+        if ((err as NodeJS.ErrnoException).code !== "ENOTEMPTY" && (err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      }
+    }
+    return removed;
+  }
+
   /** Replaces large string values with blob references; returns the shas used. */
   offload(kvs: KeyValue[], used: Set<string>): KeyValue[] {
     return kvs.map((kv) => ({ key: kv.key, value: this.offloadValue(kv.value, used) }));

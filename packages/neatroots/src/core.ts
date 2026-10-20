@@ -21,6 +21,8 @@ export interface RootsOptions {
   config?: RootsConfig;
   /** Skip the check engine (used by tests and read-only tools). */
   noEngine?: boolean;
+  /** The ingest owner recovers crash leftovers before starting any services. */
+  recoverBlobs?: boolean;
 }
 
 /** The running neatroots instance: config, store, models, checks, steering and the event bus every part shares. */
@@ -52,6 +54,10 @@ export class Roots {
     this.home = opts.home ?? rootsHome();
     this.config = opts.config ?? loadConfig();
     this.store = new Store(path.join(this.home, "data"));
+    if (opts.recoverBlobs) {
+      try { this.store.recoverBlobs(); }
+      catch (err) { this.store.close(); throw err; }
+    }
     this.llm = new LlmClient(this.config.llm, { secret: (n) => getSecret(n), redactPatterns: () => this.config.cloud.redactPatterns });
     this.laya = new LayaManager(this.home, this.config.classifier);
     this.decisions = new DecisionModel(

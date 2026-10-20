@@ -440,6 +440,24 @@ export class Store {
     this.db.close();
   }
 
+  /** Owner startup only, before accepting ingest; secondary Store connections never recover files. */
+  recoverBlobs(): number {
+    return this.db.transaction(() => {
+      const used = new Set<string>();
+      const rows = this.db.prepare("SELECT blobs FROM spans WHERE blobs IS NOT NULL").all() as { blobs: string }[];
+      for (const row of rows) {
+        const hashes: unknown = JSON.parse(row.blobs);
+        if (!Array.isArray(hashes) || hashes.some((sha) => typeof sha !== "string" || !/^[0-9a-f]{64}$/.test(sha))) {
+          throw new Error("blob recovery aborted: invalid span blob references");
+        }
+        for (const sha of hashes) used.add(sha);
+      }
+      // Ingest acquires the SQLite writer lock in upsertResource before writing any payload.
+      // Hold that lock across both the committed reference snapshot and filesystem removal.
+      return this.blobs.reclaimExcept(used);
+    }).immediate();
+  }
+
   /** Adds columns introduced after a database was first created. */
   private migrate(): void {
     const ensure = (table: string, column: string, type: string) => {
