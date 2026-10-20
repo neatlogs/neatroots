@@ -144,3 +144,12 @@
   rule:
     type: run_end
     when: no_output
+
+- id: cache-not-reused
+  kind: rule
+  title: The prompt cache is written repeatedly but not reused
+  rule: { type: cache_reuse, min_calls: 3 }
+  guidance: >-
+    Cache writes outweigh reads after warmup. Something early in the prompt may change on every
+    call. Keep the system prompt, tools and earlier turns identical between calls so the cache
+    can be reused. Check whether these calls intentionally use different cache routes or prompts.

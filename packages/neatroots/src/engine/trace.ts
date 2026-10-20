@@ -18,6 +18,9 @@ export interface SpanInfo {
   error?: string;
   toolName?: string;
   model?: string;
+  provider?: string;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   tokens?: number;
   input?: Plain;
   output?: Plain;
@@ -89,6 +92,9 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
       error: v.error,
       toolName: v.toolName,
       model: v.model,
+      provider: v.provider,
+      cacheReadTokens: v.cacheReadTokens,
+      cacheWriteTokens: v.cacheWriteTokens,
       tokens: v.totalTokens,
       input: v.input,
       output: v.output,
