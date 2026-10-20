@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { recordEvaluation, type EvaluationContext } from "./evaluation-context.js";
 import type { RuleCheck } from "./types.js";
 import { finalOutput, selectSpans, type SpanInfo, type TraceSnapshot } from "../engine/trace.js";
 import { preview } from "../semantics/view.js";
@@ -80,10 +82,11 @@ const MATCH_CHARS = 200_000;
  * `\"error\":` and a pattern written for plain output would never see it. All texts share one
  * MATCH_CHARS budget, so the text items, which are the tool's real output, are read first.
  */
-function matchTexts(v: unknown): string[] {
+function matchTexts(v: unknown, context?: EvaluationContext): string[] {
   const texts: string[] = [];
   let budget = MATCH_CHARS;
   const add = (text: string): void => {
+    if (text.length > budget) recordEvaluation(context, "unevaluated", "clipped_match_evidence");
     if (budget <= 0) return;
     const clipped = text.slice(0, budget);
     texts.push(clipped);
@@ -106,8 +109,10 @@ function matchTexts(v: unknown): string[] {
  * a finding later resolves. `fresh` names the spans that just arrived: a streak they complete
  * fires even if a later span in the same batch already ended it.
  */
-export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, untrusted = false): RuleHit | null {
+export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, untrusted = false, context?: EvaluationContext): RuleHit | null {
   const r = check.rule;
+  const unavailable = (reason: string): null => { recordEvaluation(context, "unevaluated", reason); return null; };
+
   switch (r.type) {
     case "repeat": {
       const spans = selectSpans(t.spans, r.span).sort((a, b) => a.endMs - b.endMs);
@@ -191,7 +196,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
     }
     case "threshold": {
       const run = t.run;
-      if (!run) return null;
+      if (!run) return unavailable("missing_run");
       const value =
         r.metric === "duration_ms"
           ? (run.ended_ms ?? run.last_span_ms ?? 0) - (run.started_ms ?? 0)
@@ -203,11 +208,14 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
     }
     case "match": {
       const key = `${r.flags ?? "i"}/${r.pattern}`;
-      if (untrusted && tooSlow.has(key)) return null;
+      const quarantine = context?.tooSlow ?? tooSlow;
+      const memoState = context?.matchMemo ?? matchMemo;
+      if (untrusted && quarantine.has(key)) { recordEvaluation(context, "error", "regex_quarantined"); return null; }
       let re: RegExp;
       try {
         re = new RegExp(r.pattern, r.flags ?? "i");
       } catch {
+        recordEvaluation(context, "error", "invalid_regex");
         return null;
       }
       // Library patterns are known to be fast. Patterns from checks people (or coding agents) write
@@ -221,23 +229,27 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       };
       let hits: SpanInfo[];
       try {
-        hits = selectSpans(t.spans, r.span).filter((s) => {
+        const candidates = selectSpans(t.spans, r.span);
+        if (!candidates.length) recordEvaluation(context, "unevaluated", "no_match_targets");
+        hits = candidates.filter((s) => {
           const v = r.field === "input" ? s.input : r.field === "output" ? s.output : r.field === "error" ? s.error : s.name;
-          if (v === undefined || v === null) return false;
-          const texts = matchTexts(v);
+          if (v === undefined || v === null) { recordEvaluation(context, "unevaluated", "missing_match_field"); return false; }
+          const texts = matchTexts(v, context);
           if (!untrusted) return texts.some(test);
           const memo = `${key}\u0000${t.run?.trace_id ?? ""}\u0000${s.id}\u0000${r.field}\u0000${texts.reduce((n, x) => n + x.length, 0)}`;
-          const known = matchMemo.get(memo);
+          const identity = context ? `${memo}\u0000${createHash("sha256").update(JSON.stringify(texts)).digest("hex")}` : memo;
+          const known = memoState.get(identity);
           if (known !== undefined) return known;
           const found = texts.some(test);
-          if (matchMemo.size >= 50_000) matchMemo.clear();
-          matchMemo.set(memo, found);
+          if (memoState.size >= 50_000) memoState.clear();
+          memoState.set(identity, found);
           return found;
         });
       } catch (e) {
         if (e !== TIMED_OUT) throw e;
-        tooSlow.add(key);
-        log.warn(`check ${check.id}: its pattern took over ${MATCH_MS} ms on one span, so it is skipped until neatroots restarts. Simplify the regex (overlapping alternatives in a repeat, like (a|aa)+, are slow).`);
+        quarantine.add(key);
+        recordEvaluation(context, "error", "regex_timeout");
+        if (!context) log.warn(`check ${check.id}: its pattern took over ${MATCH_MS} ms on one span, so it is skipped until neatroots restarts. Simplify the regex (overlapping alternatives in a repeat, like (a|aa)+, are slow).`);
         return null;
       }
       if (!hits.length) return null;
@@ -265,11 +277,11 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
     }
     case "unrecovered_error": {
       // Only meaningful once the run is over: until then the agent may still retry.
-      if (!atEnd || !t.run) return null;
+      if (!atEnd || !t.run) return unavailable("missing_completed_run");
       // A run that failed or was cut short is already reported by run-failed.
       if (t.run.status === "error" || t.run.interrupted) return null;
       const out = finalOutput(t);
-      if (!out || /^("?\s*"?|null|\{\}|\[\])$/.test(out.trim())) return null;
+      if (!out || /^("?\s*"?|null|\{\}|\[\])$/.test(out.trim())) return unavailable("missing_final_output");
       // An answer that says something failed is the agent being honest, not a problem.
       if (ADMITS_FAILURE.test(out.replace(APOSTROPHES, "'").replace(DENIES_FAILURE, " "))) return null;
       const spans = selectSpans(t.spans, r.span ?? { type: ["tool", "mcp_tool"] }).sort((a, b) => a.endMs - b.endMs || a.seq - b.seq);
@@ -294,7 +306,9 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       };
     }
     case "growth": {
-      const spans = selectSpans(t.spans, r.span)
+      const candidates = selectSpans(t.spans, r.span);
+      if (!candidates.length || candidates.some((s) => s.tokens === undefined)) recordEvaluation(context, "unevaluated", "missing_token_evidence");
+      const spans = candidates
         .filter((s) => (s.tokens ?? 0) > 0)
         .sort((a, b) => a.endMs - b.endMs);
       if (spans.length < r.min_calls) return null;
@@ -338,7 +352,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       };
     }
     case "run_end": {
-      if (!atEnd || !t.run) return null;
+      if (!atEnd || !t.run) return unavailable("missing_completed_run");
       const root = t.spans.find((s) => !s.parentId);
       if (r.when === "error" && t.run.status === "error") {
         return { firing: true, evidenceSpanIds: root ? [root.id] : [], params: { error: clip(root?.error ?? "error", 200) } };
@@ -346,6 +360,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       if (r.when === "interrupted" && t.run.interrupted) {
         return { firing: true, evidenceSpanIds: root ? [root.id] : [], params: { reason: t.run.termination_reason ?? "interrupted" } };
       }
+      if (r.when === "no_output" && !root) return unavailable("missing_root");
       if (r.when === "no_output" && root) {
         const out = finalOutput(t);
         const empty = !out || /^("?\s*"?|null|\{\}|\[\])$/.test(out.trim());
