@@ -13,6 +13,9 @@
  */
 
 import { SteeredRequest } from "./request.js";
+import { instrumentRequest, type RequestTelemetry } from "./telemetry.js";
+import { wrapClient } from "./wrap-client.js";
+export type { RequestTelemetry } from "./telemetry.js";
 
 export const GUIDANCE_OPEN = "<neatroots-guidance>";
 export const GUIDANCE_CLOSE = "</neatroots-guidance>";
@@ -331,77 +334,52 @@ const overrideAnthropic: Override = (p, o) => ({ ...p, ...(o.model ? { model: o.
 
 // --------------------------------------------------------------------- wrap
 
-function wrapMethod(
-  owner: Record<string, unknown> | undefined,
-  name: string,
-  transform: (args: Record<string, unknown>, note: Note) => Record<string, unknown>,
-  override: Override = (p) => p,
-): void {
-  if (!owner) return;
-  const original = owner[name] as ((...a: unknown[]) => unknown) & { __neatroots?: boolean };
-  if (typeof original !== "function" || original.__neatroots) return;
-  const wrapped = function (this: unknown, ...args: unknown[]) {
-    const request = (async () => {
+export interface WrapOptions {
+  /** Public neatlogs module. Pass a raw provider client, not neatlogs.wrapOpenAI/Anthropic(client). */
+  telemetry?: RequestTelemetry;
+}
+
+function wrapProvider<T extends object>(client: T, provider: "openai" | "anthropic", options?: WrapOptions): T {
+  const config = options ? { ...options } : undefined;
+  return wrapClient(client, provider, config, (owner, original, args, path) => {
+    const prepared = (async () => {
+      const override = path === "responses.create" ? overrideResponses : provider === "anthropic" ? overrideAnthropic : overrideChat;
       const o = replayOverrides();
-      const params = o.model || o.system ? override((args[0] ?? {}) as Record<string, unknown>, o) : ((args[0] ?? {}) as Record<string, unknown>);
-      let next = params;
+      let next = o.model || o.system ? override((args[0] ?? {}) as Record<string, unknown>, o) : (args[0] ?? {}) as Record<string, unknown>;
       try {
         const note = await guidance();
-        if (note) next = transform({ ...params }, note);
+        if (note) {
+          if (path === "responses.create") {
+            const input = next.input;
+            if (typeof input === "string") next = { ...next, input: `${input}\n\n${guidanceBlock(note)}` };
+            else if (Array.isArray(input)) next = { ...next, input: [...input, { role: "user", content: guidanceBlock(note) }] };
+          } else {
+            const messages = (next.messages as Msg[]) ?? [];
+            // Wrappers have always created a user turn for a claimed note, even without prior messages.
+            const content = provider === "anthropic" ? [{ type: "text", text: guidanceBlock(note) }] : guidanceBlock(note);
+            next = { ...next, messages: messages.length
+              ? await (provider === "anthropic" ? applyAnthropic : applyMessages)(messages, note)
+              : [{ role: "user", content }] };
+          }
+        }
       } catch (err) {
         if (err instanceof NeatrootsHalt) throw err;
       }
-      // Box the SDK promise so awaiting guidance does not parse the provider response.
-      return { value: original.apply(owner, [next, ...args.slice(1)]) };
+      const invoke = () => original.apply(owner, [next, ...args.slice(1)]);
+      return config?.telemetry ? instrumentRequest(config.telemetry, provider, path, next, invoke) : { value: invoke() };
     })();
-    return new SteeredRequest(request);
-  } as typeof original;
-  wrapped.__neatroots = true;
-  owner[name] = wrapped;
+    return new SteeredRequest(prepared);
+  });
 }
 
-/** Wraps a method that builds a new client (`withOptions`) so the copy is wrapped too. */
-function wrapFactory(owner: Record<string, unknown> | undefined, name: string, wrap: (next: object) => unknown): void {
-  if (!owner) return;
-  const original = owner[name] as ((...a: unknown[]) => unknown) & { __neatroots?: boolean };
-  if (typeof original !== "function" || original.__neatroots) return;
-  const wrapped = function (this: unknown, ...args: unknown[]) {
-    return wrap(original.apply(owner, args) as object);
-  } as typeof original;
-  wrapped.__neatroots = true;
-  owner[name] = wrapped;
+/** Returns a non-mutating steering facade; optional public telemetry records each prepared call once. */
+export function wrapOpenAI<T extends object>(client: T, options?: WrapOptions): T {
+  return wrapProvider(client, "openai", options);
 }
 
-/** Adds neatroots guidance to an OpenAI client (chat.completions.create/parse, responses.create/parse and withOptions), in place. */
-export function wrapOpenAI<T extends object>(client: T): T {
-  const c = client as unknown as { chat?: { completions?: Record<string, unknown> }; responses?: Record<string, unknown> };
-  wrapMethod(c.chat?.completions, "create", (p, note) => {
-    const msgs = (p.messages as Msg[]) ?? [];
-    const last = msgs[msgs.length - 1];
-    const next = last?.role === "user" ? [...msgs.slice(0, -1), appendText(last, guidanceBlock(note))] : [...msgs, { role: "user", content: guidanceBlock(note) }];
-    return { ...p, messages: next };
-  }, overrideChat);
-  wrapMethod(c.responses, "create", (p, note) => {
-    const input = p.input;
-    if (typeof input === "string") return { ...p, input: `${input}\n\n${guidanceBlock(note)}` };
-    if (Array.isArray(input)) return { ...p, input: [...input, { role: "user", content: guidanceBlock(note) }] };
-    return p;
-  }, overrideResponses);
-  wrapFactory(client as unknown as Record<string, unknown>, "withOptions", (next) => wrapOpenAI(next));
-  return client;
-}
-
-/** Adds neatroots guidance to an Anthropic client (messages.create and withOptions), in place. */
-export function wrapAnthropic<T extends object>(client: T): T {
-  const c = client as unknown as { messages?: Record<string, unknown> };
-  wrapMethod(c.messages, "create", (p, note) => {
-    const msgs = (p.messages as Msg[]) ?? [];
-    const last = msgs[msgs.length - 1];
-    const next = last?.role === "user" ? [...msgs.slice(0, -1), appendText(last, guidanceBlock(note))] : [...msgs, { role: "user", content: [{ type: "text", text: guidanceBlock(note) }] }];
-    return { ...p, messages: next };
-  }, overrideAnthropic);
-  wrapFactory(client as unknown as Record<string, unknown>, "withOptions", (next) => wrapAnthropic(next));
-  return client;
+/** Returns a non-mutating steering facade, including native messages.stream and client clones. */
+export function wrapAnthropic<T extends object>(client: T, options?: WrapOptions): T {
+  return wrapProvider(client, "anthropic", options);
 }
 
 /**

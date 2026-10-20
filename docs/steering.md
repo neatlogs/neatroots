@@ -31,9 +31,27 @@ TypeScript:
 import * as neatlogs from "neatlogs";
 import { configure, wrapOpenAI, rootsMiddleware } from "@neatlogs/neatroots-steer";
 configure({ neatlogs });                                   // share the SDK instance
-const client = wrapOpenAI(neatlogs.wrapOpenAI(new OpenAI()));
+const client = wrapOpenAI(new OpenAI(), { telemetry: neatlogs });
 // AI SDK: wrapLanguageModel({ model, middleware: rootsMiddleware() })
 ```
+
+Pass the **raw** provider client and the public Neatlogs module to the adapter. For Anthropic,
+use `wrapAnthropic(new Anthropic(), { telemetry: neatlogs })`. Keep the returned client:
+the adapter does not modify the original, and `withOptions()` returns another steered client.
+Without `telemetry`, these wrappers add steering only.
+
+Do not nest `neatlogs.wrapOpenAI()` or `neatlogs.wrapAnthropic()` inside or outside this adapter.
+Those opaque wrappers return plain Promises and cannot preserve native response helpers. The
+explicit adapter records one LLM span after guidance/replay has prepared the request, using the
+public `neatlogs.trace()` API. OpenAI chat/responses parsing and Anthropic streaming keep the
+provider's real response, request ID, status, errors and cancellation.
+
+`asResponse()` leaves the body unread and finishes a metadata-only span at response headers.
+Normal JSON calls record their returned data and reported token usage. Streaming spans finish
+when consumed, aborted or closed; they preserve observed assistant text and tool calls, including
+partial output on errors or cancellation, with reported usage and an event count. Output is
+serialized at termination, not on every chunk. An unconsumed request/stream can leave a span open.
+Disable separate provider auto-instrumentation to avoid recording the call twice.
 
 ## What happens
 
@@ -79,3 +97,6 @@ disables it in a process.
 The same hook reads a replay's overrides: `neatroots_steer.replay_input()` (`replayInput()` in
 TypeScript) returns the replay's input, and `wrap()` applies its model and system prompt. See
 [replay.md](replay.md).
+
+Rewrapping our facade without options keeps it unchanged. Supplying explicit options replaces
+its telemetry configuration using the original raw client; `{}` selects steering only.
