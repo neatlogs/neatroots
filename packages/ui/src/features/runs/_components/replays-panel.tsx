@@ -27,18 +27,23 @@ export function ReplaysPanel({ replays }: { replays: Replay[] }) {
             <li key={r.id} className="border-b border-border/60 last:border-0">
               <a
                 href={r.new_trace_id ? `#/runs/${r.new_trace_id}` : undefined}
-                className={cn("flex min-h-14 items-center gap-3 px-6 py-2", r.new_trace_id && "transition-colors hover:bg-surface-subtle")}
+                className={cn("flex h-20 items-center gap-3 px-6 py-2", r.new_trace_id && "transition-colors hover:bg-surface-subtle")}
               >
                 {r.state === "running" ? (
                   <Spinner size="xs" />
                 ) : (
-                  <StatusPill size="sm" tone={r.state === "succeeded" ? "success" : "danger"}>
-                    {r.state === "succeeded" ? "Done" : "Failed"}
+                  <StatusPill size="sm" tone={r.state === "succeeded" ? r.attribution === "explicit" ? "success" : "warning" : "danger"}>
+                    {r.state === "succeeded" ? "Finished" : "Failed"}
                   </StatusPill>
                 )}
                 <span className="flex min-w-0 flex-1 flex-col">
                   <span className="truncate text-sm text-foreground">{what(r)}</span>
                   <span className="truncate text-xs text-muted-foreground">{r.error ?? r.output_preview ?? (r.state === "running" ? "Waiting for the new run…" : "")}</span>
+                  {r.state !== "running" && r.attribution !== "explicit" && (
+                    <span className="truncate text-xs text-muted-foreground" data-testid="replay-attribution" title={r.attribution_reason}>
+                      Unverified identity · {r.attribution_reason ?? "Attribution evidence is unavailable."}
+                    </span>
+                  )}
                 </span>
                 <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{ago(r.created_ms)}</span>
               </a>

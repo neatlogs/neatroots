@@ -241,6 +241,11 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
               </a>{" "}
               · {d.replay_of.kind === "llm" ? "one LLM call" : "the whole agent"}
               {d.replay_of.overrides.model ? ` on ${d.replay_of.overrides.model}` : ""}
+              {d.replay_of.attribution !== "explicit" && (
+                <span className="block" data-testid="replay-origin-attribution">
+                  Replay identity is unverified. {d.replay_of.attribution_reason}
+                </span>
+              )}
             </span>
           </div>
         )}

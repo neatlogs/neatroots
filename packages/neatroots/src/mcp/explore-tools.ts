@@ -208,7 +208,8 @@ export const EXPLORE_TOOLS = [
       const resolved = resolveTraceNoting(roots, a.trace_id);
       const traceId = resolved.traceId;
       const r = await roots.replays.replayLlm(traceId, resolveSpan(roots, traceId, a.span_id), { messages: a.messages, model: a.model, system: a.system });
-      return { replay_id: r.id, state: r.state, error: r.error, new_trace_id: r.new_trace_id, answer: r.output_preview, ...fallbackNote(resolved) };
+      return { replay_id: r.id, state: r.state, attribution: r.attribution, attribution_reason: r.attribution_reason,
+        error: r.error, new_trace_id: r.new_trace_id, answer: r.output_preview, ...fallbackNote(resolved) };
     },
   }),
   def({

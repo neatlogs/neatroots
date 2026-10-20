@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { BlobStore } from "./blobs.js";
+import { log } from "../util/log.js";
 import { SearchIds } from "./search-ids.js";
 import { sha256, newId } from "../util/ids.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
@@ -410,6 +411,7 @@ export class Store {
   readonly blobs: BlobStore;
   private readonly searchIds: SearchIds;
   private seq = 0;
+  private readonly deletionListeners = new Set<(ids: string[]) => void>();
   readonly dir: string;
   readonly file: string;
 
@@ -437,7 +439,14 @@ export class Store {
   }
 
   close(): void {
+    this.deletionListeners.clear();
     this.db.close();
+  }
+
+  /** Observers run after committed deletion and blob cleanup (including retention). */
+  onRunsDeleted(listener: (ids: string[]) => void): () => void {
+    this.deletionListeners.add(listener);
+    return () => this.deletionListeners.delete(listener);
   }
 
   /** Adds columns introduced after a database was first created. */
@@ -479,7 +488,7 @@ export class Store {
   }
 
   /** Stores spans losslessly and updates run, session and search rows. */
-  ingest(batches: ResourceSpansBatch[]): TraceUpdate[] {
+  ingest(batches: ResourceSpansBatch[], onStored?: (updates: TraceUpdate[]) => void): TraceUpdate[] {
     const updates = new Map<string, TraceUpdate>();
     const supersededBlobs = new Set<string>();
     const now = Date.now();
@@ -515,6 +524,7 @@ export class Store {
           if (runFlags.completed) u.completed = true;
         }
       }
+      onStored?.([...updates.values()]);
     });
     tx();
     // Files are reclaimed only after the span replacement commits and no remaining span uses them.
@@ -1406,6 +1416,7 @@ export class Store {
    */
   deleteRuns(traceIds: string[]): void {
     if (!traceIds.length) return;
+    if (this.db.inTransaction) throw new Error("Store.deleteRuns must own its transaction");
     const ids = JSON.stringify(traceIds);
     const inIds = "trace_id IN (SELECT value FROM json_each(?))";
     const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
@@ -1418,6 +1429,9 @@ export class Store {
     });
     tx();
     this.reclaimUnreferencedBlobs(shas);
+    for (const listener of this.deletionListeners) {
+      try { listener(traceIds); } catch (err) { log.warn(`run deletion listener failed: ${String(err)}`); }
+    }
   }
 
   /** Deletes candidate payloads only after checking every remaining span reference. */

@@ -80,8 +80,11 @@ export class Roots {
   }
 
   ingest(batches: ResourceSpansBatch[]): TraceUpdate[] {
-    const updates = this.store.ingest(batches);
-    for (const u of updates) this.bus.emit("trace", u);
+    if (this.store.db.inTransaction) throw new Error("Roots.ingest must own its transaction");
+    let replayEvents: ReturnType<Replays["observe"]> = [];
+    const updates = this.store.ingest(batches, (stored) => { replayEvents = this.replays.observe(batches, stored); });
+    for (const event of replayEvents) this.bus.emitSafely("replay", event, (err) => log.warn(`replay listener failed after ingest commit: ${String(err)}`));
+    for (const u of updates) this.bus.emitSafely("trace", u, (err) => log.warn(`trace listener failed after ingest commit: ${String(err)}`));
     return updates;
   }
 

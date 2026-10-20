@@ -448,7 +448,8 @@ export const TOOLS = [
       if (!r) return { replay_id: replay.id, state: "running", note: [fallbackNote(resolved).note, "still running; call get_current_run or search_runs later"].filter(Boolean).join(" ") };
       const run = r.new_trace_id ? runSummary(roots, roots.store.getRun(r.new_trace_id)!) : null;
       const findings = r.new_trace_id ? roots.store.listFindings({ traceId: r.new_trace_id }).map((f) => ({ check: f.check_id, title: f.title, status: f.status })) : [];
-      return { replay_id: r.id, state: r.state, error: r.error, original: traceId, new_run: run, findings, log_tail: clip(r.log_tail, 2000), ...fallbackNote(resolved) };
+      return { replay_id: r.id, state: r.state, attribution: r.attribution, attribution_reason: r.attribution_reason,
+        error: r.error, original: traceId, new_run: run, findings, log_tail: clip(r.log_tail, 2000), ...fallbackNote(resolved) };
     },
   }),
   def({

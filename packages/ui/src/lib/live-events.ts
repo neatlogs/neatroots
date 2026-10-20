@@ -60,6 +60,10 @@ export function useLiveEvents(): { connected: boolean; spanTick: number } {
       on("replay", (d) => {
         schedule(d.trace_id);
         if (typeof d.new_trace_id === "string") schedule(d.new_trace_id);
+        if (typeof d.previous_trace_id === "string") schedule(d.previous_trace_id);
+        // Pruning/source deletion can clear an association before its old destination is known.
+        if (d.new_trace_id === null && !d.previous_trace_id)
+          void qc.invalidateQueries({ queryKey: runKeys.details() });
       });
       on("import", (d) => {
         void qc.invalidateQueries({ queryKey: ["imports"] });

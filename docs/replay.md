@@ -81,7 +81,60 @@ replay; outside one it changes nothing. Install the hooks from the bundle:
 
 `examples/python-replay` is a complete agent set up this way.
 
+### Replay correlation
+
+A whole-agent replay prefers a new run carrying that replay's exact `neatroots.replay.id` in
+resource attributes or the root span's attributes. For a command target, preserve the entry in
+`OTEL_RESOURCE_ATTRIBUTES` or set it through the SDK's resource configuration. For an HTTP target,
+add the received `replay_id` to the new trace's resource attributes or root attributes. The HTTP trace
+API (`/v1/trace`) and Browser SDK trace shape can use
+`attributes: { "neatroots.replay.id": replay_id }` on the root. If an agent or framework replaces
+`OTEL_RESOURCE_ATTRIBUTES`, merge the replay entry into its own resource attributes.
+
+Only runs first received during the replay are considered; a root can arrive after its children.
+Conflicting explicit IDs are rejected. An ID on a child span alone does not establish correlation.
+
 ### Linking without the variables
 
-If the agent drops `OTEL_RESOURCE_ATTRIBUTES` (some frameworks set their own resource), neatroots
-links the first new run of that project that starts after the replay began.
+After the agent answers or exits, neatroots waits up to ten seconds for explicit correlation.
+If none arrives, it links a run without an ID only when exactly one new same-project candidate
+appeared and no other replay overlapped this replay at any point. A run carrying a different
+explicit ID is never a fallback candidate. Multiple candidates or any overlapping replay disable
+this fallback, even if the other replay has already finished. A matching explicit ID takes priority
+over uncorrelated candidates and works during concurrent replays.
+
+The fallback cannot prove which process produced a lone same-project run. Use explicit correlation
+when other agents send telemetry to the same project. If neither matching correlation nor the
+constrained fallback is available, the replay fails with a reason explaining why no uniquely attributable run was available.
+
+
+### Attribution and later evidence
+
+Replay records expose `attribution` and `attribution_reason` in the API and UI. Only `explicit`
+means a unique root or resource claim was observed. The constrained fallback is labeled
+`fallback-unverified`; execution success alone does not verify identity. Historical links are
+`unknown` because their original evidence was not retained.
+
+Evidence is retained across restarts. Conflicting or malformed claims and duplicate producers can
+revoke a completed replay link and output. Deleting a destination also revokes the link; reusing
+its trace ID does not restore proof. Child-only claims cannot certify a destination or justify
+choosing another untagged run.
+
+Correlation retains at most 256 attempt windows, 512 candidate traces per attempt and 4096
+candidate associations overall, inspecting at most 512 attributes per claim and 64 active windows.
+Opening an attempt reclaims oldest completed whole windows until there is headroom for up to
+512 candidate associations, or no completed windows remain. This keeps sequential replays available
+without discarding claims inside retained windows. Headroom is not reserved: overlapping attempts
+share the global budget, and active evidence is never reclaimed for candidate headroom. The separate
+256-window limit still applies. Active-only saturation yields uncertainty rather than a verified link.
+Pruning retained evidence clears
+the affected link and trace-derived preview. Independently generated direct LLM answers remain,
+but deleting their source or generated run clears them even after pruning. Historical links do not
+acquire generated-output provenance. Deleted original runs prune their owned evidence.
+
+
+A process-wide `OTEL_RESOURCE_ATTRIBUTES` replay ID can cover several legitimate traces, such as
+multiple chat turns. It identifies the invocation, not which trace is its result. Multiple eligible
+root/resource matches remain ambiguous; neatroots does not certify the earliest one. Replay commands
+should produce one result trace, or group auxiliary work beneath that root. A root claim does not
+outrank another eligible resource match. Child-only claims remain insufficient.

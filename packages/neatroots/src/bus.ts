@@ -18,7 +18,8 @@ export interface RootsEvents {
   /** A coding agent asked the app to open something (MCP show_in_ui); path is a hash route. */
   navigate: { path: string };
   /** A replay finished or failed (replay/). */
-  replay: { id: string; state: string; trace_id: string; new_trace_id?: string | null; error?: string | null };
+  replay: { id: string; state: string; trace_id: string; new_trace_id?: string | null; error?: string | null;
+    attribution?: string; attribution_reason?: string; previous_trace_id?: string | null };
 }
 
 export class Bus {
@@ -31,6 +32,14 @@ export class Bus {
   emit<K extends keyof RootsEvents>(event: K, payload: RootsEvents[K]): void {
     this.ee.emit(event, payload);
     this.ee.emit("*", { event, payload });
+  }
+
+  /** Postcommit ingest notifications: one observer cannot roll back storage or skip others. */
+  emitSafely<K extends keyof RootsEvents>(event: K, payload: RootsEvents[K], onError: (error: unknown) => void): void {
+    for (const [name, value] of [[event, payload], ["*", { event, payload }]] as const)
+      for (const listener of this.ee.rawListeners(name)) {
+        try { listener.call(this.ee, value); } catch (error) { onError(error); }
+      }
   }
 
   on<K extends keyof RootsEvents>(event: K, fn: (payload: RootsEvents[K]) => void): () => void {
