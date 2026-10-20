@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { registerWebhookCommands } from "./cli/webhook.js";
 import fs from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
@@ -450,6 +451,7 @@ checks
     process.exitCode = bad ? 1 : 0;
   });
 
+registerWebhookCommands(program);
 registerModelCommands(program);
 registerServiceCommands(program);
 registerConnectCommand(program);

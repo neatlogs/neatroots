@@ -1,5 +1,6 @@
+import { WebhookDispatcher } from "./webhook/dispatcher.js";
 import path from "node:path";
-import { rootsHome, loadConfig, saveConfig, type RootsConfig } from "./config.js";
+import { rootsHome, loadConfig, saveConfig, restoreWebhooks, type RootsConfig } from "./config.js";
 import { Bus } from "./bus.js";
 import { Store, type TraceUpdate } from "./store/db.js";
 import type { ResourceSpansBatch } from "./otlp/types.js";
@@ -29,6 +30,7 @@ export class Roots {
   readonly home: string;
   readonly store: Store;
   readonly bus = new Bus();
+  readonly webhooks: WebhookDispatcher;
   readonly startedMs = Date.now();
   readonly llm: LlmClient;
   readonly decisions: DecisionModel;
@@ -40,6 +42,7 @@ export class Roots {
   readonly imports: ImportJobs;
   readonly replays: Replays;
   readonly chats: AgentChats;
+  private savedWebhooks: RootsConfig["webhooks"];
   private sweeper?: NodeJS.Timeout;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
@@ -51,6 +54,7 @@ export class Roots {
   constructor(opts: RootsOptions = {}) {
     this.home = opts.home ?? rootsHome();
     this.config = opts.config ?? loadConfig();
+    this.savedWebhooks = structuredClone(this.config.webhooks);
     this.store = new Store(path.join(this.home, "data"));
     this.llm = new LlmClient(this.config.llm, { secret: (n) => getSecret(n), redactPatterns: () => this.config.cloud.redactPatterns });
     this.laya = new LayaManager(this.home, this.config.classifier);
@@ -61,6 +65,7 @@ export class Roots {
       this.store.trustStore(),
     );
     this.checks = new CheckRegistry(this.store, path.join(this.home, "checks"), () => this.config.checkDirs);
+    this.webhooks = new WebhookDispatcher(this.bus, () => this.config.webhooks);
     this.steering = new SteeringHub(this);
     this.steering.warnInactiveHalts(this.checks.rules().filter((c) => c.source === "user" || c.source === "project").map((c) => c.check));
     this.relay = new Relay(this);
@@ -87,7 +92,10 @@ export class Roots {
 
   /** Saves to this instance's own home (the one it was opened with), never another one. */
   saveConfig(): void {
-    saveConfig(this.config, path.join(this.home, "config.yaml"));
+    try { saveConfig(this.config, path.join(this.home, "config.yaml")); }
+    catch (error) { restoreWebhooks(this.config, this.savedWebhooks); throw error; }
+    this.savedWebhooks = structuredClone(this.config.webhooks);
+    this.webhooks.reconcile();
   }
 
   /** Applies retention now and every hour. */
@@ -113,6 +121,7 @@ export class Roots {
   }
 
   close(): void {
+    this.webhooks.close();
     clearInterval(this.sweeper);
     this.laya.stop();
     this.store.close();
