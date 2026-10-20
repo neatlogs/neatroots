@@ -1,6 +1,6 @@
 {
   "name": "@neatlogs/neatroots",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Local, private checks for AI agents while they run. Collects traces from the public Neatlogs SDKs, checks them with local models, steers the agent and serves findings over MCP.",
   "license": "Apache-2.0",
   "type": "module",

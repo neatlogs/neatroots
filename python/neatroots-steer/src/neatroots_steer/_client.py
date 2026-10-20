@@ -70,8 +70,12 @@ class RootsClient:
 
     # ------------------------------------------------------------- transport
 
+    def paused(self) -> bool:
+        """True while the hook sends nothing: NEATROOTS_STEER is off, or neatroots didn't answer just now."""
+        return self.disabled or time.monotonic() < self._down_until
+
     def _post(self, path: str, body: Dict[str, Any], timeout: float) -> Optional[Dict[str, Any]]:
-        if self.disabled or time.monotonic() < self._down_until:
+        if self.paused():
             return None
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
@@ -193,7 +197,8 @@ class RootsClient:
             self._mode_trace_id = trace_id
             self._globally_off = False
             note = res.get("note")
-            if not note:
+            # A note that arrives with steering off (an older neatroots) is not used.
+            if not note or self._mode == "off":
                 self._pending.discard(trace_id)
                 return None
         return Note(note.get("id", ""), note.get("kind", "template"), note.get("text", ""), note.get("finding_id"))

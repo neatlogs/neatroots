@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { sha256 } from "../util/ids.js";
@@ -22,9 +23,19 @@ export class BlobStore {
   put(data: string): string {
     const sha = sha256(data);
     const f = this.file(sha);
-    if (!fs.existsSync(f)) {
+    // A file left short by a crash or a full disk has the right name but not the right content.
+    // Keep a complete one; rewrite anything else, through a temporary file so the final name
+    // only ever points at a whole payload.
+    if (this.sizeOf(sha) !== Buffer.byteLength(data, "utf8")) {
       fs.mkdirSync(path.dirname(f), { recursive: true });
-      fs.writeFileSync(f, data, "utf8");
+      const tmp = `${f}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+      try {
+        fs.writeFileSync(tmp, data, "utf8");
+        fs.renameSync(tmp, f);
+      } catch (err) {
+        fs.rmSync(tmp, { force: true });
+        throw err;
+      }
     }
     return sha;
   }

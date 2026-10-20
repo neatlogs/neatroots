@@ -2,8 +2,9 @@ import os from "node:os";
 import Anthropic from "@anthropic-ai/sdk";
 import type { RootsConfig } from "../config.js";
 import { log } from "../util/log.js";
-import { BUILTIN_RULES, compileRules, CREDENTIAL_KINDS, redactString, type RedactionRule } from "../relay/redact.js";
+import { BUILTIN_RULES, compileRules, CREDENTIAL_KINDS, RedactionPatternError, redactString, type RedactionRule } from "../relay/redact.js";
 import { isLocalUrl, llmKeyName, providerById, strictSchema, type ProviderPreset } from "./providers.js";
+import { trimSlash } from "../util/url.js";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -68,6 +69,14 @@ export function hardwareTier(totalBytes = os.totalmem()): { tier: "large" | "med
   if (gb >= 32) return { tier: "large", memoryGb: gb, description: "8–14B instruct model, everything on device" };
   if (gb >= 16) return { tier: "medium", memoryGb: gb, description: "3–8B instruct model; investigations queue while the agent is busy" };
   return { tier: "small", memoryGb: gb, description: "rules and classifier on device; LLM work needs Ollama elsewhere or a cloud key" };
+}
+
+/** An LLM task's error for people: when no LLM is reachable, says so and how to set one up. */
+export function llmErrorMessage(e: unknown): string {
+  if (e instanceof LlmUnavailableError) {
+    return "No LLM is reachable. Set one up in Settings → Models, run `neatroots llm use <provider>`, or start a local LLM (Ollama/LM Studio).";
+  }
+  return (e as Error).message;
 }
 
 /** One place chat calls can go: the local server or a hosted provider. */
@@ -155,7 +164,7 @@ class OpenAiTransport implements Transport {
   }
 
   get baseUrl(): string {
-    return this.t.baseUrl().replace(/\/+$/, "");
+    return trimSlash(this.t.baseUrl());
   }
 
   model(): string | undefined {
@@ -620,7 +629,11 @@ export class LlmClient {
   }
 
   private redactFor(target: Transport): (s: string) => string {
-    if (target === this.local) return (s) => s;
+    return target === this.local ? (s) => s : this.redactRemote();
+  }
+
+  /** What text sent off the machine goes through (llm.external.redact); Jev cloud uses it too. */
+  redactRemote(): (s: string) => string {
     const mode = this.cfg.external.redact;
     if (mode === "off") return (s) => s;
     const rules: RedactionRule[] =
@@ -635,8 +648,8 @@ export class LlmClient {
     }
     let lastErr: unknown;
     for (const t of targets) {
-      const redact = this.redactFor(t);
       try {
+        const redact = this.redactFor(t);
         const r = await t.send(
           messages.map((m) => ({ ...m, content: redact(m.content) })),
           opts,
@@ -645,7 +658,9 @@ export class LlmClient {
         return r;
       } catch (err) {
         lastErr = err;
-        if (!(err instanceof LlmUnavailableError)) throw err;
+        // A saved redaction pattern that can't be applied means this text can't go to the hosted
+        // LLM (nothing is sent); the local LLM, which gets unredacted text, can still answer.
+        if (!(err instanceof LlmUnavailableError || err instanceof RedactionPatternError)) throw err;
         if (t !== this.local && targets.length > 1 && Date.now() - this.warnedFallback > 60_000) {
           this.warnedFallback = Date.now();
           log.warn(`${t.where} unavailable (${err.message}); using the local LLM`);

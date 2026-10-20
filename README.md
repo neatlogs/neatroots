@@ -222,7 +222,8 @@ client = neatroots_steer.wrap(OpenAI())      # or Anthropic(); sync or async
 ```
 
 Modes: `advisory` (a note on the next LLM call), `gate` (each call waits up to 300 ms for pending
-checks), `self-check` (the agent gets `check_my_work`), and `halt` from rules you write. At most one
+checks), and `self-check` (the agent gets `check_my_work`). In any of them, rules you write with
+`action: halt` stop the run; with steering `off`, nothing is sent, halts included. At most one
 note per call and three per run. See [docs/steering.md](docs/steering.md).
 
 ## What leaves your machine
@@ -231,7 +232,7 @@ note per call and three per run. See [docs/steering.md](docs/steering.md).
 | --- | --- | --- |
 | Collector, checks, Laya, local LLM, store, app, MCP | On | Nothing |
 | Hosted LLM | Off | The run content each LLM task needs, minus secrets, to the provider you pick |
-| Jev cloud | Off | Span content a question needs, to api.typesafe.ai |
+| Jev cloud | Off | Span content a question needs, credentials removed, to api.typesafe.ai |
 | Neatlogs Cloud forward | Off | Runs you send, redacted first, to ingest.neatlogs.com |
 | Neatlogs Cloud import | Off | Requests to app.neatlogs.com with your service-account token |
 | Coding agents in the app | Off | Whatever Claude Code or Codex sends to their own providers |
@@ -289,13 +290,15 @@ pnpm --filter @neatlogs/neatroots-ui e2e     # UI end-to-end tests (Playwright; 
 (cd python/neatroots-steer && python -m pytest)
 pnpm typecheck                # all pnpm workspaces
 sh examples/run-all.sh        # agent and HTTP API examples against a running neatroots; browser, import-files, refund-agent, samples by hand
+node scripts/perf-smoke.mjs   # performance smoke test on a generated store (runs nightly)
 pnpm --filter @neatlogs/neatroots dev        # server with reload on 4100
 pnpm --filter @neatlogs/neatroots-ui dev     # UI on 5173 (set NEATROOTS_DEV_ORIGIN=http://localhost:5173 on the server)
 ```
 
 neatroots is built from public inputs: the public Neatlogs SDKs and their telemetry schema,
 OpenTelemetry, MCP, publicly documented APIs, and openly licensed models. Issues and pull requests
-are welcome; [AGENTS.md](AGENTS.md) has the conventions.
+are welcome: [CONTRIBUTING.md](CONTRIBUTING.md) says how, and [AGENTS.md](AGENTS.md) has the
+conventions. Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes.
 
 neatroots is maintained by [@akshay-neatlogs](https://github.com/akshay-neatlogs), with
 [@harshk-neatlogs](https://github.com/harshk-neatlogs) and [@taranum-neatlogs](https://github.com/taranum-neatlogs)

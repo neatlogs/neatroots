@@ -3,3 +3,7 @@ packages:
 onlyBuiltDependencies:
   - better-sqlite3
   - esbuild
+# Patched versions for transitive deps of the neatlogs SDK (steer-ts peer, installed here for tests).
+overrides:
+  '@opentelemetry/core@>=2.0.0 <2.8.0': ^2.8.0
+  protobufjs@>=8.0.0 <8.6.6: ^8.8.0

@@ -68,7 +68,7 @@ export function ChecksPage() {
       }
     >
       {!!data?.errors.length && (
-        <div role="alert" className="mx-6 mt-3 flex max-h-32 flex-col gap-1 overflow-y-auto rounded-lg border border-danger-border bg-danger-surface px-4 py-3">
+        <div role="alert" className="mx-6 mt-3 flex max-h-32 shrink-0 flex-col gap-1 overflow-y-auto rounded-lg border border-danger-border bg-danger-surface px-4 py-3">
           <span className="text-sm font-medium text-danger-fg">Some check files didn't load</span>
           {data.errors.map((e, i) => (
             <span key={i} className="font-mono text-xs text-danger-fg">
@@ -115,6 +115,7 @@ export function ChecksPage() {
               toast.success(`Deleted check ${id}`);
               setOpenId(undefined);
             },
+            onError: (e) => toast.error(`Couldn't delete the check: ${(e as Error).message}`),
           })
         }
       />

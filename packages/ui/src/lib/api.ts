@@ -184,6 +184,8 @@ export interface ImportJob {
   traces: number;
   spans: number;
   failed: number;
+  /** Runs captured here that the import kept instead of storing Cloud's copy over them. */
+  skipped: number;
   last_error: string | null;
   trace_ids: string[];
 }
@@ -403,7 +405,7 @@ export interface Push {
   trace_ids: string[];
   requested_by: string;
   created_ms: number;
-  status: "pending" | "sent" | "failed" | "declined";
+  status: "pending" | "sending" | "sent" | "failed" | "declined";
   error?: string;
 }
 

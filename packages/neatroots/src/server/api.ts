@@ -5,7 +5,10 @@ import { streamSSE } from "hono/streaming";
 import type { Roots } from "../core.js";
 import { kvToPlain } from "../otlp/types.js";
 import { buildView } from "../semantics/view.js";
-import { hardwareTier, LlmUnavailableError } from "../models/llm.js";
+import { hardwareTier, llmErrorMessage } from "../models/llm.js";
+import { regexProblem } from "../util/regex.js";
+import { allowedEndpoint } from "../relay/endpoint.js";
+import { RedactionPatternError } from "../relay/redact.js";
 import { projectSettings, type SteeringMode } from "../config.js";
 import { getCloudKey, setCloudKey, deleteCloudKey, getCloudToken, getSecret } from "../relay/keychain.js";
 import { mountModelsApi } from "./api-models.js";
@@ -15,7 +18,7 @@ import { mountAgentsApi } from "./api-agents.js";
 import { importSource, mountExploreApi } from "./api-explore.js";
 import { checkCoverage } from "./coverage.js";
 import { installInfo } from "../util/install.js";
-import { err, body, clampInt } from "./util.js";
+import { err, body, clampInt, isTraceIds } from "./util.js";
 import { checkDirState } from "../checks/registry.js";
 import { askRuns } from "../engine/assist.js";
 import { loadTrace } from "../engine/trace.js";
@@ -105,24 +108,6 @@ function projects(roots: Roots) {
   });
 }
 
-/** Cloud endpoints neatroots will forward to. Anything else must be set in config.yaml by hand. */
-function allowedEndpoint(u: string): boolean {
-  try {
-    const url = new URL(u);
-    if (url.protocol === "https:" && (url.hostname === "neatlogs.com" || url.hostname.endsWith(".neatlogs.com"))) return true;
-    return url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-  } catch {
-    return false;
-  }
-}
-
-/** When an LLM task fails because no LLM is reachable, say so and how to fix it. */
-function llmErrorMessage(e: unknown): string {
-  if (e instanceof LlmUnavailableError) {
-    return "No LLM is reachable. Set one up in Settings → Models, run `neatroots llm use <provider>`, or start a local LLM (Ollama/LM Studio).";
-  }
-  return (e as Error).message;
-}
 
 export function mountApi(app: Hono, roots: Roots): void {
   const engine = roots.engine;
@@ -175,7 +160,10 @@ export function mountApi(app: Hono, roots: Roots): void {
       workflow: q.workflow || undefined,
       status: q.status || undefined,
       sessionId: q.session || undefined,
-      hasFinding: q.has_finding === "1" || q.has_finding === "true",
+      hasFinding:
+        q.has_finding === undefined || q.has_finding === ""
+          ? undefined
+          : q.has_finding === "1" || q.has_finding === "true",
       checkId: q.check || undefined,
       text: q.q || undefined,
       sinceMs: q.since ? Number(q.since) : undefined,
@@ -255,6 +243,10 @@ export function mountApi(app: Hono, roots: Roots): void {
   app.post("/api/annotations", async (c) => {
     const b = await body<{ trace_id?: string; span_id?: string; label?: string; text?: string; author?: string }>(c);
     if (!b.trace_id || !b.label || !["issue", "good", "note"].includes(b.label)) return err(c, 400, "trace_id and label (issue, good or note) are required");
+    // An annotation on a run or span neatroots doesn't have can never be shown anywhere: say so
+    // instead of storing it (the MCP annotate tool already refuses both).
+    if (!roots.store.getRun(b.trace_id)) return err(c, 404, "run not found");
+    if (b.span_id && !roots.store.getSpanRow(b.trace_id, b.span_id)) return err(c, 404, "span not found");
     const a = roots.store.insertAnnotation({ trace_id: b.trace_id, span_id: b.span_id ?? null, label: b.label as "issue", text: b.text ?? null, author: b.author ?? "user" });
     roots.bus.emit("activity", { trace_id: b.trace_id, kind: "annotation", message: a.label });
     return c.json(a);
@@ -294,11 +286,9 @@ export function mountApi(app: Hono, roots: Roots): void {
     if (b.classifier_backend && !["auto", "laya", "jev", "jev-cloud", "llm"].includes(b.classifier_backend)) return err(c, 400, "classifier_backend must be auto, laya, jev, jev-cloud or llm");
     if (b.cloud_endpoint && !allowedEndpoint(b.cloud_endpoint)) return err(c, 400, "cloud endpoint must be an https://*.neatlogs.com URL (or localhost for testing)");
     for (const p of b.redact_patterns ?? []) {
-      try {
-        new RegExp(p);
-      } catch {
-        return err(c, 400, `invalid pattern: ${p}`);
-      }
+      // Refuses patterns that don't compile and ones that could freeze the relay (util/regex.ts).
+      const problem = regexProblem(p, "g");
+      if (problem) return err(c, 400, `invalid pattern: ${p}: ${problem}`);
     }
     // A check_dir is checked here with the rest, before anything is pushed or saved. Registering one
     // used to reload straight away, so a path that wasn't a directory threw out of this handler: the
@@ -362,14 +352,19 @@ export function mountApi(app: Hono, roots: Roots): void {
   });
 
   app.post("/api/cloud/preview", async (c) => {
-    const b = await body<{ trace_ids?: string[] }>(c);
-    if (!b.trace_ids?.length) return err(c, 400, "trace_ids required");
-    return c.json(await roots.relay.preview(b.trace_ids));
+    const b = await body<{ trace_ids?: unknown }>(c);
+    if (!isTraceIds(b.trace_ids)) return err(c, 400, "trace_ids must be a non-empty array of run ids");
+    try {
+      return c.json(await roots.relay.preview(b.trace_ids));
+    } catch (e) {
+      if (e instanceof RedactionPatternError) return err(c, 400, e.message);
+      throw e;
+    }
   });
 
   app.post("/api/cloud/forward", async (c) => {
-    const b = await body<{ trace_ids?: string[] }>(c);
-    if (!b.trace_ids?.length) return err(c, 400, "trace_ids required");
+    const b = await body<{ trace_ids?: unknown }>(c);
+    if (!isTraceIds(b.trace_ids)) return err(c, 400, "trace_ids must be a non-empty array of run ids");
     const row = await roots.relay.forward(b.trace_ids, "user");
     roots.bus.emit("activity", { kind: "forward", message: row.status });
     return c.json(row, row.status === "ok" ? 200 : 502);
@@ -408,6 +403,8 @@ export function mountApi(app: Hono, roots: Roots): void {
         if (event === "finding" || event === "note") data.id = p.id;
         if (event === "settings") data.project = p.project ?? null;
         if (event === "navigate") data.path = p.path;
+        // The app refreshes cloud pushes on activity whose kind starts with "push".
+        if (event === "activity") data.kind = p.kind;
         if (event === "chat") Object.assign(data, { session_id: p.session_id, event: p.event, state: p.state });
         if (event === "import" || event === "replay") Object.assign(data, p);
         queue.push({ event, data: JSON.stringify(data) });
@@ -506,14 +503,23 @@ export function mountApi(app: Hono, roots: Roots): void {
   app.post("/api/pushes/:id/:action", async (c) => {
     const p = roots.pushes.get(c.req.param("id"));
     if (!p) return err(c, 404, "push not found");
+    // Every open tab shows the push, so a second answer can come while (or after) it is sent.
     if (p.status !== "pending") return c.json(p);
     if (c.req.param("action") === "decline") {
       p.status = "declined";
     } else if (c.req.param("action") === "confirm") {
-      const row = await roots.relay.forward(p.trace_ids, "coding-agent (confirmed)");
-      p.status = row.status === "ok" ? "sent" : "failed";
-      p.forward_id = row.id;
-      p.error = row.error ?? undefined;
+      // Set before the send starts: another confirm can't send the runs again, nor a decline say nothing was sent.
+      p.status = "sending";
+      try {
+        roots.bus.emit("activity", { kind: "push", message: p.status });
+        const row = await roots.relay.forward(p.trace_ids, "coding-agent (confirmed)");
+        p.status = row.status === "ok" ? "sent" : "failed";
+        p.forward_id = row.id;
+        p.error = row.error ?? undefined;
+      } catch (e) {
+        p.status = "failed";
+        p.error = (e as Error).message;
+      }
     } else return err(c, 400, "action must be confirm or decline");
     roots.bus.emit("activity", { kind: "push", message: p.status });
     return c.json(p);
@@ -521,6 +527,7 @@ export function mountApi(app: Hono, roots: Roots): void {
 
   // Small helper for the UI: which spans changed since a sequence number.
   app.get("/api/runs/:traceId/snapshot", (c) => {
+    if (!roots.store.getRun(c.req.param("traceId"))) return err(c, 404, "run not found");
     const snap = loadTrace(roots.store, c.req.param("traceId"));
     return c.json({ spans: snap.spans.map((s) => ({ id: s.id, kind: s.kind, name: s.name, status: s.status })) });
   });

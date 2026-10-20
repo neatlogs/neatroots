@@ -24,6 +24,8 @@ afterEach(async () => {
 
 async function setup() {
   const tb = await makeRoots();
+  // Halts reach the agent only while steering is on for the project (off sends nothing).
+  tb.roots.steering.setMode("test-agent", "advisory");
   cleanup.push(() => tb.close());
   tb.roots.engine!.registry.save(RULE, "user");
   const t = hex(16);
