@@ -202,9 +202,9 @@ export function neatlogsCloudSource(base: () => string, auth: () => Promise<Clou
           const page = await listCloudTraces(b, k, { cursor, sinceMs: o.sinceMs, untilMs: o.untilMs, signal: o.signal });
           ids.push(...page.traces.map((t) => t.traceId));
           cursor = page.nextCursor ?? undefined;
-        } while (cursor && ids.length < o.limit);
+        } while (cursor && new Set(ids).size < o.limit);
       }
-      ids = ids.slice(0, o.limit);
+      ids = [...new Set(ids)].slice(0, o.limit);
       let failedInARow = 0;
       for (const id of ids) {
         let read: { nodes: SpanNode[]; workflow: string };
