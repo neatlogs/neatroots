@@ -142,6 +142,69 @@ describe("store", () => {
     expect(st.blobs.size()).toBe(0);
   });
 
+  it("reclaims a superseded payload without scanning every span", () => {
+    const st = store();
+    const traceId = hex(16);
+    const spanId = hex(8);
+    const write = (payload: string) => span({ traceId, spanId, name: "replace", kind: "tool", attrs: [s("payload", payload)] });
+    st.ingest([batch([write(`old ${"o".repeat(40_000)}`)])]);
+    const plan = st.db
+      .prepare("EXPLAIN QUERY PLAN SELECT DISTINCT sha FROM retention_blob_refs WHERE sha IN (SELECT value FROM json_each(?))")
+      .all(JSON.stringify(["0".repeat(64)])) as { detail: string }[];
+    expect(plan.some((row) => row.detail.includes("SEARCH retention_blob_refs USING COVERING INDEX"))).toBe(true);
+
+    const prepare = st.db.prepare.bind(st.db);
+    st.db.prepare = ((sql: string) => {
+      if (sql.includes("FROM spans, json_each") && sql.includes("j.value IN")) throw new Error("scanned every span for blob references");
+      return prepare(sql);
+    }) as typeof st.db.prepare;
+    try {
+      expect(() => st.ingest([batch([write(`new ${"n".repeat(40_000)}`)])])).not.toThrow();
+    } finally {
+      st.db.prepare = prepare;
+    }
+  });
+
+  it("backfills indexed blob references for an existing store", () => {
+    const home = tmpHome();
+    homes.push(home);
+    const dir = path.join(home, "data");
+    const traceId = hex(16);
+    const spanA = hex(8);
+    const spanB = hex(8);
+    const shared = `shared ${"s".repeat(40_000)}`;
+    let st = trackedStore(dir);
+    st.ingest([
+      batch([
+        span({ traceId, spanId: spanA, name: "a", kind: "tool", attrs: [s("payload", shared)] }),
+        span({ traceId, spanId: spanB, name: "b", kind: "tool", attrs: [s("payload", shared)] }),
+      ]),
+    ]);
+    const [{ sha }] = st.db.prepare("SELECT sha FROM retention_blob_refs LIMIT 1").all() as { sha: string }[];
+    st.db.prepare("DELETE FROM retention_blob_refs").run();
+    st.db.prepare("DELETE FROM meta WHERE key = 'blob_refs'").run();
+    st.close();
+
+    st = trackedStore(dir);
+    expect((st.db.prepare("SELECT COUNT(*) AS n FROM retention_blob_refs").get() as { n: number }).n).toBe(2);
+    st.ingest([batch([span({ traceId, spanId: spanA, name: "a", kind: "tool", attrs: [s("payload", `new ${"n".repeat(40_000)}`)] })])]);
+    expect(st.blobs.sizeOf(sha)).toBe(Buffer.byteLength(shared));
+  });
+
+  it("keeps blob references current when an older writer changes spans", () => {
+    const st = store();
+    const traceId = hex(16);
+    const spanId = hex(8);
+    st.ingest([batch([span({ traceId, spanId, name: "legacy", kind: "tool", attrs: [s("payload", `old ${"o".repeat(40_000)}`)] })])]);
+    const replacementSha = st.blobs.put(`legacy replacement ${"n".repeat(40_000)}`);
+
+    // The triggers live in SQLite, so a pre-index binary still maintains ownership.
+    st.db.prepare("UPDATE spans SET blobs = ? WHERE trace_id = ? AND span_id = ?").run(JSON.stringify([replacementSha]), traceId, spanId);
+    expect(st.db.prepare("SELECT sha FROM retention_blob_refs WHERE trace_id = ? AND span_id = ?").all(traceId, spanId)).toEqual([{ sha: replacementSha }]);
+    st.db.prepare("DELETE FROM spans WHERE trace_id = ? AND span_id = ?").run(traceId, spanId);
+    expect(st.db.prepare("SELECT sha FROM retention_blob_refs WHERE trace_id = ? AND span_id = ?").all(traceId, spanId)).toEqual([]);
+  });
+
   it("keeps shared payloads across spans and pinned runs during retention", () => {
     const st = store();
     const pinnedTrace = hex(16);
@@ -208,6 +271,7 @@ describe("store", () => {
 
     const after = st.db.prepare("SELECT attributes, blobs FROM spans WHERE trace_id = ? AND span_id = ?").get(traceId, spanId) as { attributes: string; blobs: string };
     expect(after).toEqual(before);
+    expect(st.db.prepare("SELECT sha FROM retention_blob_refs WHERE trace_id = ? AND span_id = ?").all(traceId, spanId)).toEqual([{ sha: oldSha }]);
     expect(st.blobs.sizeOf(oldSha)).toBe(Buffer.byteLength(oldPayload, "utf8"));
     const [roundTrip] = st.batchesForTraces([traceId]);
     expect(roundTrip.spans[0].attributes.find((attribute) => attribute.key === "payload")?.value).toEqual({ stringValue: oldPayload });
