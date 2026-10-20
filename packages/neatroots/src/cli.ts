@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { Roots } from "./core.js";
 import { createApp, startServer } from "./server/app.js";
 import { startGrpc } from "./ingest/grpc.js";
@@ -393,7 +393,7 @@ program
   .option("--checks <dir...>", "extra checks folders")
   .option("--only <ids>", "only these rule ids, comma-separated")
   .option("--json", "print the result as JSON")
-  .option("--format <format>", "output format (text, json, junit)", "text")
+  .addOption(new Option("--format <format>", "output format (text, json, junit)").choices(["text", "json", "junit"]).default("text"))
   .option("--junit <path>", "write JUnit XML report to file")
   .action((files: string[], opts: { checks?: string[]; only?: string; json?: boolean; format?: string; junit?: string }) => {
     const format = opts.json ? "json" : (opts.format ?? "text");

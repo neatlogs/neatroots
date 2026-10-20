@@ -90,6 +90,7 @@ export function checkFiles(files: string[], opts: OfflineOptions = {}): CheckRes
 export function escapeXml(str: string): string {
   return str
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -127,7 +128,6 @@ export function formatJUnit(result: CheckResult): string {
           `check_id: ${f.check_id}`,
           `title: ${f.title}`,
           `evidence_span_ids: ${f.evidence_span_ids.join(", ") || "none"}`,
-          ...(Object.keys(f.params ?? {}).length ? [`params: ${JSON.stringify(f.params)}`] : []),
         ].join("\n");
         lines.push(
           `      <failure message="[${escapeXml(f.check_id)}] ${escapeXml(f.title)}">${escapeXml(details)}</failure>`,
