@@ -392,8 +392,9 @@ describe("server", () => {
         const j = tb.roots.imports.get(id);
         return j && j.state !== "running" ? j : undefined;
       });
-      expect(job).toMatchObject({ state: "succeeded", traces: 1, failed: 0 });
-      expect(seen.some((u) => u.startsWith(`/api/v1/public/traces/${t}/export`))).toBe(true);
+      // t was captured here, so the import keeps the local run instead of fetching Cloud's copy.
+      expect(job).toMatchObject({ state: "succeeded", traces: 0, skipped: 1, failed: 0 });
+      expect(seen.some((u) => u.startsWith(`/api/v1/public/traces/${t}/export`))).toBe(false);
     } finally {
       for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k];
