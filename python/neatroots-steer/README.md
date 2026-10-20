@@ -34,5 +34,7 @@ Other ways in:
 - `NeatrootsHalt` is raised before an LLM call when one of your own halt rules fires.
 
 Configuration: `NEATROOTS_URL` (default: the local `NEATLOGS_ENDPOINT`, else `http://localhost:4100`),
-`NEATROOTS_STEER=off` to disable. No dependencies beyond the standard library; it reads the current
-trace from OpenTelemetry when `opentelemetry-api` is installed (the Neatlogs SDK installs it).
+`NEATROOTS_STEER=off` to disable. AnyIO offloads async steering preparation on the active asyncio
+or Trio backend, preserving trace context. Cancelling during preparation prevents provider execution while
+already running synchronous preparation finishes in its thread. It reads the current trace from
+OpenTelemetry when `opentelemetry-api` is installed (the Neatlogs SDK installs it).

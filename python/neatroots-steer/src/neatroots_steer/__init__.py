@@ -27,6 +27,8 @@ import logging
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from anyio import to_thread
+
 from ._client import RootsClient, Note, configure, get_client
 
 __all__ = [
@@ -311,11 +313,16 @@ def _wrap_method(
             return kwargs
         return transform(dict(kwargs), note)
 
-    if inspect.iscoroutinefunction(original):
+    # SDK validation decorators preserve __wrapped__ but may hide the coroutine.
+    if inspect.iscoroutinefunction(original) or inspect.iscoroutinefunction(inspect.unwrap(original)):
 
         @functools.wraps(original)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            return await original(*args, **prepare(kwargs))
+            # Use the active asyncio/Trio backend and copy trace ContextVars.
+            # Abandoning the wait on cancellation prevents the model call;
+            # an already running synchronous claim still finishes in its thread.
+            prepared = await to_thread.run_sync(prepare, kwargs, abandon_on_cancel=True)
+            return await original(*args, **prepared)
 
         async_wrapper.__neatroots_wrapped__ = True  # type: ignore[attr-defined]
         setattr(owner, name, async_wrapper)
