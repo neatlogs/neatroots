@@ -18,7 +18,7 @@ export const Evidence = z
   .object({
     spans: SpanSelector.optional(),
     fields: z.array(EvidenceField).optional(),
-    /** Include the run goal (first system and user messages, or the root input). Default true. */
+    /** Include the run goal (instructions and first user message, or the root input). Default true. */
     goal: z.boolean().optional(),
     /** Include the run's final output, when it has one. */
     final_output: z.boolean().optional(),

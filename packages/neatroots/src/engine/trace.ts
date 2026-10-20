@@ -133,16 +133,21 @@ function textOf(v: Plain | undefined): string | undefined {
   return JSON.stringify(v);
 }
 
-/** The run's goal: its system prompt and first user message, or the root input. */
+/** The run's goal: its first LLM call's instructions and first user message, or the root input. */
 export function runGoal(t: TraceSnapshot): { system?: string; user?: string; rootInput?: string } {
   const goal: { system?: string; user?: string; rootInput?: string } = {};
   const firstLlm = t.spans.find((s) => s.kind === "LLM" && Array.isArray(s.input));
   if (firstLlm && Array.isArray(firstLlm.input)) {
+    const instructions: string[] = [];
     for (const m of firstLlm.input as Record<string, Plain>[]) {
       if (!m || typeof m !== "object") continue;
-      if (isSystemRole(m.role) && !goal.system) goal.system = textOf(m.content);
+      if (isSystemRole(m.role)) {
+        const text = textOf(m.content);
+        if (text) instructions.push(text);
+      }
       if (m.role === "user" && !goal.user) goal.user = textOf(m.content);
     }
+    if (instructions.length) goal.system = instructions.join("\n\n");
   }
   const root = t.spans.find((s) => !s.parentId);
   if (root?.input !== undefined) goal.rootInput = textOf(root.input);
