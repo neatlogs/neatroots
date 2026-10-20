@@ -250,6 +250,7 @@ describe("server", () => {
     expect(await get("has_finding=true")).toMatchObject({ total: 3, matching: 1 });
     expect(await get("has_finding=0")).toMatchObject({ total: 3, matching: 2 });
     expect(await get("has_finding=false")).toMatchObject({ total: 3, matching: 2 });
+    expect(await get("has_finding=")).toMatchObject({ total: 3, matching: 3 });
     expect(await get("status=error")).toMatchObject({ total: 3, matching: 1 });
     // matching counts every match, not just the page; there was no such count, so with more matches
     // than the page holds (it asks for 150) the runs page read "150 matching" however many matched
