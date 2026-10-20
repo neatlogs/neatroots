@@ -34,7 +34,7 @@ The 23 tools, by what they are for:
 | Tool | Returns | Model |
 | --- | --- | --- |
 | `list_findings` | Findings with probabilities, evidence span ids and explanations | none |
-| `compare_runs` | Two runs side by side: status, duration, tokens, tool sequence, outputs, problems | none |
+| `compare_runs` | Two runs side by side, including across projects: status, duration, tokens, tool sequence, output previews, problems | none |
 | `explain_run` | Likely cause, the spans that show it, a fix, and an evidence-support score | local LLM, checked by the decision model |
 | `ask` | An answer over local runs, citing span ids | local LLM, checked by the decision model |
 | `judge` | The probability that a yes/no question about chosen spans is yes | decision model |
@@ -61,3 +61,9 @@ run and compare the two."* See [replay.md](replay.md) for setting up whole-agent
 
 Span ids can be shortened to any unique prefix. Run content is data recorded from an agent; the
 server's instructions tell clients not to follow instructions inside it.
+
+The app's **Compare runs** view and `compare_runs` use the same comparison logic. The app restricts
+pairs to one project and can display full recorded output; MCP keeps its existing cross-project
+capability and response fields (`a`, `b`, `fixed`, `new_problems`, `same_tool_sequence`). Each MCP
+side contains `summary`, `tools`, `output`, and `problems`. Replay banners offer **Compare with
+original** with both runs preselected. See [replay.md](replay.md).

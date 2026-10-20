@@ -9,6 +9,7 @@ import { deleteCloudToken, getCloudToken, setCloudToken } from "../relay/keychai
 import { buildChat } from "../semantics/chat-view.js";
 import { body, clampInt, err } from "./util.js";
 import { runSummary } from "./api.js";
+import { compareRuns } from "./run-comparison.js";
 import { bodyLimit } from "hono/body-limit";
 import type { RunFilter } from "../store/db.js";
 
@@ -49,6 +50,18 @@ function sinceMs(v: string | undefined): number | undefined {
 }
 
 export function mountExploreApi(app: Hono, roots: Roots): void {
+  app.get("/api/compare", (c) => {
+    const a = c.req.query("a");
+    const b = c.req.query("b");
+    if (!a || !b) return err(c, 400, "select two runs (a and b)");
+    const original = roots.store.getRun(a), comparison = roots.store.getRun(b);
+    if (!original) return err(c, 404, "Original run not found. It may have been deleted or removed by retention.");
+    if (!comparison) return err(c, 404, "Comparison run not found. It may have been deleted or removed by retention.");
+    // The app compares within a project; MCP retains its existing cross-project capability.
+    if (original.project !== comparison.project) return err(c, 400, "Choose two runs from the same project to compare in the app.");
+    return c.json(compareRuns(roots, a, b));
+  });
+
   // ---------------------------------------------------------------- views
 
   app.get("/api/runs/:traceId/chat", (c) => {

@@ -24,10 +24,10 @@ export function ReplaysPanel({ replays }: { replays: Replay[] }) {
       <PanelContent>
         <ul className="-mx-6 -mb-6 flex max-h-64 flex-col overflow-y-auto border-t border-border">
           {replays.map((r) => (
-            <li key={r.id} className="border-b border-border/60 last:border-0">
+            <li key={r.id} className="h-20 shrink-0 border-b border-border/60 last:border-0">
               <a
                 href={r.new_trace_id ? `#/runs/${r.new_trace_id}` : undefined}
-                className={cn("flex min-h-14 items-center gap-3 px-6 py-2", r.new_trace_id && "transition-colors hover:bg-surface-subtle")}
+                className={cn("flex h-14 items-center gap-3 px-6 py-2", r.new_trace_id && "transition-colors hover:bg-surface-subtle")}
               >
                 {r.state === "running" ? (
                   <Spinner size="xs" />
@@ -42,6 +42,7 @@ export function ReplaysPanel({ replays }: { replays: Replay[] }) {
                 </span>
                 <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{ago(r.created_ms)}</span>
               </a>
+              {r.new_trace_id && <a className="block px-6 pb-2 text-xs text-muted-foreground underline-offset-4 hover:underline" href={`#/compare?${new URLSearchParams({ a: r.trace_id, b: r.new_trace_id })}`}>Compare runs</a>}
             </li>
           ))}
         </ul>

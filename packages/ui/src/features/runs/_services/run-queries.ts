@@ -24,6 +24,7 @@ export function useRuns(p: RunListParams) {
   const pages = query.data?.pages;
   return {
     data: pages ? { runs: pages.flatMap((pg) => pg.runs), total: pages[0]?.total ?? 0, matching: pages[0]?.matching } : undefined,
+    error: query.error,
     isLoading: query.isLoading,
     hasMore: !!query.hasNextPage,
     loadMore: () => void query.fetchNextPage(),
