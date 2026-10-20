@@ -101,6 +101,15 @@ note reaches the agent, **resolved** when a later check of the same question fal
 **dismissed** when you disagree. A model error or timeout records the check as **not checked**; it never
 counts as a pass. Dismissals feed each check's precision; noisy checks are flagged for retirement.
 
+Each finding counts once after it is raised or made active. Failed checks and findings recorded while a
+check is quiet do not count unless later raised or made active. Dismissing a counted finding lowers the
+kept ratio; resolving it leaves it in the count. Dismissals of counted findings in one project can make
+that check go quiet in that project.
+
+Check totals are stored separately from run details. Run retention can remove finding rows while
+preserving check totals, and deleting a check removes its totals while leaving its findings. Existing
+totals are preserved when opening an older database and may include older failed or quiet rows.
+
 Before a question raises a finding, the LLM takes a second look: it must quote the words in the run
 that show the problem, the quote must really be there, and it must still hold given what the run did
 earlier. The run page shows that quote. When an LLM answered, the run page says "Very likely (LLM

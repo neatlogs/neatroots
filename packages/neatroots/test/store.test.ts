@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { Store } from "../src/store/db.js";
 import { traceReadback } from "../src/server/readback.js";
@@ -17,6 +18,178 @@ afterEach(() => {
 });
 
 describe("store", () => {
+  it("persists metric eligibility and dismissal state when an excluded finding is promoted", () => {
+    const h = tmpHome();
+    homes.push(h);
+    const checkId = "test-persisted-actionable-metrics";
+    let st: Store | undefined = new Store(path.join(h, "data"));
+    try {
+      st.upsertCheckRow({ id: checkId, kind: "question", source: "user", path: null, body: "test" });
+      const finding = st.insertFinding({
+        trace_id: hex(16),
+        check_id: checkId,
+        check_kind: "question",
+        title: "Test finding",
+        probability: null,
+        status: "failed",
+        evidence_span_ids: [],
+        detail: {},
+        model: null,
+        triage_score: null,
+        explanation_id: null,
+      });
+      st.updateFinding(finding.id, { status: "active" });
+      st.updateFinding(finding.id, { status: "dismissed" });
+      expect(st.checkStats()[checkId]).toMatchObject({ hits: 1, dismissed: 1 });
+      st.close();
+      st = new Store(path.join(h, "data"));
+      expect(st.checkStats()[checkId]).toMatchObject({ hits: 1, dismissed: 1 });
+      st.updateFinding(finding.id, { status: "active" });
+      expect(st.checkStats()[checkId]).toMatchObject({ hits: 1, dismissed: 0 });
+      st.updateFinding(finding.id, { status: "dismissed" });
+      expect(st.checkStats()[checkId]).toMatchObject({ hits: 1, dismissed: 1 });
+    } finally {
+      st?.close();
+    }
+  });
+
+  it("preserves stored check totals when adding eligibility to an older database", () => {
+    const h = tmpHome();
+    homes.push(h);
+    const checkId = "test-legacy-actionable-metrics";
+    let st: Store | undefined = new Store(path.join(h, "data"));
+    let findingId = "";
+    try {
+      st.upsertCheckRow({ id: checkId, kind: "question", source: "user", path: null, body: "test" });
+      const finding = st.insertFinding({
+        trace_id: hex(16),
+        check_id: checkId,
+        check_kind: "question",
+        title: "Legacy finding",
+        probability: null,
+        status: "dismissed",
+        evidence_span_ids: [],
+        detail: {},
+        model: null,
+        triage_score: null,
+        explanation_id: null,
+      });
+      findingId = finding.id;
+      st.db.prepare("UPDATE checks SET hits = 7, dismissed = 3 WHERE id = ?").run(checkId);
+      const dbFile = st.file;
+      st.close();
+      st = undefined;
+
+      const legacy = new Database(dbFile);
+      legacy.exec("ALTER TABLE findings DROP COLUMN metric_counted");
+      legacy.exec("ALTER TABLE findings DROP COLUMN metric_generation");
+      legacy.exec("ALTER TABLE checks DROP COLUMN metric_generation");
+      legacy.close();
+
+      st = new Store(path.join(h, "data"));
+      expect(st.checkStats()[checkId]).toMatchObject({ hits: 7, dismissed: 3 });
+      const migrated = st.db.prepare("SELECT metric_counted, metric_generation FROM findings WHERE id = ?").get(findingId) as { metric_counted: number; metric_generation: string };
+      expect(migrated).toMatchObject({ metric_counted: 1 });
+      expect(migrated.metric_generation).toBeTruthy();
+      st.updateFinding(findingId, { status: "active" });
+      expect(st.checkStats()[checkId]).toMatchObject({ hits: 7, dismissed: 2 });
+    } finally {
+      st?.close();
+    }
+  });
+
+  it("keeps retained findings from a deleted check out of a re-added check's totals", () => {
+    const st = store();
+    const checkId = "test-readded-actionable-metrics";
+    try {
+      st.upsertCheckRow({ id: checkId, kind: "question", source: "user", path: null, body: "test" });
+      const old = st.insertFinding({
+        trace_id: hex(16),
+        check_id: checkId,
+        check_kind: "question",
+        title: "Retained finding",
+        probability: null,
+        status: "active",
+        evidence_span_ids: [],
+        detail: {},
+        model: null,
+        triage_score: null,
+        explanation_id: null,
+      });
+      st.updateFinding(old.id, { status: "dismissed" });
+      expect(st.checkStats()[checkId]).toMatchObject({ hits: 1, dismissed: 1 });
+
+      st.db.prepare("DELETE FROM checks WHERE id = ?").run(checkId);
+      st.upsertCheckRow({ id: checkId, kind: "question", source: "user", path: null, body: "test" });
+      expect(st.checkStats()[checkId]).toMatchObject({ hits: 0, dismissed: 0 });
+      st.updateFinding(old.id, { status: "active" });
+      st.updateFinding(old.id, { status: "dismissed" });
+      expect(st.checkStats()[checkId]).toMatchObject({ hits: 0, dismissed: 0 });
+
+      const current = st.insertFinding({
+        trace_id: hex(16),
+        check_id: checkId,
+        check_kind: "question",
+        title: "Current finding",
+        probability: null,
+        status: "active",
+        evidence_span_ids: [],
+        detail: {},
+        model: null,
+        triage_score: null,
+        explanation_id: null,
+      });
+      st.updateFinding(current.id, { status: "dismissed" });
+      expect(st.checkStats()[checkId]).toMatchObject({ hits: 1, dismissed: 1 });
+    } finally {
+      st.close();
+    }
+  });
+
+  it("does not attach pre-deletion findings to a re-added check during legacy migration", () => {
+    const h = tmpHome();
+    homes.push(h);
+    const checkId = "test-legacy-readded-actionable-metrics";
+    let st: Store | undefined = new Store(path.join(h, "data"));
+    try {
+      st.upsertCheckRow({ id: checkId, kind: "question", source: "user", path: null, body: "test" });
+      const old = st.insertFinding({
+        trace_id: hex(16),
+        check_id: checkId,
+        check_kind: "question",
+        title: "Old retained finding",
+        probability: null,
+        status: "active",
+        evidence_span_ids: [],
+        detail: {},
+        model: null,
+        triage_score: null,
+        explanation_id: null,
+      });
+      st.db.prepare("DELETE FROM checks WHERE id = ?").run(checkId);
+      st.upsertCheckRow({ id: checkId, kind: "question", source: "user", path: null, body: "test" });
+      st.db.prepare("UPDATE checks SET created_ms = ? WHERE id = ?").run(old.created_ms + 1, checkId);
+      const dbFile = st.file;
+      st.close();
+      st = undefined;
+
+      const legacy = new Database(dbFile);
+      legacy.exec("ALTER TABLE findings DROP COLUMN metric_counted");
+      legacy.exec("ALTER TABLE findings DROP COLUMN metric_generation");
+      legacy.exec("ALTER TABLE checks DROP COLUMN metric_generation");
+      legacy.close();
+
+      st = new Store(path.join(h, "data"));
+      const generation = st.db.prepare("SELECT metric_generation FROM findings WHERE id = ?").get(old.id) as { metric_generation: string | null };
+      expect(generation.metric_generation).toBeNull();
+      expect(st.checkStats()[checkId]).toMatchObject({ hits: 0, dismissed: 0 });
+      st.updateFinding(old.id, { status: "dismissed" });
+      expect(st.checkStats()[checkId]).toMatchObject({ hits: 0, dismissed: 0 });
+    } finally {
+      st?.close();
+    }
+  });
+
   it("aggregates a run from child spans, root and completion marker", () => {
     const st = store();
     const t = hex(16);

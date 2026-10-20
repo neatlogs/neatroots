@@ -32,7 +32,12 @@ export function ChecksTable({
           <TableHead className={`${HEAD} w-24`}>Kind</TableHead>
           <TableHead className={`${HEAD} w-28`}>Source</TableHead>
           <TableHead className={`${HEAD} w-24`}>Scope</TableHead>
-          <TableHead className={`${HEAD} w-40 pr-6 text-right`}>Findings</TableHead>
+          <TableHead
+            className={`${HEAD} w-40 pr-6 text-right`}
+            title="Each finding counts once after it is raised or made active. Failed and quiet findings count only if later raised or made active. Older totals are preserved."
+          >
+            Findings
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -74,7 +79,9 @@ export function ChecksTable({
                         </StatusPill>
                       )}
                       {c.precision.hits > 0 ? (
-                        <span title={`${c.precision.hits} findings, ${c.precision.dismissed} dismissed`}>
+                        <span
+                          title={`${c.precision.hits} counted findings, ${c.precision.dismissed} dismissed. Findings count once after they are raised or made active; older totals are preserved.`}
+                        >
                           {c.precision.hits}
                           {c.precision.precision !== null ? ` · ${pct(c.precision.precision)} kept` : ""}
                         </span>
