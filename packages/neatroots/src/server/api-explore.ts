@@ -126,7 +126,7 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   const importLimit = bodyLimit({ maxSize: 64 * 1024 * 1024, onError: (c) => err(c, 413, "the file is larger than 64 MB; split it, or send it to /v1/traces in parts") });
   app.post("/api/imports/file", importLimit, async (c) => {
     const b = await body<{ name?: string; content?: string; project?: string }>(c);
-    if (!b.content) return err(c, 400, "content is required");
+    if (typeof b.content !== "string" || !b.content) return err(c, 400, "content is required");
     try {
       const batches = parseTraceFile(b.content, b.name ?? "upload.json", b.project || undefined);
       const updates = roots.ingest(batches);
