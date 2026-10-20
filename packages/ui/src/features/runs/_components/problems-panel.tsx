@@ -259,7 +259,7 @@ function CleanResult({ c, running, onRecheck }: { c?: CheckCoverage | null; runn
     return (
       <p className="flex items-center gap-2 text-sm text-muted-foreground">
         <Icon icon={CheckmarkCircle02Icon} size="sm" className="text-success-fg" />
-        {running ? "Nothing found yet. neatroots checks each span as it arrives." : c?.questions ? `Nothing found. Rules and all ${c.questions} questions passed.` : "Nothing found. Every check that ran on this run passed."}
+        {running ? "Nothing found yet. neatroots checks each span as it arrives." : c?.questions ? `No open findings. All ${c.questions} questions have recorded answers; see Check explanations for evaluation details.` : "No open findings. See Check explanations for observed outcomes."}
       </p>
     );
   }

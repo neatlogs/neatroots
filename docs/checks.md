@@ -127,3 +127,21 @@ seconds). With no local LLM, Laya answers everything. Settings → Models shows 
 When the local LLM stands in for the decision model, span-level questions are asked only about the
 newest waiting span (at most four per check per run), identical questions are answered from a cache,
 and note-writing jumps the LLM queue. With Laya or Jev every span is asked.
+
+## Run check explanations
+
+The run page records observed live check outcomes in **Check explanations**. The same
+`check_outcomes` document appears in the run REST response and MCP run outline. Reading it
+does not call a model. Scheduling, no evidence, coalescing, attempt caps, unavailable/error
+responses, below-threshold answers, verification rejection and quiet flags have separate codes.
+Counts describe observations, including repeated evaluations, rather than a pass rate; recent
+details retain their target span and evaluation attempt identity. A rule returning no result is
+unknown because its evaluator can also skip work.
+
+Live updates reuse a run's saved generation, including after idle eviction or a restart.
+Explicit recheck/resume starts a new generation and replaces the previous bounded document,
+retaining its previous generation ID. Late results cannot update the new document. Up to 256 checks and
+32 recent observations per check are retained; cumulative reason counts remain visible.
+Explanations survive restarts and are deleted with their run, including retention deletion.
+Older runs without records show explanations unavailable; no outcomes are reconstructed from
+missing findings. Re-run checks records a new generation using the current checks.

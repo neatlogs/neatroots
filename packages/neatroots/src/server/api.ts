@@ -60,6 +60,7 @@ export function runDetail(roots: Roots, traceId: string) {
     run: runSummary(roots, run),
     spans: spans.map((s) => ({ ...s, tool_result: toolLabels[s.span_id] ?? null })),
     findings,
+    check_outcomes: roots.engine?.outcomes.read(traceId) ?? null,
     notes: roots.store.notesForTrace(traceId),
     explanation: roots.store.explanationFor("run", traceId) ?? null,
     summary: roots.store.getSummary(traceId) ?? null,

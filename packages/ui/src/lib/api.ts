@@ -133,6 +133,9 @@ export interface RunDetail {
   replay_of: Replay | null;
   /** Where an imported run came from (neatlogs-cloud or file). */
   import_source: string | null;
+  check_outcomes: { generation: string; previous_generation: string | null; started_ms: number; origin: string; omitted_checks: number;
+    checks: { check_id: string; title: string; observations: number; counts: Record<string, number>;
+      recent: { sequence: number; attempt_id: string | null; reason: string; updated_ms: number; target: string | null }[] }[] } | null;
   coverage?: CheckCoverage | null;
 }
 

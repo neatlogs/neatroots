@@ -1,3 +1,4 @@
+import { CheckOutcomesPanel } from "./check-outcomes-panel";
 import { BarChartHorizontalIcon, Download01Icon, GitForkIcon, MoreHorizontalIcon, PinIcon, PinOffIcon } from "@hugeicons/core-free-icons";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -265,6 +266,7 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
             });
           }}
         />
+        <CheckOutcomesPanel outcomes={d.check_outcomes} />
         <RunViews traceId={traceId} spans={d.spans} flagged={flagged} view={view} onView={setView} selected={highlighted} onSelect={setOpen} hasSession={!!r.session_id} fork={fork} />
         <ReplaysPanel replays={d.replays} />
         <SteeringNotes notes={d.notes} />

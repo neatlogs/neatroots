@@ -177,6 +177,7 @@ function outline(roots: Roots, traceId: string, maxSpans: number) {
       total_tokens: d.run.total_tokens,
       summary: d.summary?.text ?? null,
     },
+    check_outcomes: d.check_outcomes,
     outline: lines.join("\n") + (count > maxSpans ? `\n… ${d.spans.length - maxSpans} more spans (raise max_spans)` : ""),
     findings: d.findings
       .filter((f) => f.status !== "dismissed" && f.status !== "quiet")
