@@ -7,9 +7,11 @@ import { LlmClient } from "./models/llm.js";
 import { DecisionModel } from "./models/decision.js";
 import { CheckRegistry } from "./checks/registry.js";
 import { SteeringHub } from "./steering/hub.js";
+import { CheckCompletion } from "./engine/completion.js";
 import { Engine, resumeUnfinished } from "./engine/engine.js";
 import { ImportJobs } from "./ingest/importers/index.js";
 import { Replays } from "./replay/replay.js";
+import { ReplayBatches } from "./replay/batches.js";
 import { AgentChats } from "./agents/chat.js";
 import { Relay } from "./relay/relay.js";
 import { LayaManager } from "./models/laya.js";
@@ -35,10 +37,12 @@ export class Roots {
   readonly checks: CheckRegistry;
   readonly steering: SteeringHub;
   readonly engine?: Engine;
+  readonly checkCompletion: CheckCompletion;
   readonly relay: Relay;
   readonly laya: LayaManager;
   readonly imports: ImportJobs;
   readonly replays: Replays;
+  readonly replayBatches: ReplayBatches;
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
   /** When a coding agent last called neatroots over MCP. */
@@ -52,6 +56,7 @@ export class Roots {
     this.home = opts.home ?? rootsHome();
     this.config = opts.config ?? loadConfig();
     this.store = new Store(path.join(this.home, "data"));
+    this.checkCompletion = new CheckCompletion(this.store);
     this.llm = new LlmClient(this.config.llm, { secret: (n) => getSecret(n), redactPatterns: () => this.config.cloud.redactPatterns });
     this.laya = new LayaManager(this.home, this.config.classifier);
     this.decisions = new DecisionModel(
@@ -66,6 +71,7 @@ export class Roots {
     this.relay = new Relay(this);
     this.imports = new ImportJobs(this);
     this.replays = new Replays(this);
+    this.replayBatches = new ReplayBatches(this);
     this.chats = new AgentChats(this);
     this.store.maintainSearch(
       (n, ready) => (ready ? n && log.info(`search index ready for fast lookups (${n} rows)`) : log.warn("search index lookups couldn't be prepared; search works but is slower on a large store")),
@@ -81,6 +87,7 @@ export class Roots {
 
   ingest(batches: ResourceSpansBatch[]): TraceUpdate[] {
     const updates = this.store.ingest(batches);
+    this.replayBatches.observe(batches);
     for (const u of updates) this.bus.emit("trace", u);
     return updates;
   }
@@ -113,7 +120,11 @@ export class Roots {
   }
 
   close(): void {
+    if (!this.store.db.open) return;
     clearInterval(this.sweeper);
+    this.engine?.stopCleanup();
+    this.replayBatches.close();
+    this.replays.close();
     this.laya.stop();
     this.store.close();
   }

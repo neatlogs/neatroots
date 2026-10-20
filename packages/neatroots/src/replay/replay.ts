@@ -85,6 +85,7 @@ export function toChat(messages: Plain | undefined): ChatMessage[] {
 }
 
 export class Replays {
+  private closed = false;
   constructor(private readonly roots: Roots) {
     roots.store.db.exec(SCHEMA);
     // A replay runs in this process (a child command or an HTTP call); it cannot
@@ -96,6 +97,7 @@ export class Replays {
   }
 
   private save(r: Replay): void {
+    if (this.closed || !this.roots.store.db.open) return;
     this.roots.store.db
       .prepare(
         `INSERT INTO replays (id, trace_id, span_id, kind, via, overrides, state, new_trace_id, output_preview, error, log_tail, created_ms, finished_ms)
@@ -215,7 +217,8 @@ export class Replays {
   }
 
   /** Re-runs the whole agent with overrides. Returns at once; the replay finishes in the background. */
-  startRun(traceId: string, overrides: ReplayOverrides = {}): { replay: Replay; done: Promise<Replay> } {
+  startRun(traceId: string, overrides: ReplayOverrides = {}, onExit?: (code: number | null) => void, onCreated?: (replay: Replay) => void): { replay: Replay; done: Promise<Replay> } {
+    if (this.closed) throw new Error("replays are shutting down");
     const t = loadTrace(this.roots.store, traceId);
     if (!t.run) throw new Error("run not found");
     const project = t.run.project;
@@ -225,11 +228,15 @@ export class Replays {
     }
     const input = overrides.input ?? runGoal(t).user ?? runGoal(t).rootInput ?? "";
     const r = this.create(traceId, null, "run", target.url ? "http" : "command", { ...overrides, input });
-    const done = this.runAgent(r, project ?? "", target, input, overrides).catch((err) => this.finish(r, { state: "failed", error: (err as Error).message }));
+    try { onCreated?.(r); } catch (error) {
+      this.finish(r, { state: "failed", error: (error as Error).message });
+      throw error;
+    }
+    const done = this.runAgent(r, project ?? "", target, input, overrides, onExit).catch((err) => this.finish(r, { state: "failed", error: (err as Error).message }));
     return { replay: r, done };
   }
 
-  private async runAgent(r: Replay, project: string, target: { command?: string; cwd?: string; url?: string }, input: string, o: ReplayOverrides): Promise<Replay> {
+  private async runAgent(r: Replay, project: string, target: { command?: string; cwd?: string; url?: string }, input: string, o: ReplayOverrides, onExit?: (code: number | null) => void): Promise<Replay> {
     const started = Date.now();
     let linked: string | null = null;
     // The run it produces carries neatroots.replay.id as a resource attribute (via
@@ -288,16 +295,19 @@ export class Replays {
               : `couldn't start the rerun command: ${error.message}`,
           );
         }
+        onExit?.(code);
         if (code !== 0) log.info(`replay ${r.id}: the agent exited with ${code}`);
       }
       // Spans arrive on the SDK's flush interval; give the run a moment to land.
       for (let i = 0; i < 20 && !linked; i++) {
         await new Promise((res) => setTimeout(res, 500));
+        if (this.closed) return this.finish(r, { state: "failed", error: "interrupted by server shutdown" });
         if (!linked) {
           const fresh = this.roots.store.listRuns({ project, sinceMs: started - 500, limit: 5 }).filter((x) => x.trace_id !== r.trace_id && !this.originOf(x.trace_id));
           if (fresh.length && i >= 4) linked = fresh[fresh.length - 1].trace_id;
         }
       }
+      if (this.closed) return this.finish(r, { state: "failed", error: "interrupted by server shutdown" });
       if (!linked) return this.finish(r, { state: "failed", error: "the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?", log_tail: tail || null });
       const run = this.roots.store.getRun(linked);
       return this.finish(r, { state: "succeeded", new_trace_id: linked, output_preview: run?.output_preview ?? null, log_tail: tail || null });
@@ -305,4 +315,21 @@ export class Replays {
       off();
     }
   }
+
+  /** A batch replaces navigation with unique evidence, or clears a contested association. */
+  associateBatch(id: string, traceId: string | null): void {
+    if (this.closed || !this.roots.store.db.open) return;
+    const replay = this.get(id);
+    if (!replay || replay.kind !== "run" || replay.state === "running" || replay.new_trace_id === traceId) return;
+    if (traceId === null) {
+      this.save({ ...replay, new_trace_id: null, output_preview: null });
+      return;
+    }
+    const run = this.roots.store.getRun(traceId);
+    if (!run) return;
+    this.save({ ...replay, new_trace_id: traceId, output_preview: run.output_preview });
+  }
+
+  /** Do not cancel other processes; only guard our async callbacks after the store closes. */
+  close(): void { this.closed = true; }
 }

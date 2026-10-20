@@ -268,6 +268,8 @@ export interface IngestedSpan {
   row: SpanRow;
   view: SpanView;
   isNew: boolean;
+  /** Stored evidence changed, excluding receipt time and insertion order. */
+  isChanged?: boolean;
 }
 
 export interface TraceUpdate {
@@ -492,10 +494,9 @@ export class Store {
           const view = buildView(span, b.resource.attributes);
           const previous = this.db
             .prepare(
-              `SELECT is_marker, span_kind, status_code, prompt_tokens, completion_tokens, total_tokens, blobs
-               FROM spans WHERE trace_id = ? AND span_id = ?`,
+              `SELECT * FROM spans WHERE trace_id = ? AND span_id = ?`,
             )
-            .get(span.traceId, span.spanId) as (AggregateSpan & { blobs: string | null }) | undefined;
+            .get(span.traceId, span.spanId) as (AggregateSpan & { blobs: string | null } & Record<string, unknown>) | undefined;
           const previousBlobs = json<unknown>(previous?.blobs, null);
           if (Array.isArray(previousBlobs)) {
             for (const sha of previousBlobs) {
@@ -508,7 +509,9 @@ export class Store {
             updates.set(span.traceId, u);
           }
           const row = this.writeSpan(span, view, resourceId, scopeId, now, !previous);
-          u.spans.push({ row, view, isNew: !previous });
+          const stored = previous ? this.db.prepare("SELECT * FROM spans WHERE trace_id=? AND span_id=?").get(span.traceId, span.spanId) as Record<string, unknown> : undefined;
+          const isChanged = !previous || Object.keys(previous).some((key) => key !== "received_ms" && key !== "seq" && previous[key] !== stored?.[key]);
+          u.spans.push({ row, view, isNew: !previous, isChanged });
           const runFlags = this.updateRun(span, view, row, resAttrs, now, previous);
           if (runFlags.created) u.runCreated = true;
           if (runFlags.rootEnded) u.rootEnded = true;

@@ -7,6 +7,7 @@ import { endpointProblem } from "../relay/endpoint.js";
 import { deleteCloudToken, getCloudToken, setCloudToken } from "../relay/keychain.js";
 import type { ImportSource } from "../ingest/importers/types.js";
 import { api, ask, port, running } from "./util.js";
+import { cliRepeatCount, runBatch } from "./replay-batch.js";
 
 // neatroots import, replay and rerun: bring runs in from files and Neatlogs Cloud, and re-run them.
 
@@ -100,11 +101,14 @@ export function registerDataCommands(program: Command): void {
     .argument("<trace-id>")
     .description("Replay a run: one LLM call with --span (no agent needed), or the whole agent through its registered rerun command or endpoint")
     .option("--span <id>", "replay only this LLM span, with the configured LLM")
+    .option("--times <count>", "repeat the whole agent sequentially, 1 to 20 times", cliRepeatCount)
     .option("--input <text>", "run the agent with this input instead")
     .option("--model <model>")
     .option("--system <prompt>", "system prompt override")
     .action(async (traceId: string, opts) => {
+      if (opts.times !== undefined && opts.span) throw new Error("times is only supported for whole-agent replay");
       const p = await needRunning();
+      if (opts.times !== undefined) return runBatch(p, traceId, opts.times, { input: opts.input, model: opts.model, system: opts.system });
       const r = await api<{ id: string; state: string; new_trace_id: string | null; output_preview: string | null; error: string | null }>(p, `/api/runs/${traceId}/replay`, {
         method: "POST",
         body: JSON.stringify({ span_id: opts.span, input: opts.input, model: opts.model, system: opts.system }),

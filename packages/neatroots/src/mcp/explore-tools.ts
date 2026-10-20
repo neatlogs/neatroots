@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { batchTool } from "../replay/batch-tools.js";
 import type { Roots } from "../core.js";
 import { loadTrace, type SpanInfo } from "../engine/trace.js";
 import { listCloudTraces, NO_CLOUD_TOKEN } from "../ingest/importers/neatlogs-cloud.js";
@@ -196,10 +197,12 @@ export const EXPLORE_TOOLS = [
     name: "replay",
     title: "Replay",
     description:
-      "Fork a run: re-send one LLM span's messages (edited if you pass messages, or with another model or system prompt) to the user's configured LLM, without running the agent. Stores the answer as a new run and returns it. For a whole-agent re-run use rerun.",
+      "Fork a run: pass span_id for one LLM call, or omit span_id and pass times for sequential whole-agent repeats. Batch results include ID, linked and pending counts; poll or cancel with replay_batch.",
     input: {
       trace_id: z.string().optional(),
-      span_id: z.string().describe("The LLM span to replay"),
+      span_id: z.string().optional().describe("The LLM span to replay; omit for whole-agent batches"),
+      times: z.number().int().min(1).max(20).optional(),
+      input: z.string().optional(),
       messages: z.array(z.object({ role: z.string(), content: z.string() })).optional(),
       model: z.string().optional(),
       system: z.string().optional(),
@@ -207,8 +210,26 @@ export const EXPLORE_TOOLS = [
     run: async (roots, a) => {
       const resolved = resolveTraceNoting(roots, a.trace_id);
       const traceId = resolved.traceId;
+      if (a.times !== undefined) {
+        if (a.span_id || a.messages) throw new Error("times is only supported for whole-agent replay");
+        const result = await batchTool(roots, traceId, a.times, { input: a.input, model: a.model, system: a.system });
+        const note = [fallbackNote(resolved).note, (result as { note?: string }).note].filter(Boolean).join(" ");
+        return note ? { ...result, note } : result;
+      }
+      if (!a.span_id) throw new Error("span_id is required for an LLM replay; use times for a whole-agent batch");
       const r = await roots.replays.replayLlm(traceId, resolveSpan(roots, traceId, a.span_id), { messages: a.messages, model: a.model, system: a.system });
       return { replay_id: r.id, state: r.state, error: r.error, new_trace_id: r.new_trace_id, answer: r.output_preview, ...fallbackNote(resolved) };
+    },
+  }),
+  def({
+    name: "replay_batch",
+    title: "Replay batch status",
+    description: "Read a durable replay batch summary, or cancel its remaining repeats. Active work can finish; cancellation does not claim to terminate its process.",
+    input: { batch_id: z.string(), cancel: z.boolean().optional() },
+    run: async (roots, a) => {
+      const batch = a.cancel ? roots.replayBatches.cancel(a.batch_id) : roots.replayBatches.get(a.batch_id);
+      if (!batch) throw new Error("no such replay batch");
+      return batch;
     },
   }),
   def({
