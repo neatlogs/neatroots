@@ -243,8 +243,21 @@ describe("server", () => {
     const origin = { origin: tb.url.replace("127.0.0.1", "localhost") };
     const get = async (q: string) => (await (await fetch(`${tb.url}/api/runs?${q}`, { headers: origin })).json()) as { runs: { trace_id: string }[]; total: number; matching: number };
     expect(await get("")).toMatchObject({ total: 3, matching: 3 });
-    expect(await get("has_finding=1")).toMatchObject({ runs: [{ trace_id: ids[0] }], total: 3, matching: 1 });
+    const anyFinding = await get("has_finding=1");
+    expect(anyFinding).toMatchObject({ total: 3, matching: 2 });
+    expect(anyFinding.runs.map((run) => run.trace_id).sort()).toEqual(ids.slice(0, 2).sort());
     expect(await get("has_open_finding=1")).toMatchObject({ runs: [{ trace_id: ids[0] }], total: 3, matching: 1 });
+    expect(await get("has_finding=1&has_open_finding=1")).toMatchObject({ runs: [{ trace_id: ids[0] }], total: 3, matching: 1 });
+    const client = new Client({ name: "test", version: "1.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${tb.url}/mcp`)));
+    try {
+      const result: any = await client.callTool({ name: "search_runs", arguments: { has_finding: true } });
+      expect(result.isError).toBeFalsy();
+      const search = JSON.parse(result.content[0].text);
+      expect(search.runs.map((run: { trace_id: string }) => run.trace_id).sort()).toEqual(ids.slice(0, 2).sort());
+    } finally {
+      await client.close();
+    }
     expect(await get("status=error")).toMatchObject({ total: 3, matching: 1 });
     // matching counts every match, not just the page; there was no such count, so with more matches
     // than the page holds (it asks for 150) the runs page read "150 matching" however many matched
