@@ -1,3 +1,4 @@
+import { previewCheck, type PreviewOptions } from "./preview.js";
 import type { Roots } from "../core.js";
 import type { TraceUpdate } from "../store/db.js";
 import type { LlmClient } from "../models/llm.js";
@@ -41,6 +42,8 @@ import { verifyFlag } from "./verify.js";
 
 /** Default library questions when no LLM is available to plan. */
 export const DEFAULT_PLAN = ["ignored-tool-error", "repeat-without-progress", "unfinished-task", "contradicts-tool-output"];
+
+export type { PreviewRunResult } from "./preview.js";
 
 const TRIAGE_LEVELS = [
   "fine, nothing to look at",
@@ -1157,52 +1160,10 @@ ${library}`;
     return { probability: r.answers.q?.probability ?? 0, evidence_span_ids: spanIds, backend: r.backend, model: r.model };
   }
 
-  /** Runs a question over recent runs without raising findings, to see how often it would fire. */
-  async previewCheck(check: QuestionCheck | RuleCheck, opts: { limit?: number; workflow?: string; project?: string; timeBudgetMs?: number; signal?: AbortSignal } = {}): Promise<{
-    checked: number;
-    hits: { trace_id: string; probability: number | null; evidence_span_ids: string[]; root_name: string | null }[];
-    total: number;
-    truncated: boolean;
-  }> {
-    const limit = opts.limit ?? 50;
-    // Only runs the check would watch: the engine skips runs outside its applies_to, so a preview
-    // over them would report hits the check can never raise. Look further back to still fill `limit`.
-    const runs = this.roots.store
-      .listRuns({ workflow: opts.workflow, project: opts.project, limit: check.applies_to ? 500 : limit })
-      .filter((r) => r.status !== "running")
-      .filter((r) => this.appliesTo(check, { project: r.project ?? "unknown", workflow: r.workflow ?? r.project ?? "unknown" }))
-      .slice(0, limit);
-    const deadline = Date.now() + (opts.timeBudgetMs ?? 90_000);
-    const hits: { trace_id: string; probability: number | null; evidence_span_ids: string[]; root_name: string | null }[] = [];
-    let checked = 0;
-    for (const r of runs) {
-      if (Date.now() > deadline) break;
-      const snap = loadTrace(this.roots.store, r.trace_id);
-      checked++;
-      if (isRule(check)) {
-        // A previewed check is a draft someone (or a coding agent) wrote, so its pattern is timed.
-        const hit = evaluateRule(check, snap, true, undefined, true);
-        if (hit) hits.push({ trace_id: r.trace_id, probability: null, evidence_span_ids: hit.evidenceSpanIds, root_name: r.root_name });
-        continue;
-      }
-      const targets = check.scope === "span" ? selectSpans(snap.spans, check.evidence?.spans).slice(-5) : [undefined];
-      for (const focus of targets) {
-        const ev = buildEvidence(snap, check.evidence, { focus });
-        if (!ev.spanIds.length && !check.evidence?.final_output) continue;
-        try {
-          if (opts.signal?.aborted) break;
-          const res = await this.decisions.decide(ev.text, [toQuestion(check, check.params ?? {})], { priority: "interactive", signal: opts.signal });
-          const v = flagged(check, res);
-          if (v.flagged) {
-            hits.push({ trace_id: r.trace_id, probability: v.probability, evidence_span_ids: ev.spanIds, root_name: r.root_name });
-            break;
-          }
-        } catch (err) {
-          if (err instanceof DecisionUnavailableError) throw err;
-        }
-      }
-    }
-    return { checked, hits, total: runs.length, truncated: checked < runs.length };
+  /** Interactive preview without raising findings or performing the live second look. */
+  async previewCheck(check: QuestionCheck | RuleCheck, opts: PreviewOptions = {}) {
+    return previewCheck(this.roots, this.decisions, check, opts,
+      (run) => this.appliesTo(check, run), (c) => toQuestion(c, c.params ?? {}), flagged);
   }
 
   /** Re-runs the checks for a finished run, e.g. after checks changed. `resume` keeps stored answers. */

@@ -127,3 +127,25 @@ seconds). With no local LLM, Laya answers everything. Settings → Models shows 
 When the local LLM stands in for the decision model, span-level questions are asked only about the
 newest waiting span (at most four per check per run), identical questions are answered from a cache,
 and note-writing jumps the LLM queue. With Laya or Jev every span is asked.
+
+### Preview coverage
+
+Preview is interactive and does not raise findings. Question previews do not run the live second
+look (`second_look: false`); a preview hit may not become a live finding. Deterministic rule previews
+also report `second_look: false`, because question verification does not apply to rules.
+
+`checked` and `hit_rate` describe runs with a verdict within sampled targets, not complete coverage.
+Span questions consider at most the last five matching targets and stop at the first hit. Per-run
+`evaluation` records available, considered, attempted and successfully judged targets, completeness,
+and the stopping reason. A hit retains precedence over earlier errors; without a hit, errors or
+missing evidence remain conservative non-verdict outcomes. Provider exception text is not returned.
+
+`selection` describes a bounded window after the request's project/workflow filters: at most the
+requested limit (capped at 200), or 500 candidates when the check has `applies_to`. Running runs,
+check-scope mismatches and eligible runs beyond the selected-run limit appear in `filtered_results`.
+They do not change existing selected-run `total`, `results`, `skipped` or `errors` counts. A full
+candidate window does not establish how many older runs exist. The editor shows these per-run
+reasons in a scrolling list. This is preview transparency, not live why-did-not-fire diagnostics.
+
+Preview validates the typed answer it receives before counting a successful judgment. It cannot
+recover raw provider data that a decision backend has already normalized; that parser behavior is separate.

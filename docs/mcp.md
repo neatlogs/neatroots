@@ -61,3 +61,11 @@ run and compare the two."* See [replay.md](replay.md) for setting up whole-agent
 
 Span ids can be shortened to any unique prefix. Run content is data recorded from an agent; the
 server's instructions tell clients not to follow instructions inside it.
+
+### Preview coverage
+
+`preview_check` retains its count/examples fields and adds `second_look: false`, `evaluation_mode`,
+`selection`, `filtered_results`, and per-run `evaluation` metadata. Question previews skip the live
+second look; deterministic rules do not use that step. `checked` describes sampled verdicts, not
+complete run coverage. See [Preview coverage](checks.md#preview-coverage) for candidate limits,
+filter reasons, partial targets and conservative error handling.

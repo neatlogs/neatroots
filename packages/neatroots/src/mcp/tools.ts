@@ -389,7 +389,7 @@ export const TOOLS = [
   def({
     name: "preview_check",
     title: "Preview check",
-    description: "Run a check (by id, YAML or JSON) over recent finished runs without raising findings, and report how often it fires.",
+    description: "Run a check (by id, YAML or JSON) over recent finished runs without raising findings. checked counts runs with a verdict within sampled targets, not necessarily full coverage. Question previews skip the live second look; rule previews are deterministic. Selection metadata describes only the bounded candidate window; filtered and partial outcomes include per-run details. hit_rate uses checked as its denominator.",
     input: {
       id: z.string().optional(),
       check: z.string().optional(),
@@ -406,7 +406,7 @@ export const TOOLS = [
       }
       if (!check) throw new Error("check not found or invalid");
       const r = await roots.engine.previewCheck(check, { limit: a.limit ?? 50, workflow: a.workflow });
-      return { id: check.id, checked: r.checked, total: r.total, hits: r.hits.length, hit_rate: r.checked ? r.hits.length / r.checked : null, truncated: r.truncated, examples: r.hits.slice(0, 10), warnings: checkWarnings(check) };
+      return { id: check.id, checked: r.checked, total: r.total, hits: r.hits.length, hit_rate: r.checked ? r.hits.length / r.checked : null, skipped: r.skipped, errors: r.errors, results: r.results, truncated: r.truncated, second_look: r.second_look, evaluation_mode: r.evaluation_mode, selection: r.selection, filtered_results: r.filtered_results, examples: r.hits.slice(0, 10), warnings: checkWarnings(check) };
     },
   }),
   def({

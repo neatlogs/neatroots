@@ -10,10 +10,23 @@ export interface ChecksResponse {
 }
 
 export interface PreviewResult {
+  second_look?: false;
+  evaluation_mode?: "deterministic_rule" | "question_without_second_look";
+  selection?: { candidate_limit: number; candidate_count: number; selected_count: number; window_full: boolean };
+  filtered_results?: { trace_id: string; root_name: string | null; status: "filtered"; reason: string; evaluation?: undefined }[];
   checked: number;
   total: number;
   hits: { trace_id: string; probability: number | null; root_name: string | null }[];
   hit_rate: number | null;
+  skipped: Record<string, number>;
+  errors: Record<string, number>;
+  results: {
+    trace_id: string;
+    root_name: string | null;
+    status: "hit" | "clear" | "skipped" | "error";
+    reason?: string;
+    evaluation?: { targets_available: number; targets_considered: number; targets_attempted: number; targets_evaluated: number; complete: boolean; target_limit: number; stop_reason?: string };
+  }[];
   truncated: boolean;
   /** What the check can't see (e.g. a question about the answer that only looks at tool calls). */
   warnings?: string[];

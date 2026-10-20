@@ -1,11 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import vm from "node:vm";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadTrace } from "../src/engine/trace.js";
 import { evaluateRule } from "../src/checks/rules.js";
 import { parseChecks } from "../src/checks/registry.js";
 import type { RuleCheck } from "../src/checks/types.js";
-import { batch, closeTrackedStores, hex, makeRoots, tmpHome, toolSpan, trackedStore, type TestRoots } from "./helpers.js";
+import { batch, closeTrackedStores, hex, makeRoots, markerSpan, span, tmpHome, toolSpan, trackedStore, type TestRoots } from "./helpers.js";
 
 // A `match` pattern from a check someone (or a coding agent) wrote can backtrack for minutes, e.g.
 // overlapping alternatives in a repeat. It must not stall neatroots.
@@ -13,6 +14,7 @@ import { batch, closeTrackedStores, hex, makeRoots, tmpHome, toolSpan, trackedSt
 const homes: string[] = [];
 let tb: TestRoots | undefined;
 afterEach(async () => {
+  vi.restoreAllMocks();
   closeTrackedStores();
   await tb?.close();
   tb = undefined;
@@ -67,4 +69,18 @@ describe("match patterns from checks people write", () => {
     expect(status.status).toBe(200);
     expect(Date.now() - started).toBeLessThan(3000);
   });
+});
+
+it("uses a VM time limit when previewing a draft match rule", async () => {
+  tb = await makeRoots();
+  const traceId = hex(16), root = hex(8);
+  tb.roots.ingest([batch([
+    span({ traceId, spanId: root, name: "preview-safe-pattern", kind: "workflow" }),
+    toolSpan(traceId, root, "lookup", "{}", "refund done"), markerSpan(traceId, root),
+  ])]);
+  await tb.roots.engine!.waitIdle(traceId, 5000);
+  const run = vi.spyOn(vm.Script.prototype, "runInContext");
+  const result = await tb.roots.engine!.previewCheck(check("preview-draft-pattern", "refund done"));
+  expect(result.hits).toHaveLength(1);
+  expect(run.mock.calls.some(([, options]) => typeof options === "object" && options !== null && (options.timeout ?? 0) > 0)).toBe(true);
 });
