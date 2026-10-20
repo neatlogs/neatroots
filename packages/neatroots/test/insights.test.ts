@@ -103,10 +103,19 @@ describe("insights", () => {
     const resolvedOnly = store();
     const rTrace = run(resolvedOnly, "search-agent", true);
     resolvedOnly.insertFinding({ ...base, trace_id: rTrace, check_id: "ignored-tool-error", title, status: "resolved" });
+    resolvedOnly.insertDecision({ trace_id: rTrace, check_id: "ignored-tool-error", span_id: null, probability: 0.9, answer: {}, backend: "llm", latency_ms: 1 });
     const resInsights = computeInsights(resolvedOnly.db, "7d", CHECKS);
     expect(resInsights.totals.with_problems).toBe(0);
     expect(resInsights.problems).toHaveLength(0);
+    expect(resInsights.passing.map((p) => p.check_id)).not.toContain("ignored-tool-error");
     expect(resInsights.projects.find((p) => p.name === "search-agent")).toMatchObject({ runs: 1, with_problems: 0, top_problem: null });
+    // The same check can stop being an open problem without having found nothing.
+    const previousTrace = run(resolvedOnly, "search-agent", true);
+    resolvedOnly.db.prepare("UPDATE runs SET started_ms = ? WHERE trace_id = ?").run(Date.now() - 8 * 86400_000, previousTrace);
+    resolvedOnly.insertFinding({ ...base, trace_id: previousTrace, check_id: "ignored-tool-error", title, status: "raised" });
+    const afterResolution = computeInsights(resolvedOnly.db, "7d", CHECKS);
+    expect(afterResolution.gone.map((p) => p.check_id)).toContain("ignored-tool-error");
+    expect(afterResolution.passing.map((p) => p.check_id)).not.toContain("ignored-tool-error");
   });
 
   it("lets the digest quote only numbers that are in the data", () => {

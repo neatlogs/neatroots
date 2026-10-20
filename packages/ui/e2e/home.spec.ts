@@ -29,6 +29,13 @@ test.describe("home", () => {
     await expect(page.getByRole("cell", { name: `Resolved ${id}`, exact: true })).toHaveCount(0);
     await page.getByRole("tab", { name: "All", exact: true }).click();
     await expect(page.getByRole("cell", { name: `Resolved ${id}`, exact: true })).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole("tab", { name: "All", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("cell", { name: `Resolved ${id}`, exact: true })).toBeVisible();
+    await page.getByRole("tab", { name: "With problems", exact: true }).click();
+    await page.reload();
+    await expect(page.getByRole("tab", { name: "With problems", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("cell", { name: `Resolved ${id}`, exact: true })).toHaveCount(0);
   });
 
   test("shows the period's numbers and what needs attention", async ({ page }) => {

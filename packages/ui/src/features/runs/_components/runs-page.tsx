@@ -45,6 +45,16 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
   const projects = [...new Set([...(known?.projects ?? []).map((p) => p.project), params.project].filter(Boolean))] as string[];
   const filtered = !!(params.q || params.status || params.hasFinding || params.project || params.check);
   const clear = () => setParams({ q: "", status: "", hasFinding: false, project: "" });
+  /** Keep a Home link's open-finding filter consistent with the selected tab on reload. */
+  const selectTab = (value: string) => {
+    const hasFinding = value === "problems";
+    setParams({ ...params, status: value === "running" || value === "error" ? value : "", hasFinding });
+    const [path, search] = window.location.hash.split("?");
+    const q = new URLSearchParams(search);
+    if (hasFinding) q.set("has_open_finding", "1");
+    else q.delete("has_open_finding");
+    window.history.replaceState(null, "", `${path}${q.size ? `?${q}` : ""}`);
+  };
 
   if (data && data.total === 0) {
     return (
@@ -83,7 +93,7 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
           <SegmentedTabs
             variant="pill"
             value={params.hasFinding ? "problems" : params.status || "all"}
-            onValueChange={(v) => setParams({ ...params, status: v === "running" || v === "error" ? v : "", hasFinding: v === "problems" })}
+            onValueChange={selectTab}
             items={[
               { value: "all", label: "All" },
               { value: "problems", label: "With problems" },

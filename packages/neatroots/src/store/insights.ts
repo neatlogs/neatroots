@@ -234,10 +234,11 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
     }
     byCheck.set(f.check_id, e);
   }
-  // A check has nothing to report when every finding this window is resolved, dismissed, failed, or quiet.
+  const resolvedChecks = new Set(cur.findings.filter((f) => f.status === "resolved").map((f) => f.check_id));
+  // Finding nothing excludes quiet or resolved findings, even though neither is an open problem.
   const reportedNothing = (id: string) => {
     const e = byCheck.get(id);
-    return !e?.runs.size && !e?.quiet;
+    return !e?.runs.size && !e?.quiet && !resolvedChecks.has(id);
   };
   const problems: ProblemAgg[] = [...byCheck]
     .filter(([, e]) => e.runs.size > 0)
@@ -317,7 +318,7 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
 
   const prevTitle = new Map(prev.findings.map((f) => [f.check_id, f.title]));
   const gone = [...prevRunsByCheck]
-    .filter(([id]) => reportedNothing(id))
+    .filter(([id]) => !byCheck.get(id)?.runs.size)
     .map(([id, runs]) => ({ check_id: id, title: titles.get(id)?.title ?? prevTitle.get(id) ?? id, prev_runs: runs.size }))
     .sort((a, b) => b.prev_runs - a.prev_runs);
 
