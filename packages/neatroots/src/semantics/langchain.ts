@@ -21,7 +21,14 @@ type Obj = Record<string, Plain>;
 /** A message in neatroots' chat shape. */
 export type Message = Obj & { role: string; content: Plain };
 
-const ROLE_OF_TYPE: Record<string, string> = { human: "user", user: "user", ai: "assistant", assistant: "assistant", system: "system", developer: "developer", tool: "tool", function: "tool", chat: "chat" };
+/** LangChain's message types and the roles neatroots calls them. A null-prototype map, looked up by own key only: span values are untrusted, and "constructor" or "__proto__" is not a role. */
+const ROLE_OF_TYPE: Readonly<Record<string, string>> = Object.assign(Object.create(null) as Record<string, string>, {
+  human: "user", user: "user", ai: "assistant", assistant: "assistant", system: "system", developer: "developer", tool: "tool", function: "tool", chat: "chat",
+});
+
+function roleOf(type: string): string | undefined {
+  return Object.hasOwn(ROLE_OF_TYPE, type) ? ROLE_OF_TYPE[type] : undefined;
+}
 
 function isObj(v: Plain | undefined): v is Obj {
   return !!v && typeof v === "object" && !Array.isArray(v);
@@ -45,7 +52,7 @@ function str(v: Plain | undefined): string | undefined {
 function messageType(raw: Plain | undefined): string | undefined {
   if (typeof raw !== "string") return undefined;
   const t = raw.toLowerCase().replace(/message(chunk)?$/, "");
-  return t in ROLE_OF_TYPE ? t : undefined;
+  return roleOf(t) ? t : undefined;
 }
 
 function toolCalls(v: Plain | undefined): Obj[] | undefined {
@@ -64,7 +71,7 @@ function toolCalls(v: Plain | undefined): Obj[] | undefined {
 function fromFields(type: string | undefined, f: Obj): Message | undefined {
   if (!("content" in f)) return undefined;
   const t = type ?? ("tool_call_id" in f ? "tool" : "tool_calls" in f || "invalid_tool_calls" in f ? "ai" : "human");
-  const role = t === "chat" ? (str(f.role) ?? "user") : (ROLE_OF_TYPE[t] ?? t);
+  const role = t === "chat" ? (str(f.role) ?? "user") : (roleOf(t) ?? t);
   const content = typeof f.content === "string" ? (jsonOf(f.content) ?? f.content) : (f.content ?? "");
   const m: Message = { role, content };
   const name = str(f.name);
@@ -108,7 +115,11 @@ export function langChainMessage(v: Plain | undefined): Message | undefined {
 function asMessage(v: Plain, loose: boolean): Message | undefined {
   if (isObj(v) && typeof v.role === "string" && "content" in v) return v as Message;
   if (!loose) return undefined;
-  if (Array.isArray(v) && v.length === 2 && typeof v[0] === "string" && typeof v[1] === "string" && v[0].toLowerCase() in ROLE_OF_TYPE) return { role: ROLE_OF_TYPE[v[0].toLowerCase()], content: v[1] };
+  if (Array.isArray(v) && v.length === 2 && typeof v[0] === "string" && typeof v[1] === "string") {
+    const role = roleOf(v[0].toLowerCase());
+    if (role) return { role, content: v[1] };
+    return undefined;
+  }
   if (typeof v === "string") return { role: "user", content: v };
   return undefined;
 }

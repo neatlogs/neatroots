@@ -410,6 +410,19 @@ describe("reading LangChain's serialized messages", () => {
     expect(chainValue({ messages: [["note", "not a role"]] })).toEqual({ messages: [["note", "not a role"]] });
   });
 
+  it("does not take an inherited object key for a role", () => {
+    // Span values are untrusted; "constructor" and "__proto__" are keys of every object, not roles.
+    for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      expect(langChainMessage({ type: name, data: { content: "x", type: name } })).toBeUndefined();
+      expect(langChainMessage({ lc: 1, type: "constructor", id: ["langchain", "schema", "messages", `${name}Message`], kwargs: { content: "x" } })).toBeUndefined();
+      const state = { messages: [[name, "x"]] };
+      expect(chainValue(state)).toEqual(state);
+      const mixed = chainValue({ messages: [OI.human("hi"), [name, "x"]] });
+      expect(mixed).toEqual({ messages: [OI.human("hi"), [name, "x"]] });
+    }
+    for (const m of [langChainMessage(OI.human("hi")), langChainMessage(LC.ai("ok")), ...(chainValue({ messages: [["system", "s"], ["ai", "a"]] }) as Record<string, Plain>[])]) expect(typeof m?.role).toBe("string");
+  });
+
   it("gives up on nesting deeper than it will read instead of overflowing the stack", () => {
     const deep = "[".repeat(3000);
     expect(pythonLiteral(deep)).toBeUndefined();
