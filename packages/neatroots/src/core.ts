@@ -1,4 +1,5 @@
 import path from "node:path";
+import { Worker } from "node:worker_threads";
 import { rootsHome, loadConfig, saveConfig, type RootsConfig } from "./config.js";
 import { Bus } from "./bus.js";
 import { Store, type TraceUpdate } from "./store/db.js";
@@ -41,6 +42,8 @@ export class Roots {
   readonly replays: Replays;
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
+  private retentionWorker?: Worker;
+  private closing = false;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
   /** The run and span the app has in focus, for the MCP get_current_run tool. */
@@ -93,16 +96,48 @@ export class Roots {
   /** Applies retention now and every hour. */
   startRetention(): void {
     const run = () => {
+      if (this.closing || this.retentionWorker) return;
+      const source = import.meta.url.endsWith(".ts");
+      let worker: Worker;
       try {
-        const removed = this.store.sweep(this.config.retention.days, this.config.retention.maxGb * 1024 ** 3);
-        if (removed) log.info(`retention removed ${removed} old runs`);
+        worker = new Worker(new URL(source ? "./retention-worker.ts" : "./retention-worker.js", import.meta.url), {
+          workerData: {
+            dir: this.store.dir,
+            maxAgeDays: this.config.retention.days,
+            maxBytes: this.config.retention.maxGb * 1024 ** 3,
+            startedMs: Date.now(),
+          },
+          ...(source ? { execArgv: ["--import", "tsx"] } : {}),
+        });
       } catch (err) {
         log.warn(`retention failed: ${(err as Error).message}`);
+        return;
       }
+      this.retentionWorker = worker;
+      worker.once("message", (result: { removed: number; blobCandidates: string[]; blobScanSeq?: number }) => {
+        this.finishRetention(result).catch((err: Error) => {
+          if (!this.closing) log.warn(`retention failed: ${err.message}`);
+        });
+      });
+      worker.once("error", (err) => {
+        if (!this.closing) log.warn(`retention failed: ${err.message}`);
+      });
+      worker.once("exit", (code) => {
+        if (this.retentionWorker === worker) this.retentionWorker = undefined;
+        if (code && !this.closing) log.warn(`retention worker exited with ${code}`);
+      });
     };
     run();
     this.sweeper = setInterval(run, 3_600_000);
     this.sweeper.unref();
+  }
+
+  private async finishRetention(result: { removed: number; blobCandidates: string[]; blobScanSeq?: number }): Promise<void> {
+    for (let i = 0; i < result.blobCandidates.length && !this.closing; i += 100) {
+      this.store.reclaimBlobs(result.blobCandidates.slice(i, i + 100), result.blobScanSeq ?? 0);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    if (result.removed && !this.closing) log.info(`retention removed ${result.removed} old runs`);
   }
 
   /** Installs (first run) and starts Laya in the background; checks use the LLM until it is ready. */
@@ -113,7 +148,10 @@ export class Roots {
   }
 
   close(): void {
+    this.closing = true;
     clearInterval(this.sweeper);
+    void this.retentionWorker?.terminate();
+    this.retentionWorker = undefined;
     this.laya.stop();
     this.store.close();
   }
