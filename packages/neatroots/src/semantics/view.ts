@@ -238,6 +238,46 @@ function normalizeParts(v: Plain): Plain {
   });
 }
 
+/** OpenTelemetry GenAI tool definitions array on chat spans (PydanticAI, etc.). */
+function genAiToolDefinitions(attrs: Attrs): string[] | undefined {
+  const raw = maybeJson(first(attrs, ["gen_ai.tool.definitions"]));
+  if (!Array.isArray(raw)) return undefined;
+  const names = raw
+    .map((t) => {
+      if (!t || typeof t !== "object" || Array.isArray(t)) return undefined;
+      const o = t as Record<string, Plain>;
+      const fn = o.function;
+      if (fn && typeof fn === "object" && !Array.isArray(fn)) return str((fn as Record<string, Plain>).name);
+      return str(o.name);
+    })
+    .filter((x): x is string => !!x);
+  return names.length ? names : undefined;
+}
+
+function userTurnIsToolResult(m: Record<string, Plain>): boolean {
+  const parts = Array.isArray(m.parts) ? m.parts : [];
+  for (const p of parts) {
+    if (!p || typeof p !== "object" || Array.isArray(p)) continue;
+    const t = (p as Record<string, Plain>).type;
+    if (t === "tool_call_response" || t === "tool-result") return true;
+  }
+  return false;
+}
+
+/** First real user turn from pydantic-ai's serialized message list (parts-shaped, not tool results). */
+function pydanticAiFirstUserInput(raw: Plain | undefined): Plain | undefined {
+  const msgs = maybeJson(raw);
+  if (!Array.isArray(msgs)) return undefined;
+  for (const m of msgs) {
+    if (!m || typeof m !== "object" || Array.isArray(m)) continue;
+    const msg = m as Record<string, Plain>;
+    if (msg.role !== "user") continue;
+    if (userTurnIsToolResult(msg)) continue;
+    return normalizeParts([m]);
+  }
+  return undefined;
+}
+
 function llmToolCalls(attrs: Attrs): SpanView["toolCalls"] {
   const calls = collectIndexed(attrs, "neatlogs.llm.tool_calls");
   if (!calls.length) return undefined;
@@ -274,8 +314,8 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
   view.agentName = str(first(attrs, ["neatlogs.agent.name", "agent.name", "gen_ai.agent.name"]));
   view.model = str(first(attrs, ["neatlogs.llm.model_name", "gen_ai.response.model", "gen_ai.request.model", "llm.model_name", "ai.response.model", "ai.model.id", "neatlogs.embedding.model_name"]));
   view.provider = str(first(attrs, ["neatlogs.llm.provider", "neatlogs.provider", "gen_ai.system", "gen_ai.provider.name", "llm.provider", "ai.model.provider"]));
-  view.promptTokens = int(first(attrs, ["neatlogs.llm.token_count.prompt", "gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens", "llm.token_count.prompt", "ai.usage.promptTokens", "ai.usage.inputTokens"]));
-  view.completionTokens = int(first(attrs, ["neatlogs.llm.token_count.completion", "gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens", "llm.token_count.completion", "ai.usage.completionTokens", "ai.usage.outputTokens"]));
+  view.promptTokens = int(first(attrs, ["neatlogs.llm.token_count.prompt", "gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens", "llm.token_count.prompt", "ai.usage.promptTokens", "ai.usage.inputTokens", "gen_ai.aggregated_usage.input_tokens"]));
+  view.completionTokens = int(first(attrs, ["neatlogs.llm.token_count.completion", "gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens", "llm.token_count.completion", "ai.usage.completionTokens", "ai.usage.outputTokens", "gen_ai.aggregated_usage.output_tokens"]));
   view.totalTokens =
     int(first(attrs, ["neatlogs.llm.token_count.total", "gen_ai.usage.total_tokens", "llm.token_count.total"])) ??
     (view.promptTokens !== undefined || view.completionTokens !== undefined
@@ -303,8 +343,11 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
       } else if (view.toolCalls && view.output === undefined) {
         view.output = [{ role: "assistant", tool_calls: view.toolCalls.map((c) => ({ id: c.id ?? null, name: c.name, arguments: c.arguments })) }];
       }
-      const tools = collectIndexed(attrs, "neatlogs.llm.tools").map((t) => str(t.name)).filter((x): x is string => !!x);
-      if (tools.length) view.tools = tools;
+      const tools = [
+        ...collectIndexed(attrs, "neatlogs.llm.tools").map((t) => str(t.name)).filter((x): x is string => !!x),
+        ...(genAiToolDefinitions(attrs) ?? []),
+      ];
+      if (tools.length) view.tools = [...new Set(tools)];
       break;
     }
     case "TOOL":
@@ -318,7 +361,8 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
       break;
     case "AGENT":
       view.input = maybeJson(first(attrs, ["neatlogs.agent.input", ...genericIn, "ai.prompt"]));
-      view.output = maybeJson(first(attrs, ["neatlogs.agent.output", ...genericOut, "ai.response.text"]));
+      view.output = maybeJson(first(attrs, ["neatlogs.agent.output", ...genericOut, "ai.response.text", "final_result"]));
+      if (view.input === undefined) view.input = pydanticAiFirstUserInput(first(attrs, ["pydantic_ai.all_messages"]));
       break;
     case "RETRIEVER":
       view.input = maybeJson(first(attrs, ["neatlogs.retriever.query", ...genericIn]));
