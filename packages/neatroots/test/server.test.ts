@@ -251,6 +251,18 @@ describe("server", () => {
     expect(page).toMatchObject({ total: 3, matching: 3 });
   });
 
+  it("rejects an explicit invalid insights window", async () => {
+    const tb = await served();
+    const origin = { origin: tb.url.replace("127.0.0.1", "localhost"), "content-type": "application/json" };
+    const get = await fetch(`${tb.url}/api/insights?window=30days`, { headers: origin });
+    expect(get.status).toBe(400);
+    expect(await get.json()).toEqual({ error: "window must be 24h, 7d or 30d" });
+    const post = await fetch(`${tb.url}/api/insights/digest`, { method: "POST", headers: origin, body: JSON.stringify({ window: 30 }) });
+    expect(post.status).toBe(400);
+    expect(await post.json()).toEqual({ error: "window must be 24h, 7d or 30d" });
+    expect((await fetch(`${tb.url}/api/insights`, { headers: origin })).status).toBe(200);
+  });
+
   it("MCP tools use the latest run once the run in focus is deleted", async () => {
     const tb = await served();
     const old = hex(16);
