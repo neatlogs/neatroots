@@ -202,6 +202,15 @@ export class Engine {
     return n;
   }
 
+  /** A deleted run may be imported again before its old in-memory state expires. */
+  resetForImport(traceId: string): void {
+    if (this.pending(traceId)) throw new Error("previous checks for this deleted run are still active; retry the import when they finish");
+    const previous = this.live.get(traceId);
+    clearTimeout(previous?.debounce);
+    clearTimeout(previous?.endTimer);
+    this.live.delete(traceId);
+  }
+
   /** Resolves true when nothing is pending for the trace, false on timeout. */
   waitIdle(traceId: string, timeoutMs: number): Promise<boolean> {
     if (!this.pending(traceId)) return Promise.resolve(true);
@@ -1052,7 +1061,7 @@ ${library}`;
     for (const work of run.deferred.splice(0)) await work();
     await this.summarize(run, snap);
     setTimeout(() => {
-      if (!this.pending(run.traceId)) this.live.delete(run.traceId);
+      if (this.live.get(run.traceId) === run && !this.pending(run.traceId)) this.live.delete(run.traceId);
     }, 60_000);
   }
 

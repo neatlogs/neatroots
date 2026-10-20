@@ -51,6 +51,7 @@ flowchart TB
 | `steering/hub.ts` | Notes per run, atomic claim, gate wait, SSE stream |
 | `mcp/` | Tool definitions (`tools.ts`, and the exploring tools in `explore-tools.ts`), streamable HTTP mount, stdio bridge |
 | `relay/` | Cloud forwarding, redaction, Keychain |
+| `audit/`, `server/api-audit.ts`, `cli/audit.ts` | Server-owned local OTLP/sidecar export, append-only hash manifest, read-only archive verification and explicit redacted sharing; independent of retention |
 | `server/api.ts`, `api-checks.ts`, `api-models.ts`, `api-explore.ts` | App and hook API (runs, views, search, imports, replays, chats), security (Host allowlist, Origin check) |
 | `cli.ts`, `cli/` | The `neatroots` command; `cli/data.ts` (import, replay, rerun), `cli/connect.ts` (coding agents), `cli/service.ts` (run at login, update) |
 

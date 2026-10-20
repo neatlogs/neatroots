@@ -479,7 +479,7 @@ export class Store {
   }
 
   /** Stores spans losslessly and updates run, session and search rows. */
-  ingest(batches: ResourceSpansBatch[]): TraceUpdate[] {
+  ingest(batches: ResourceSpansBatch[], beforeCommit?: (updates: TraceUpdate[]) => void): TraceUpdate[] {
     const updates = new Map<string, TraceUpdate>();
     const supersededBlobs = new Set<string>();
     const now = Date.now();
@@ -515,6 +515,8 @@ export class Store {
           if (runFlags.completed) u.completed = true;
         }
       }
+      // Persist trusted provenance in this transaction, before replaced payloads can be reclaimed.
+      beforeCommit?.([...updates.values()]);
     });
     tx();
     // Files are reclaimed only after the span replacement commits and no remaining span uses them.
@@ -1415,6 +1417,7 @@ export class Store {
         this.db.prepare(`DELETE FROM ${t} WHERE ${inIds}`).run(ids);
       }
       this.db.prepare(`DELETE FROM runs WHERE ${inIds}`).run(ids);
+      this.db.prepare("DELETE FROM meta WHERE key IN (SELECT 'import-source:' || value FROM json_each(?))").run(ids);
     });
     tx();
     this.reclaimUnreferencedBlobs(shas);
