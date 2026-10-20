@@ -1,0 +1,44 @@
+name: saved-run action
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  action:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+      - run: node --test action/*.test.mjs
+      - name: Clean saved run
+        uses: ./action
+        with:
+          runs: action/fixtures/clean.json
+          checks: action/fixtures/checks
+          only: action-fixture-hit
+      - name: Known finding
+        id: finding
+        continue-on-error: true
+        uses: ./action
+        with:
+          runs: action/fixtures/failing.json
+          checks: action/fixtures/checks
+          only: action-fixture-hit
+      - name: Assert finding failed the action
+        env:
+          OUTCOME: ${{ steps.finding.outcome }}
+        run: test "$OUTCOME" = failure
+      - name: Verify real CLI exits 0, 1 and 2
+        run: node action/smoke.mjs
+      - name: Verify large pinned CLI reports
+        run: node action/large-smoke.mjs
+      - name: Verify installer probe isolation
+        run: node action/network-smoke.mjs

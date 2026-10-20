@@ -1,0 +1,47 @@
+name: neatroots saved-run checks
+description: Check saved traces offline and report findings without publishing trace content
+inputs:
+  runs:
+    description: File or directory paths, one per line (directories include JSON and JSONL recursively)
+    required: true
+  checks:
+    description: Optional extra check directories, one per line
+  only:
+    description: Optional comma-separated rule IDs
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24.14.1
+    - name: Resolve pinned source
+      id: release
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/prepare.mjs"
+    - uses: actions/cache/restore@v4
+      id: cache
+      with:
+        path: ${{ runner.temp }}/neatroots-action-install
+        key: neatroots-action-v2-node24.14.1-${{ runner.os }}-${{ runner.arch }}-${{ steps.release.outputs.version }}-${{ steps.release.outputs.installer }}
+    - name: Install pinned neatroots source
+      id: install
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/install.mjs"
+    - uses: actions/cache/save@v4
+      if: steps.install.outcome == 'success'
+      with:
+        path: ${{ runner.temp }}/neatroots-action-install
+        key: ${{ steps.cache.outputs.cache-primary-key }}
+    - name: Check saved runs
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        INPUT_RUNS: ${{ inputs.runs }}
+        INPUT_CHECKS: ${{ inputs.checks }}
+        INPUT_ONLY: ${{ inputs.only }}
+      run: node "$ACTION_PATH/run.mjs"
