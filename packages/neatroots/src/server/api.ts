@@ -334,7 +334,7 @@ export function mountApi(app: Hono, roots: Roots): void {
 
   app.post("/api/cloud/key", async (c) => {
     const b = await body<{ key?: string }>(c);
-    if (!b.key || b.key.length < 8) return err(c, 400, "paste the API key from app.neatlogs.com");
+    if (typeof b.key !== "string" || b.key.trim().length < 8) return err(c, 400, "paste the API key from app.neatlogs.com");
     const where = await setCloudKey(b.key.trim());
     return c.json({ ok: true, stored_in: where });
   });

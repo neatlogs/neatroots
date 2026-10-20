@@ -82,7 +82,7 @@ export function mountModelsApi(app: Hono, roots: Roots): void {
     const b = await body<{ provider?: string; key?: string }>(c);
     const p = providerById(b.provider ?? "");
     if (!p) return err(c, 400, "unknown provider");
-    if (!b.key || b.key.trim().length < 8) return err(c, 400, `paste the ${p.label} API key`);
+    if (typeof b.key !== "string" || b.key.trim().length < 8) return err(c, 400, `paste the ${p.label} API key`);
     const where = await setSecret(llmKeyName(p.id), b.key.trim());
     roots.llm.resetKey();
     roots.decisions.reset();
@@ -147,7 +147,7 @@ export function mountModelsApi(app: Hono, roots: Roots): void {
 
   app.post("/api/classifier/jev-key", async (c) => {
     const b = await body<{ key?: string }>(c);
-    if (!b.key || b.key.length < 8) return err(c, 400, "paste the TypeSafe API key");
+    if (typeof b.key !== "string" || b.key.trim().length < 8) return err(c, 400, "paste the TypeSafe API key");
     const where = await setSecret("jev-api-key", b.key.trim());
     roots.decisions.reset();
     return c.json({ ok: true, stored_in: where });
