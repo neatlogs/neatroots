@@ -6,7 +6,7 @@ import type { Command } from "commander";
 import { rootsHome, loadConfig } from "../config.js";
 import { api, port, running } from "./util.js";
 import { bundleDir, cliPath, sourceDir } from "../util/install.js";
-import { bundleRoot, readBuild, staleAfterUpdate } from "../util/build.js";
+import { bundleRoot, readBuild, runningBuild, staleAfterUpdate } from "../util/build.js";
 
 const LABEL = "com.neatlogs.neatroots";
 
@@ -211,7 +211,7 @@ export function registerServiceCommands(program: Command): void {
       // version cannot tell a release candidate from its release; the commit can.
       const after = bundle ? readBuild(root) : null;
       const stale = staleAfterUpdate(
-        { version: status?.version ?? "", commit: status?.build?.commit ?? before?.commit ?? "" },
+        { version: status?.version ?? "", commit: runningBuild(status, before) },
         { version: fresh, commit: after?.commit ?? "" },
       );
       if (stale) console.log(`! ${stale} on port ${p}. Restart it: Ctrl+C in its terminal, then neatroots start`);

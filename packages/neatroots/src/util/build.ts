@@ -71,6 +71,24 @@ export interface StaleCopy {
 }
 
 /**
+ * The build the running copy was started from, as far as it can be told.
+ *
+ * A server that reports its own build is the best source. A server that cannot — one that
+ * predates the build reporting, or a source checkout — falls back to the build that was on disk
+ * before the install, but only when that build carries the version the server reports. Otherwise
+ * the server was started from an older copy and only the version says what is running.
+ */
+export function runningBuild(
+  status: { version: string; build?: { commit: string } | null } | undefined,
+  before: BuildInfo | null,
+): string {
+  const reported = status?.build?.commit ?? "";
+  if (reported) return reported;
+  if (before && before.version && before.version === (status?.version ?? "")) return before.commit;
+  return "";
+}
+
+/**
  * Whether the copy that is running is not the copy that was just installed, and what to say
  * about it. Returns null when there is nothing to report.
  *
