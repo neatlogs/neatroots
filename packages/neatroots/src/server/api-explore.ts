@@ -249,11 +249,14 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
     return s ? c.json({ session: s, events: roots.chats.events(s.id, clampInt(c.req.query("after"), 0, 0, Number.MAX_SAFE_INTEGER)) }) : err(c, 404, "no such chat");
   });
   app.patch("/api/chat/sessions/:id", async (c) => {
+    if (!roots.chats.get(c.req.param("id"))) return err(c, 404, "no such chat");
     const b = await body<{ allow_edits?: boolean; allow_commands?: boolean; title?: string }>(c);
+    if (Object.keys(b).some((key) => !["allow_edits", "allow_commands", "title"].includes(key))) return err(c, 400, "only title and chat permissions can be updated");
+    if (b.title !== undefined && typeof b.title !== "string") return err(c, 400, "title must be a string");
     try {
       return c.json(roots.chats.update(c.req.param("id"), b));
     } catch (e) {
-      return err(c, 404, (e as Error).message);
+      return err(c, 400, (e as Error).message);
     }
   });
   app.delete("/api/chat/sessions/:id", (c) => {

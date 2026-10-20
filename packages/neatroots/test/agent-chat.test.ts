@@ -22,7 +22,7 @@ afterEach(async () => {
 
 function script(name: string, body: string): string {
   const f = path.join(dir!, name);
-  fs.writeFileSync(f, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  fs.writeFileSync(f, `#!/bin/sh\n${name.startsWith("codex") ? 'if [ "$1" = mcp ]; then echo "[]"; exit 0; fi\n' : ""}${body}\n`, { mode: 0o755 });
   return f;
 }
 
@@ -50,8 +50,8 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`,
     expect(events.filter((e) => e.kind === "error")).toEqual([]);
     expect(events.filter((e) => e.kind === "text").map((e) => e.text)).toEqual(["OK", "OK"]);
     const [first, second] = fs.readFileSync(log, "utf8").trim().split("\n");
-    expect(first).toMatch(/--sandbox workspace-write/);
-    expect(second).toMatch(/^exec resume thread_t .*-c sandbox_mode="workspace-write"/);
+    expect(first).toMatch(/^exec --json/);
+    expect(second).toMatch(/^exec resume thread_t --json/);
   });
 });
 
@@ -185,7 +185,7 @@ for a in "$@"; do
   if [ "$prev" = "-c" ] || [ "$prev" = "--sandbox" ]; then prev=""; continue; fi
   case "$a" in
     --) dd=1 ;;
-    --json|--skip-git-repo-check|-c|--sandbox) ;;
+    --json|--skip-git-repo-check|--strict-config|-c|--sandbox) ;;
     -*) [ "$dd" = 0 ] && { echo "error: unexpected argument '$a' found" >&2; exit 2; } ;;
   esac
   prev="$a"

@@ -61,8 +61,9 @@ export function useChatActions() {
     }),
     stop: useMutation({ mutationFn: (id: string) => post(`/api/chat/sessions/${id}/stop`), onSettled: (_d, _e, id) => refresh(id) }),
     update: useMutation({
-      mutationFn: (v: { id: string; allow_edits?: boolean; allow_commands?: boolean }) => api(`/api/chat/sessions/${v.id}`, { method: "PATCH", json: v }),
+      mutationFn: ({ id, ...patch }: { id: string; allow_edits?: boolean; allow_commands?: boolean }) => api(`/api/chat/sessions/${id}`, { method: "PATCH", json: patch }),
       onSettled: (_d, _e, v) => refresh(v.id),
+      onError: (e) => toast.error(`Couldn't update permissions: ${(e as Error).message}`),
     }),
     remove: useMutation({ mutationFn: (id: string) => del(`/api/chat/sessions/${id}`), onSettled: () => refresh() }),
   };

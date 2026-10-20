@@ -65,6 +65,7 @@ function NewChat({ traceId, onCreated }: { traceId?: string; onCreated: (s: Chat
         <span className="text-xs text-muted-foreground">Project folder, where your agent's code is (default: the project's replay folder, else your home folder)</span>
         <Input className="h-8 font-mono text-xs" placeholder="~/code/my-agent" value={cwd} onChange={(e) => setCwd(e.target.value)} />
       </label>
+      {agent === "codex" && <p className="text-xs text-muted-foreground">File edits control write access. Commands control shell tools. Permissions for other MCP servers are separate.</p>}
       <div className="flex flex-wrap gap-6">
         <label className="flex items-center gap-2 text-sm text-foreground">
           <Switch checked={edits} onCheckedChange={setEdits} aria-label="Allow edits" />
@@ -173,11 +174,11 @@ function ChatPane({ id }: { id: string }) {
         )}
         <span className="ml-auto flex items-center gap-4 text-xs text-muted-foreground">
           <label className="flex items-center gap-1.5">
-            <Switch checked={session.allow_edits} onCheckedChange={(v) => update.mutate({ id, allow_edits: v })} aria-label="Allow edits" />
+            <Switch disabled={running} checked={session.allow_edits} onCheckedChange={(v) => update.mutate({ id, allow_edits: v })} aria-label="Allow edits" />
             edits
           </label>
           <label className="flex items-center gap-1.5">
-            <Switch checked={session.allow_commands} onCheckedChange={(v) => update.mutate({ id, allow_commands: v })} aria-label="Allow commands" />
+            <Switch disabled={running} checked={session.allow_commands} onCheckedChange={(v) => update.mutate({ id, allow_commands: v })} aria-label="Allow commands" />
             commands
           </label>
           <Button size="icon" variant="muted" aria-label="Delete chat" onClick={() => remove.mutate(id, { onSuccess: () => go("agents") })}>
@@ -185,6 +186,7 @@ function ChatPane({ id }: { id: string }) {
           </Button>
         </span>
       </div>
+      {session.agent === "codex" && <p className="shrink-0 border-b border-border px-6 py-2 text-xs text-muted-foreground">File edits and shell commands are controlled separately. Other MCP servers keep their own permissions.</p>}
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
         {!events.length ? (
           <p className="text-sm text-muted-foreground">Ask anything about your runs. For example: “Why did the last run fail, and what should I change?”</p>

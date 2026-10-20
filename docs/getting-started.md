@@ -310,7 +310,7 @@ Then ask, for example: *"Fix what neatroots found in my last run, and add a chec
 
 ### Inside the app
 
-**Coding agents** in the sidebar chats with Claude Code or Codex in a project folder you pick, with neatroots' tools attached. Each message runs the agent's own CLI on your machine with your own sign-in, and the chat resumes the same agent session. A chat is read-only until you switch on **Allow edits** or **Allow commands** for it. **Ask a coding agent** on a run (in the **More actions** menu) starts a chat about that run.
+**Coding agents** in the sidebar chats with Claude Code or Codex in a project folder you pick, with neatroots' tools attached. Each message runs the agent's own CLI on your machine with your own sign-in, and the chat resumes the same agent session. For Codex, **Allow edits** controls filesystem writes and **Allow commands** separately controls shell tools; both start off. **Ask a coding agent** on a run (in the **More actions** menu) starts a chat about that run.
 
 - neatroots finds the CLIs on your PATH, in the usual install folders (`~/.local/bin`, Homebrew, npm under any nvm Node), and the Codex that ships inside the ChatGPT app. If yours is elsewhere, set `NEATROOTS_CLAUDE_BIN` or `NEATROOTS_CODEX_BIN` to its path.
 - If the agent can't sign in (an expired login, or an expired AWS session when Claude Code runs on Amazon Bedrock), the chat says so. Run `claude` or `codex` in a terminal until it works, then send the message again.
@@ -397,3 +397,23 @@ Uninstalling keeps `~/.neatroots`, which holds your runs, settings and Laya. Del
 | Steering notes never arrive | Turn steering on for the project, install the hook, and set `NEATROOTS_STEER_DEBUG=1` in the agent to see what the hook does |
 | Where are the logs? | The terminal running `neatroots start`, or `~/.neatroots/logs/neatroots.log` for the background service. `NEATROOTS_DEBUG=1` adds detail |
 | `~/.neatroots` doesn't get smaller after old runs are removed | That's expected. Past the size cap (Settings → Storage), the oldest unpinned runs are removed until the data is back to 90% of the cap, but the database file keeps its size and reuses the freed space for new runs. So the cap stops it growing; lowering the cap doesn't shrink the folder, and "On disk" can read above the cap |
+
+### Codex chat permissions
+
+In Coding agents, **Allow edits** selects filesystem write access for Codex;
+**Allow commands** enables its command execution tools. These settings are
+independent and are applied again when a conversation resumes. Change them between
+messages (stop an active message first). Codex uses noninteractive `never` approval,
+so a denied operation cannot request broader access.
+
+This integration requires Codex CLI **0.162.1 or later** (the version verified with a
+local mock Responses provider). It uses strict config validation: unsupported CLI
+flags or permission settings fail the turn rather than falling back to broader access.
+Models differ in which file tools they offer; turning commands off does not add a
+file-reading tool to a model that lacks one.
+
+For both preconfigured and newly attached `neatroots` / `neatroots_app` MCP servers,
+read-only chats expose only read tools. Writing neatroots data requires file edits;
+`rerun` also requires commands because it can execute the project's registered command.
+Existing server authentication and transport settings are preserved. These controls do
+not govern tools from other MCP servers or expand Codex's operating-system sandbox.
