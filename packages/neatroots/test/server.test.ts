@@ -278,6 +278,27 @@ describe("server", () => {
     expect(page).toMatchObject({ total: 3, matching: 3 });
   });
 
+  it("filters open findings for the requested check, not another check on the same run", async () => {
+    const tb = await served();
+    const ids = Array.from({ length: 5 }, () => hex(16));
+    for (const traceId of ids) tb.roots.ingest([batch([span({ traceId, spanId: hex(8), name: "agent", kind: "workflow" })])]);
+    const insert = (traceId: string, checkId: string, status: "raised" | "active" | "resolved" | "quiet") =>
+      tb.roots.store.insertFinding({ trace_id: traceId, check_id: checkId, check_kind: "rule", title: checkId, probability: null, status, evidence_span_ids: [], detail: {}, model: null, triage_score: null, explanation_id: null });
+    insert(ids[0], "home-check", "raised");
+    insert(ids[1], "home-check", "active");
+    insert(ids[2], "home-check", "resolved");
+    insert(ids[2], "other-check", "raised");
+    insert(ids[3], "home-check", "quiet");
+    insert(ids[4], "other-check", "raised");
+    const get = async (query: string) => (await (await fetch(`${tb.url}/api/runs?${query}`)).json()) as { runs: { trace_id: string }[]; matching: number };
+    const history = await get("check=home-check");
+    expect(history.matching).toBe(3);
+    expect(history.runs.map((run) => run.trace_id).sort()).toEqual(ids.slice(0, 3).sort());
+    const open = await get("check=home-check&has_open_finding=1");
+    expect(open.matching).toBe(2);
+    expect(open.runs.map((run) => run.trace_id).sort()).toEqual(ids.slice(0, 2).sort());
+  });
+
   it("refuses an annotation for a run or span it does not have", async () => {
     const tb = await served();
     const t = hex(16);

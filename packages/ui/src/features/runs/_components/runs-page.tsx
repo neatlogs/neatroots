@@ -19,7 +19,10 @@ const ALL_PROJECTS = "__all__";
 
 /** Filters a link can set: #/runs?project=…, or ?check=…&label=… for runs with one problem. */
 function fromQuery(q: URLSearchParams): Partial<RunListParams> {
-  return { project: q.get("project") ?? "", check: q.get("check") ?? undefined, label: q.get("label") ?? undefined };
+  return {
+    project: q.get("project") ?? "", check: q.get("check") ?? undefined, label: q.get("label") ?? undefined,
+    hasFinding: q.get("has_open_finding") === "1" || q.get("has_open_finding") === "true",
+  };
 }
 
 /** "3 of 120 runs"; with filters, "12 matching of 120 runs" (and how many are shown, when not all). */
@@ -34,7 +37,7 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
   const qs = query.toString();
   useEffect(() => {
     const q = new URLSearchParams(qs);
-    if (q.has("project") || q.has("check")) setParams((p) => ({ ...p, ...fromQuery(q) }));
+    if (q.has("project") || q.has("check") || q.has("has_open_finding")) setParams((p) => ({ ...p, ...fromQuery(q) }));
   }, [qs]);
   const { data, isLoading, hasMore, loadMore, loadingMore } = useRuns(params);
   const { data: known } = useProjects();
