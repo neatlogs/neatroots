@@ -87,7 +87,8 @@ export function mountChecksApi(app: Hono, roots: Roots): void {
   app.post("/api/checks/:id/enabled", async (c) => {
     const b = await body<{ enabled?: boolean }>(c);
     if (!roots.checks.get(c.req.param("id"))) return err(c, 404, "check not found");
-    roots.store.setCheckEnabled(c.req.param("id"), b.enabled !== false);
+    if (typeof b.enabled !== "boolean") return err(c, 400, "enabled must be a boolean");
+    roots.store.setCheckEnabled(c.req.param("id"), b.enabled);
     return c.json({ ok: true });
   });
 
