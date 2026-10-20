@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
+import { overridesSchema, type Price } from "./models/pricing.js";
 
 export type SteeringMode = "off" | "advisory" | "gate" | "self-check";
 
@@ -13,6 +14,7 @@ export interface ProjectSettings {
 }
 
 export interface RootsConfig {
+  pricing: { overrides: Price[] };
   port: number;
   host: string;
   /** OTLP over gRPC (what plain OpenTelemetry exporters send to Neatlogs). 0 turns it off. */
@@ -116,6 +118,7 @@ export const DEFAULT_PORT = 4100;
 
 export function defaultConfig(): RootsConfig {
   return {
+    pricing: { overrides: [] },
     port: DEFAULT_PORT,
     host: "127.0.0.1",
     grpcPort: 4317,
@@ -234,10 +237,12 @@ export function loadConfig(): RootsConfig {
   cfg.retention.days = Math.min(Math.round(cfg.retention.days), 3650);
   if (!Number.isFinite(cfg.retention.maxGb) || cfg.retention.maxGb <= 0) cfg.retention.maxGb = 5;
   cfg.retention.maxGb = Math.min(cfg.retention.maxGb, 10_000);
+  cfg.pricing.overrides = overridesSchema.parse(cfg.pricing.overrides);
   return cfg;
 }
 
 export function saveConfig(cfg: RootsConfig, file = configPath()): void {
+  overridesSchema.parse(cfg.pricing.overrides);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, YAML.stringify(cfg), "utf8");
 }

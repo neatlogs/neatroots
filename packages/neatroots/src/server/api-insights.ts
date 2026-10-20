@@ -17,7 +17,7 @@ function insights(roots: Roots, key: WindowKey) {
     kind: lc.check.kind,
     enabled: lc.check.enabled !== false && (stats[lc.check.id]?.enabled ?? 1) === 1,
   }));
-  return computeInsights(roots.store.db, key, checks);
+  return computeInsights(roots.store.db, key, checks, Date.now(), roots.config.pricing.overrides);
 }
 
 /** Aggregates for the home page, and the LLM's reading of them. */

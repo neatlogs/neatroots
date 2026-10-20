@@ -1,3 +1,4 @@
+import { costValue, costDetail } from "@/lib/cost";
 import { Panel, PanelContent, PanelHeader } from "@/components/ui/panel";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { Insights } from "@/lib/api";
@@ -18,6 +19,7 @@ export function ProjectsTable({ data }: { data: Insights }) {
             <TableRow className="border-b border-border hover:bg-transparent">
               <TableHead className={`${HEAD} w-48 pl-5`}>Project</TableHead>
               <TableHead className={`${HEAD} w-24 text-right`}>Runs</TableHead>
+              <TableHead className={`${HEAD} w-48`}>Estimated cost</TableHead>
               <TableHead className={`${HEAD} w-44`}>With problems</TableHead>
               <TableHead className={`${HEAD} w-20 text-right`}>Failed</TableHead>
               <TableHead className={HEAD}>Most common problem</TableHead>
@@ -33,6 +35,7 @@ export function ProjectsTable({ data }: { data: Insights }) {
                     {p.name}
                   </TableCell>
                   <TableCell className="px-3 text-right text-sm tabular-nums">{num(p.runs)}</TableCell>
+                  <TableCell className="px-3 py-1 text-xs leading-4 tabular-nums" title={costDetail(p)}>{costValue(p)}<span className="block truncate text-muted-foreground">{p.unpriced_calls} calls unpriced{p.missing_usage_runs ? ` · ${p.missing_usage_runs} missing usage` : ""}{p.fallback_calls ? " · cache fallback" : ""}</span></TableCell>
                   <TableCell className="px-3">
                     <span className="flex items-center gap-2 text-sm tabular-nums">
                       <span aria-hidden className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-muted">

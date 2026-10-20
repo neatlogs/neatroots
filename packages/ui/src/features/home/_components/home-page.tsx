@@ -11,6 +11,7 @@ import { useInsights } from "../_services/home-queries";
 import { DigestCard } from "./digest-card";
 import { Health } from "./health";
 import { Activity, Kpis, PERIOD } from "./overview";
+import { ModelsTable } from "./models-table";
 import { ProjectsTable } from "./projects-table";
 import { SetupGuide } from "./setup-guide";
 
@@ -85,6 +86,7 @@ export function HomePage({ status }: { status?: Status }) {
             <DigestCard data={data} llmOk={status ? !!status.engine?.llm.ok : undefined} />
             <Health data={data} />
             <Activity data={data} />
+            <ModelsTable data={data} />
             <ProjectsTable data={data} />
           </>
         )}

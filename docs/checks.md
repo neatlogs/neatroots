@@ -127,3 +127,7 @@ seconds). With no local LLM, Laya answers everything. Settings → Models shows 
 When the local LLM stands in for the decision model, span-level questions are asked only about the
 newest waiting span (at most four per check per run), identical questions are answered from a cache,
 and note-writing jumps the LLM queue. With Laya or Jev every span is asked.
+
+### Agent cost estimates
+
+[Local cost estimates](cost-estimates.md) measure the agent telemetry received by neatroots, not neatroots planning, judging, investigation or summary calls. Budget limits above are separate from these read-time standard-token USD estimates. Unknown usage/prices remain visibly unpriced.

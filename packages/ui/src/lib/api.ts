@@ -2,7 +2,17 @@
 
 export type RunStatus = "running" | "ok" | "error" | "interrupted";
 
+export interface CostEstimate {
+  cost_usd: number | null;
+  priced_calls: number;
+  unpriced_calls: number;
+  missing_usage_runs: number;
+  fallback_calls: number;
+  assumed_cache_ttl_calls: number;
+}
+
 export interface Run {
+  cost?: CostEstimate;
   trace_id: string;
   session_id: string | null;
   project: string | null;
@@ -344,7 +354,7 @@ export interface LlmInfo {
 
 export type InsightWindow = "24h" | "7d" | "30d";
 
-export interface InsightTotals {
+export interface InsightPeriodTotals {
   runs: number;
   failed: number;
   with_problems: number;
@@ -354,6 +364,8 @@ export interface InsightTotals {
   p50_ms: number | null;
   p95_ms: number | null;
 }
+
+export interface InsightTotals extends InsightPeriodTotals, CostEstimate {}
 
 export interface Digest {
   window: InsightWindow;
@@ -367,12 +379,12 @@ export interface Digest {
 export interface Insights {
   window: { key: InsightWindow; from_ms: number; to_ms: number; bucket_ms: number };
   totals: InsightTotals;
-  previous: InsightTotals;
+  previous: InsightPeriodTotals;
   buckets: { start_ms: number; runs: number; failed: number; with_problems: number }[];
   problems: { check_id: string; title: string; kind: string; runs: number; prev_runs: number; dismissed: number; last_ms: number; example_trace_id: string; projects: string[] }[];
   tools: { name: string; calls: number; failures: number; empty: number; runs: number; prev_calls: number; prev_failures: number; p50_ms: number | null }[];
-  models: { name: string; calls: number; errors: number; tokens: number; p50_ms: number | null }[];
-  projects: { name: string; runs: number; failed: number; with_problems: number; prev_runs: number; prev_with_problems: number; last_ms: number; top_problem: string | null }[];
+  models: (CostEstimate & { name: string; calls: number; errors: number; tokens: number; p50_ms: number | null })[];
+  projects: (CostEstimate & { tokens: number; name: string; runs: number; failed: number; with_problems: number; prev_runs: number; prev_with_problems: number; last_ms: number; top_problem: string | null })[];
   passing: { check_id: string; title: string; kind: string; runs: number }[];
   gone: { check_id: string; title: string; prev_runs: number }[];
   digest: Digest | null;

@@ -1,3 +1,4 @@
+import { runCost } from "../store/costs.js";
 import os from "node:os";
 import path from "node:path";
 import type { Hono } from "hono";
@@ -57,7 +58,7 @@ export function runDetail(roots: Roots, traceId: string) {
   }));
   const plan = run.plan_id ? roots.store.getPlan(run.plan_id) ?? null : null;
   return {
-    run: runSummary(roots, run),
+    run: { ...runSummary(roots, run), cost: runCost(roots.store.db, traceId, roots.config.pricing.overrides) },
     spans: spans.map((s) => ({ ...s, tool_result: toolLabels[s.span_id] ?? null })),
     findings,
     notes: roots.store.notesForTrace(traceId),

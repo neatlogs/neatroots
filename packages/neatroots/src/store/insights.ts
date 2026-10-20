@@ -1,4 +1,6 @@
 import type Database from "better-sqlite3";
+import { addCost, emptyCost, type CostEstimate, type Price } from "../models/pricing.js";
+import { readCosts } from "./costs.js";
 
 /**
  * Aggregates over a time window, compared with the window before it. Everything here is
@@ -23,7 +25,7 @@ export interface CheckInfo {
   enabled: boolean;
 }
 
-export interface Totals {
+export interface PeriodTotals {
   runs: number;
   failed: number;
   with_problems: number;
@@ -33,6 +35,8 @@ export interface Totals {
   p50_ms: number | null;
   p95_ms: number | null;
 }
+
+export interface Totals extends PeriodTotals, CostEstimate {}
 
 export interface ProblemAgg {
   check_id: string;
@@ -57,7 +61,7 @@ export interface ToolAgg {
   p50_ms: number | null;
 }
 
-export interface ModelAgg {
+export interface ModelAgg extends CostEstimate {
   name: string;
   calls: number;
   errors: number;
@@ -65,7 +69,8 @@ export interface ModelAgg {
   p50_ms: number | null;
 }
 
-export interface ProjectAgg {
+export interface ProjectAgg extends CostEstimate {
+  tokens: number;
   name: string;
   runs: number;
   failed: number;
@@ -79,7 +84,7 @@ export interface ProjectAgg {
 export interface Insights {
   window: { key: WindowKey; from_ms: number; to_ms: number; bucket_ms: number };
   totals: Totals;
-  previous: Totals;
+  previous: PeriodTotals;
   buckets: { start_ms: number; runs: number; failed: number; with_problems: number }[];
   problems: ProblemAgg[];
   tools: ToolAgg[];
@@ -130,7 +135,7 @@ function slice(db: Database.Database, from: number, to: number) {
         CASE WHEN ended_ms IS NOT NULL AND started_ms IS NOT NULL THEN ended_ms - started_ms END AS dur,
         total_tokens, llm_calls, tool_calls
        FROM runs WHERE doctor = 0 AND COALESCE(started_ms, received_ms) >= @from AND COALESCE(started_ms, received_ms) < @to
-       ORDER BY t DESC LIMIT 20000`,
+       ORDER BY t DESC`,
     )
     .all(p) as RunRec[];
   const findings = db
@@ -138,7 +143,7 @@ function slice(db: Database.Database, from: number, to: number) {
     .all(p) as FindingRec[];
   const problemRuns = new Set(findings.filter(IS_PROBLEM).map((f) => f.trace_id));
   const done = runs.filter((r) => r.status !== "running");
-  const totals: Totals = {
+  const totals: PeriodTotals = {
     runs: runs.length,
     failed: runs.filter((r) => r.status === "error" || r.status === "interrupted").length,
     with_problems: runs.filter((r) => problemRuns.has(r.trace_id)).length,
@@ -177,8 +182,8 @@ function tools(db: Database.Database, from: number, to: number) {
 function models(db: Database.Database, from: number, to: number): ModelAgg[] {
   const rows = db
     .prepare(
-      `SELECT model AS name, status_code, duration_ms, COALESCE(total_tokens, 0) AS tokens FROM spans
-       WHERE trace_id IN (${RUNS_IN}) AND is_marker = 0 AND model IS NOT NULL AND span_kind = 'LLM' LIMIT 100000`,
+      `SELECT COALESCE(model, 'unknown') AS name, status_code, duration_ms, COALESCE(total_tokens, 0) AS tokens FROM spans
+       WHERE trace_id IN (${RUNS_IN}) AND is_marker = 0 AND span_kind = 'LLM'`,
     )
     .all({ from, to }) as { name: string; status_code: number; duration_ms: number; tokens: number }[];
   const by = new Map<string, { calls: number; errors: number; tokens: number; durs: number[] }>();
@@ -190,10 +195,10 @@ function models(db: Database.Database, from: number, to: number): ModelAgg[] {
     m.durs.push(r.duration_ms);
     by.set(r.name, m);
   }
-  return [...by].map(([name, m]) => ({ name, calls: m.calls, errors: m.errors, tokens: m.tokens, p50_ms: percentile(m.durs, 0.5) })).sort((a, b) => b.calls - a.calls);
+  return [...by].map(([name, m]) => ({ ...emptyCost(), name, calls: m.calls, errors: m.errors, tokens: m.tokens, p50_ms: percentile(m.durs, 0.5) })).sort((a, b) => b.calls - a.calls);
 }
 
-export function computeInsights(db: Database.Database, key: WindowKey, checks: CheckInfo[], now = Date.now()): Insights {
+export function computeInsights(db: Database.Database, key: WindowKey, checks: CheckInfo[], now = Date.now(), prices: Price[] = []): Insights {
   const w = WINDOWS[key];
   const to = now;
   const from = now - w.ms;
@@ -202,6 +207,7 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
   const until = to + SKEW_MS;
   const cur = slice(db, from, until);
   const prev = slice(db, prevFrom, from);
+  const costs = readCosts(db, "r.doctor=0 AND COALESCE(r.started_ms,r.received_ms)>=@from AND COALESCE(r.started_ms,r.received_ms)<@to", { from, to: until }, prices);
   const titles = new Map(checks.map((c) => [c.id, c]));
 
   // Activity over time.
@@ -280,8 +286,10 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
     topByProject.set(p, m);
   }
   for (const r of cur.runs) {
-    const a = projects.get(r.project) ?? { name: r.project, runs: 0, failed: 0, with_problems: 0, prev_runs: 0, prev_with_problems: 0, last_ms: 0, top_problem: null };
+    const a = projects.get(r.project) ?? { ...emptyCost(), tokens: 0, name: r.project, runs: 0, failed: 0, with_problems: 0, prev_runs: 0, prev_with_problems: 0, last_ms: 0, top_problem: null };
     a.runs++;
+    a.tokens += r.total_tokens ?? 0;
+    addCost(a, costs.runs.get(r.trace_id) ?? emptyCost());
     if (r.status === "error" || r.status === "interrupted") a.failed++;
     if (cur.problemRuns.has(r.trace_id)) a.with_problems++;
     a.last_ms = Math.max(a.last_ms, r.t);
@@ -320,12 +328,12 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
 
   return {
     window: { key, from_ms: from, to_ms: to, bucket_ms: w.bucketMs },
-    totals: cur.totals,
+    totals: { ...cur.totals, ...costs.total },
     previous: prev.totals,
     buckets,
     problems,
     tools: toolAggs,
-    models: models(db, from, until),
+    models: models(db, from, until).map((m) => ({ ...m, ...(costs.models.get(m.name) ?? emptyCost()) })),
     projects: [...projects.values()].sort((a, b) => b.runs - a.runs),
     passing,
     gone,

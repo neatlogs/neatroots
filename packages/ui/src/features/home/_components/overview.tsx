@@ -1,3 +1,4 @@
+import { costValue, costDetail } from "@/lib/cost";
 import { KpiCard, type KpiDelta } from "@/components/kpi/kpi-card";
 import { Panel, PanelContent, PanelHeader } from "@/components/ui/panel";
 import type { Insights } from "@/lib/api";
@@ -25,7 +26,7 @@ export function Kpis({ data }: { data?: Insights }) {
   const period = data ? PERIOD[data.window.key] : "";
   const b = data?.buckets ?? [];
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
       <KpiCard
         label="Runs"
         value={t && num(t.runs)}
@@ -50,6 +51,7 @@ export function Kpis({ data }: { data?: Insights }) {
         footnote={t?.failed ? "ended with an error or were cut off" : "none ended with an error"}
         bars={b.map((x) => x.failed)}
       />
+      <KpiCard label="Estimated agent cost" value={t && costValue(t)} comparison={period} footnote={t ? `${t.unpriced_calls} calls unpriced${t.missing_usage_runs ? ` · ${t.missing_usage_runs} runs missing usage` : ""}${t.fallback_calls ? " · cache fallback" : ""}${t.assumed_cache_ttl_calls ? " · 5m TTL assumed" : ""}` : costDetail(t)} />
       <KpiCard
         label="Median run"
         value={t && dur(t.p50_ms)}

@@ -1,3 +1,4 @@
+import { costValue, costDetail } from "@/lib/cost";
 import { BarChartHorizontalIcon, Download01Icon, GitForkIcon, MoreHorizontalIcon, PinIcon, PinOffIcon } from "@hugeicons/core-free-icons";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -189,6 +190,11 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
         <PropertyRow label="LLM calls" value={num(r.llm_calls)} />
         <PropertyRow label="Tool calls" value={num(r.tool_calls)} />
         {r.total_tokens ? <PropertyRow label="Tokens" value={num(r.total_tokens)} /> : null}
+        <PropertyRow label="Estimated cost" value={<span title={costDetail(r.cost)}>{costValue(r.cost)}</span>} />
+        <PropertyRow label="Unpriced calls" value={r.cost ? `${r.cost.unpriced_calls} of ${r.cost.priced_calls + r.cost.unpriced_calls}` : "unknown"} />
+        {!!r.cost?.missing_usage_runs && <PropertyRow label="Missing usage" value={`${r.cost.missing_usage_runs} run`} />}
+        {!!r.cost?.fallback_calls && <PropertyRow label="Cache rates" value={`${r.cost.fallback_calls} fallback`} />}
+        {!!r.cost?.assumed_cache_ttl_calls && <PropertyRow label="Cache duration" value={`${r.cost.assumed_cache_ttl_calls} assumed 5m`} />}
         {d.import_source && <PropertyRow label="Imported from" value={SOURCE_LABEL[d.import_source] ?? d.import_source} />}
       </DetailRailGroup>
       <DetailRailGroup label="Checks">
