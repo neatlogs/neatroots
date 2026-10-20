@@ -16,6 +16,7 @@ import {
   resolveRefs,
   runGoal,
   selectSpans,
+  spanInfo,
   toolsOffered,
   type SpanInfo,
   type TraceSnapshot,
@@ -92,6 +93,7 @@ interface LiveRun {
   answered?: { traceChecks: Set<string>; toolSpans: Set<string> };
   /** Checks re-run on a stored run: steering never had a chance, so nothing counts as missed. */
   rechecked?: boolean;
+  snapshot?: TraceSnapshot;
 }
 
 export interface EngineStatus {
@@ -277,6 +279,19 @@ export class Engine {
       this.live.delete(u.traceId);
       return;
     }
+    if (!run.snapshot) run.snapshot = loadTrace(this.roots.store, u.traceId);
+    else {
+      const spans = new Map(run.snapshot.spans.map((s) => [s.id, s]));
+      for (const s of u.spans) {
+        if (s.row.name === "neatroots.guidance" || s.row.name === "roots.guidance") spans.delete(s.row.span_id);
+        else spans.set(s.row.span_id, spanInfo(s.row, s.view));
+      }
+      run.snapshot = {
+        traceId: u.traceId,
+        run: this.roots.store.getRun(u.traceId),
+        spans: [...spans.values()].sort((a, b) => a.startMs - b.startMs || a.seq - b.seq),
+      };
+    }
     const fresh = u.spans.filter((s) => s.isNew && !s.view.isMarker);
     if (fresh.length) this.track(u.traceId, this.handleSpans(run, fresh.map((s) => s.row.span_id)));
     if (u.rootEnded || u.completed) {
@@ -320,7 +335,7 @@ export class Engine {
   }
 
   private async handleSpans(run: LiveRun, spanIds: string[]): Promise<void> {
-    const snap = loadTrace(this.roots.store, run.traceId);
+    const snap = run.snapshot ?? loadTrace(this.roots.store, run.traceId);
     const fresh = snap.spans.filter((s) => spanIds.includes(s.id));
     this.applyRules(run, snap, false, new Set(spanIds));
     this.ensurePlan(run, snap);
@@ -404,7 +419,7 @@ export class Engine {
   private async flushDirty(run: LiveRun): Promise<void> {
     const ids = [...run.dirty];
     run.dirty.clear();
-    const snap = loadTrace(this.roots.store, run.traceId);
+    const snap = run.snapshot ?? loadTrace(this.roots.store, run.traceId);
     for (const { check, params } of this.questionsFor(run)) {
       if (!ids.includes(check.id)) continue;
       await this.askTrace(run, check, params, snap);
@@ -494,7 +509,7 @@ export class Engine {
   // ------------------------------------------------------------- questions
 
   private async askSpan(run: LiveRun, check: QuestionCheck, params: Record<string, string>, spanId: string): Promise<void> {
-    const snap = loadTrace(this.roots.store, run.traceId);
+    const snap = run.snapshot ?? loadTrace(this.roots.store, run.traceId);
     const span = snap.spans.find((s) => s.id === spanId);
     if (!span) return;
     const ev = buildEvidence(snap, check.evidence, { focus: span });

@@ -1,5 +1,5 @@
 import type { Store } from "../store/db.js";
-import { buildView, isSystemRole, preview, type SpanKind } from "../semantics/view.js";
+import { buildView, isSystemRole, preview, type SpanKind, type SpanView } from "../semantics/view.js";
 import type { Plain } from "../otlp/types.js";
 import type { Evidence, EvidenceField, SpanSelector } from "../checks/types.js";
 import type { RunRow, SpanRow } from "../types.js";
@@ -34,6 +34,30 @@ export interface TraceSnapshot {
 
 function statusOf(row: SpanRow): SpanInfo["status"] {
   return row.status_code === 2 ? "error" : row.status_code === 1 ? "ok" : "unset";
+}
+
+/** Builds the engine's compact span shape from a span already parsed during ingest. */
+export function spanInfo(row: SpanRow, v: SpanView): SpanInfo {
+  return {
+    id: row.span_id,
+    ref: row.span_id.slice(0, 6),
+    parentId: row.parent_span_id,
+    name: row.name,
+    kind: v.kind,
+    startMs: row.start_ms,
+    endMs: row.end_ms,
+    durationMs: row.duration_ms,
+    status: statusOf(row),
+    error: v.error,
+    toolName: v.toolName,
+    model: v.model,
+    tokens: v.totalTokens,
+    input: v.input,
+    output: v.output,
+    toolCalls: v.toolCalls,
+    tools: v.tools,
+    seq: row.seq,
+  };
 }
 
 /** Parsed spans per trace, reused across loads; a span is re-parsed only when its seq changes. */
@@ -76,26 +100,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
     const full = store.getOtlpSpan(traceId, row.span_id);
     if (!full) continue;
     const v = buildView(full.span, full.resource.attributes);
-    const info: SpanInfo = {
-      id: row.span_id,
-      ref: row.span_id.slice(0, 6),
-      parentId: row.parent_span_id,
-      name: row.name,
-      kind: v.kind,
-      startMs: row.start_ms,
-      endMs: row.end_ms,
-      durationMs: row.duration_ms,
-      status: statusOf(row),
-      error: v.error,
-      toolName: v.toolName,
-      model: v.model,
-      tokens: v.totalTokens,
-      input: v.input,
-      output: v.output,
-      toolCalls: v.toolCalls,
-      tools: v.tools,
-      seq: row.seq,
-    };
+    const info = spanInfo(row, v);
     cache.set(row.span_id, info);
     spans.push(info);
   }
