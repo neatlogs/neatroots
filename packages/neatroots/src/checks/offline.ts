@@ -28,6 +28,8 @@ export interface OfflineOptions {
   dirs?: string[];
   /** Only these rule ids. */
   only?: string[];
+  /** Evaluate only these parsed rules, without reading library, personal, project or database checks. */
+  explicitRules?: readonly RuleCheck[];
 }
 
 /** Runs every rule check over saved traces, with no server and no model. Question checks are skipped. */
@@ -36,11 +38,17 @@ export function checkFiles(files: string[], opts: OfflineOptions = {}): { runs: 
   const store = new Store(dir);
   try {
     if (opts.only && !opts.only.length) throw new Error("--only names no rule ids");
-    const registry = new CheckRegistry(store, path.join(rootsHome(), "checks"), () => opts.dirs ?? []);
-    const errors = registry.errors.map((e) => `${e.path}: ${e.message.split("\n")[0]}`);
-    const loaded = registry.rules().filter((lc) => isRule(lc.check) && (!opts.only || opts.only.includes(lc.check.id)));
-    const rules = loaded.map((lc) => lc.check as RuleCheck);
-    const untrusted = new Set(loaded.filter((lc) => lc.source !== "library").map((lc) => lc.check.id));
+    const registry = opts.explicitRules === undefined
+      ? new CheckRegistry(store, path.join(rootsHome(), "checks"), () => opts.dirs ?? [])
+      : undefined;
+    const errors = registry?.errors.map((e) => `${e.path}: ${e.message.split("\n")[0]}`) ?? [];
+    const loaded = registry?.rules() ?? [];
+    const rules = (opts.explicitRules ?? loaded.map((lc) => lc.check))
+      .filter((c) => c.enabled !== false)
+      .filter((c): c is RuleCheck => isRule(c) && (!opts.only || opts.only.includes(c.id)));
+    const untrusted = new Set(opts.explicitRules !== undefined
+      ? rules.map((rule) => rule.id)
+      : loaded.filter((lc) => lc.source !== "library").map((lc) => lc.check.id));
     const unknown = (opts.only ?? []).filter((id) => !rules.some((r) => r.id === id));
     if (unknown.length) throw new Error(`no rule check named ${unknown.join(", ")}`);
     const runs: OfflineRun[] = [];

@@ -1,0 +1,26 @@
+{
+  "resourceSpans": [
+    {
+      "resource": { "attributes": [] },
+      "scopeSpans": [
+        {
+          "scope": { "name": "fixture-example" },
+          "spans": [
+            {
+              "traceId": "22222222222222222222222222222222",
+              "spanId": "2222222222222222",
+              "name": "agent",
+              "startTimeUnixNano": "1700000000000000000",
+              "endTimeUnixNano": "1700000000010000000",
+              "attributes": [
+                { "key": "neatlogs.span.kind", "value": { "stringValue": "workflow" } },
+                { "key": "neatlogs.workflow.output", "value": { "stringValue": "result: all clear" } }
+              ],
+              "status": { "code": 1 }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

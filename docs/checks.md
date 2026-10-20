@@ -94,6 +94,44 @@ is the expected level, not necessarily a whole number.
   questions, but not halt rules: it can't create one, turn a check into one, or change yours. Switch a
   rule to `action: halt` yourself in the app or CLI.
 
+## Test custom rule checks with trace fixtures
+
+Use a fixture manifest to keep a custom check's expected detections repeatable. Each fixture gives
+the exact set of rules expected to fire; `expected: []` asserts that no scoped rule should fire.
+Every id in `rules` must be a rule defined in the manifest's `checks` directory, and only those ids
+are evaluated. The manifest directory's definition takes precedence over an installed check with
+the same id, while unrelated ambient checks cannot add findings or invalidate the suite. Evaluation
+uses the existing offline trace importer and rule evaluator, with no server or model.
+
+```yaml
+version: 1
+checks: ./checks
+rules: [example-secret]
+fixtures:
+  - id: detects-secret
+    trace: ./traces/secret.json
+    expected: [example-secret]
+  - id: ignores-clean-output
+    trace: ./traces/clean.json
+    expected: []
+```
+
+Run the self-contained example with `neatroots checks test examples/check-fixtures/manifest.yaml`.
+Use `--json` for a machine-readable report. Paths are relative to the manifest. Each fixture imports
+its trace file into a fresh temporary store, so fixtures that reuse a trace id cannot affect one
+another. A file with multiple traces must set `trace_id` to select one; otherwise the suite reports
+ambiguous input. JSON, JSONL/NDJSON and other formats accepted by `neatroots import` use the same
+trace importer here.
+
+The text and JSON reports show expected and actual ids, plus missed and unexpected findings. Exit
+codes are 0 when all assertions pass, 1 when any assertion mismatches, and 2 for an invalid manifest,
+check configuration, unknown/question check id, ambiguous trace selection or trace file error. The
+manifest rejects unknown fields, empty rule/fixture lists, duplicate ids and expected ids outside the
+declared rule scope.
+
+See [the example files](../examples/check-fixtures/) for the manifest, one custom rule and two
+trace inputs.
+
 ## Findings
 
 A finding is raised when a rule fires or a probability crosses the line. It becomes **active** when a
