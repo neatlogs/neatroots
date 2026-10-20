@@ -96,6 +96,7 @@ export function spanDetail(roots: Roots, traceId: string, spanId: string) {
   };
 }
 
+/** Project settings and activity, counting both open and resolved findings for Settings. */
 function projects(roots: Roots) {
   // Intentionally counts any finding (finding_count > 0, including resolved)
   // as Settings labels this "N with findings" (projects-section.tsx).
@@ -111,6 +112,7 @@ function projects(roots: Roots) {
 }
 
 
+/** Register the local HTTP API, including run queries with distinct any- and open-finding filters. */
 export function mountApi(app: Hono, roots: Roots): void {
   const engine = roots.engine;
   mountModelsApi(app, roots);

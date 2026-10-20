@@ -36,6 +36,11 @@ test.describe("home", () => {
     await page.reload();
     await expect(page.getByRole("tab", { name: "With problems", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("cell", { name: `Resolved ${id}`, exact: true })).toHaveCount(0);
+    await page.getByRole("link", { name: "runs", exact: true }).click();
+    await expect(page).toHaveURL(/#\/runs$/);
+    await expect(page.getByRole("tab", { name: "All", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("button", { name: "Clear the problem filter", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("cell", { name: `Resolved ${id}`, exact: true })).toBeVisible();
   });
 
   test("shows the period's numbers and what needs attention", async ({ page }) => {

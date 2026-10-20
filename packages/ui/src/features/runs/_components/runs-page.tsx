@@ -37,7 +37,7 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
   const qs = query.toString();
   useEffect(() => {
     const q = new URLSearchParams(qs);
-    if (q.has("project") || q.has("check") || q.has("has_open_finding")) setParams((p) => ({ ...p, ...fromQuery(q) }));
+    setParams((p) => ({ ...p, ...fromQuery(q) }));
   }, [qs]);
   const { data, isLoading, hasMore, loadMore, loadingMore } = useRuns(params);
   const { data: known } = useProjects();

@@ -235,7 +235,7 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
     byCheck.set(f.check_id, e);
   }
   const resolvedChecks = new Set(cur.findings.filter((f) => f.status === "resolved").map((f) => f.check_id));
-  // Finding nothing excludes quiet or resolved findings, even though neither is an open problem.
+  /** Whether a check found nothing; quiet and resolved findings still count as having found an issue. */
   const reportedNothing = (id: string) => {
     const e = byCheck.get(id);
     return !e?.runs.size && !e?.quiet && !resolvedChecks.has(id);
