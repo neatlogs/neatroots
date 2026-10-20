@@ -2,6 +2,8 @@ import type { Hono } from "hono";
 import type { Roots } from "../core.js";
 import { checkTitle } from "../checks/types.js";
 import { readDigest, writeDigest, type Digest } from "../engine/digest.js";
+import { QUIET_AFTER } from "../engine/findings.js";
+import { dismissHomeFinding, type HomeDismissTarget } from "../store/home-dismissals.js";
 import { computeInsights, WINDOWS, type WindowKey } from "../store/insights.js";
 import { body, err } from "./util.js";
 
@@ -26,7 +28,21 @@ export function mountInsightsApi(app: Hono, roots: Roots): void {
 
   app.get("/api/insights", (c) => {
     const key = windowKey(c.req.query("window"));
-    return c.json({ ...insights(roots, key), digest: readDigest(roots, key), digest_pending: writing.has(key) });
+    return c.json({ ...insights(roots, key), quiet_after: QUIET_AFTER, digest: readDigest(roots, key), digest_pending: writing.has(key) });
+  });
+
+  app.post("/api/insights/dismiss", async (c) => {
+    const target = await body<HomeDismissTarget>(c);
+    if (![target.finding_id, target.check_id, target.project].every((v) => typeof v === "string" && v.length > 0)) {
+      return err(c, 400, "finding_id, check_id and project are required");
+    }
+    const result = dismissHomeFinding(roots.store, target);
+    if ("error" in result) return err(c, result.status, result.error);
+    if (result.changed) {
+      roots.steering.withdraw(result.finding.id);
+      roots.bus.emit("finding", result.finding);
+    }
+    return c.json({ ok: true, finding_id: result.finding.id, dismissed: roots.store.dismissalsIn(target.check_id, target.project) });
   });
 
   app.post("/api/insights/digest", async (c) => {
