@@ -145,7 +145,8 @@ function textOf(text: string, { doc, node, list }: FoundCheck): [number, number]
   if (!list) return [doc.range[0], doc.range[2]];
   // A block entry runs from the start of its "- " line to the end of its last line. Comments on the
   // dash line, or on lines between the dash and the check's first key, go with it.
-  const marker = /(^|\n)[ \t]*-(?:[ \t]*(?:#[^\n]*)?\r?\n)*[ \t]*$/.exec(text.slice(0, start));
+  // `#[^\r\n]*` stops before a CRLF's `\r`, so each line matches one way only (no exponential backtracking).
+  const marker = /(^|\n)[ \t]*-(?:[ \t]*(?:#[^\r\n]*)?\r?\n)*[ \t]*$/.exec(text.slice(0, start));
   return [marker ? marker.index + marker[1].length : start, end];
 }
 

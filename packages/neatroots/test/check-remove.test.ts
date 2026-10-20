@@ -303,3 +303,16 @@ it("keeps a comment on the entry before a deleted last flow entry", () => {
   expect(r.get("a")).toBeDefined();
   expect(r.errors).toEqual([]);
 });
+
+// Code scanning: the pattern that finds an entry's "- " line read `#[^\n]*` before `\r?\n`, so
+// every CRLF comment line could split two ways and a failed match backtracked exponentially.
+it("deletes a check after an entry with many CRLF comment lines, in linear time", () => {
+  const notes = Array.from({ length: 28 }, (_, i) => `# note ${i}\r\n`).join("");
+  write("crlf.yaml", `- # first\r\n${notes}  id: first\r\n  kind: rule\r\n  rule: { type: count, span: { type: tool }, at_least: 3 }\r\n- id: second\r\n  kind: rule\r\n  rule: { type: count, span: { type: tool }, at_least: 4 }\r\n`);
+  const r = registry();
+  const t0 = performance.now();
+  expect(r.remove("second")).toBe(true);
+  expect(performance.now() - t0).toBeLessThan(1000);
+  expect(read("crlf.yaml")).toContain("id: first");
+  expect(read("crlf.yaml")).not.toContain("id: second");
+});

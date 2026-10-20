@@ -4,12 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The merge queue runs the required checks on its own branch before a pull request lands.
+  merge_group:
 
 permissions:
   contents: read
 
 # A new push to a pull request cancels the run for its previous commit, so runners go to the latest
-# one. Every commit on main gets a run of its own and runs to the end.
+# one. Every commit on main, and every merge-queue group, gets a run of its own and runs to the end.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
