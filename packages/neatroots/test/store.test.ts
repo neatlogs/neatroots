@@ -17,6 +17,17 @@ afterEach(() => {
 });
 
 describe("store", () => {
+  it("counts an exporter retry as the same run in its session", () => {
+    const st = store();
+    const t = hex(16);
+    const root = span({ traceId: t, name: "root", kind: "workflow", attrs: [s("neatlogs.session.id", "session-1")] });
+
+    st.ingest([batch([root])]);
+    st.ingest([batch([root])]);
+
+    expect(st.db.prepare("SELECT run_count FROM sessions WHERE id = ?").get("session-1")).toEqual({ run_count: 1 });
+  });
+
   it("aggregates a run from child spans, root and completion marker", () => {
     const st = store();
     const t = hex(16);
