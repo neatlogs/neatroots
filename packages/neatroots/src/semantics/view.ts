@@ -250,16 +250,26 @@ function llmToolCalls(attrs: Attrs): SpanView["toolCalls"] {
 }
 
 function finishReasonOf(attrs: Attrs): string | undefined {
-  const raw =
-    first(attrs, ["neatlogs.llm.finish_reason", "gen_ai.response.finish_reasons", "llm.finish_reason", "ai.response.finishReason"]) ??
-    attrs["gen_ai.response.finish_reasons.0"];
-  if (raw === undefined || raw === null || raw === "") return undefined;
-  const parsed = maybeJson(raw);
-  if (Array.isArray(parsed)) {
-    if (!parsed.length) return undefined;
-    return str(parsed[0]);
+  const sources: (Plain | undefined)[] = [
+    attrs["neatlogs.llm.finish_reason"],
+    attrs["gen_ai.response.finish_reasons"],
+    attrs["llm.finish_reason"],
+    attrs["ai.response.finishReason"],
+    attrs["gen_ai.response.finish_reasons.0"],
+  ];
+  for (const src of sources) {
+    if (src === undefined || src === null || src === "") continue;
+    const parsed = maybeJson(src);
+    if (Array.isArray(parsed)) {
+      if (!parsed.length) continue;
+      const s = str(parsed[0]);
+      if (s) return s;
+      continue;
+    }
+    const s = str(parsed);
+    if (s) return s;
   }
-  return str(parsed);
+  return undefined;
 }
 
 function exceptionMessage(span: OtlpSpan): string | undefined {

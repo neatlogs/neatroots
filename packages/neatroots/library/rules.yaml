@@ -65,7 +65,7 @@
     field: finish_reason
     pattern: '^(max_tokens|length|MAX_TOKENS)$'
     flags: 'i'
-  guidance: The reply hit max_tokens and is incomplete. Raise max_tokens for this call or ask the model to continue before using the reply.
+  guidance: The reply was truncated at the token limit and is incomplete. Raise max_tokens for this call or ask the model to continue before using the reply.
 
 - id: secret-in-output
   kind: rule
