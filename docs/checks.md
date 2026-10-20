@@ -90,9 +90,36 @@ is the expected level, not necessarily a whole number.
   Plans are cached per workflow and redone when new tools appear.
 - **You**: describe a concern in the app (Checks → New check) and the LLM drafts the question; preview
   it on recent runs before saving.
-- **Coding agents**: `create_check` and `preview_check` over MCP. A coding agent can save `flag` rules and
-  questions, but not halt rules: it can't create one, turn a check into one, or change yours. Switch a
-  rule to `action: halt` yourself in the app or CLI.
+- **Coding agents**: `create_check` and `preview_check` over MCP. Saved proposals for `flag` rules and
+  questions appear in Checks for approval; `save=false` remains a draft only. A coding agent cannot
+  create a halt rule, turn a check into one, or change yours. Switch a rule to `action: halt` yourself
+  in the app or CLI.
+
+MCP-created proposals do not run by themselves. In Checks, **Approve check** creates only a new file, using exclusive creation; approval never overwrites an existing destination, even if its contents already match. Existing destinations require **Review manually**: inspect the proposed YAML and target in the editor, then explicitly **Save check** to apply your own human-authored edit. This save is a regular human action, not an atomic filesystem compare-and-swap guarantee. The proposal stays pending and is not approved or automatically discarded; reject the obsolete proposal after saving. Preview runs the proposal without applying it. An existing active version remains unchanged by the proposal or a blocked approval. Approved new files retain MCP origin. Approve or reject only the exact revision shown; changed definitions or destinations require a fresh proposal. MCP cannot create or change halt rules; save those yourself in the app or CLI.
+
+MCP origin follows the check ID when a file is renamed, moved between registered check directories,
+or shadowed by another file with the same ID. The approval still requires the exact definition and
+path, so a moved or changed version stays inactive until reviewed again. A same-ID collision is
+treated conservatively as MCP-origin content; save it explicitly in the app to take ownership as a
+human-authored check. A successful human save preserves history and disabled state while clearing origin and approval metadata; a failed save
+does not. Legacy file-backed MCP records follow the same rule, but never restore a missing file or
+load one from an unregistered directory. Shipped library checks retain their library identity.
+
+## Offline rule checks
+
+`neatroots check <files...>` loads the library, the selected home checks directory, and explicit
+`--checks` directories. It honors MCP origin, exact definition/path approval, and disabled state
+from the selected home database, including committed WAL records and legacy file-backed origins.
+Unapproved, edited, or moved MCP files remain inactive. Database-only checks and configured project
+directories are not automatically imported. Use an isolated `NEATROOTS_HOME` for repository-only CI;
+a fresh home needs no database.
+
+Offline checks read approval metadata and file-backed enablement in one native SQLite read-only
+transaction. They do not migrate the live database or write application data/schema; normal SQLite
+WAL coordination may create or update transient sidecars. No full database copy or size limit is
+required. Filesystem and SQLite-reported read/schema errors fail closed with exit code 2. This is
+not an independent damaged-WAL integrity checker: SQLite may ignore malformed WAL records during
+recovery. The offline command follows SQLite's native snapshot and WAL recovery semantics.
 
 ## Findings
 

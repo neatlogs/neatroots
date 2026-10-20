@@ -43,10 +43,12 @@ The 23 tools, by what they are for:
 
 | Tool | Returns | Model |
 | --- | --- | --- |
-| `create_check`, `preview_check` | A new check from a concern or YAML, and its hit rate on recent runs. `create_check` won't save a rule with `action: halt` or change an existing halt rule; only you make halt rules, in the app or CLI | local LLM, then decision model |
+| `create_check`, `preview_check` | A check proposal from a concern or YAML, and its hit rate on recent runs. Saved proposals require approval in Checks. `create_check` cannot save a rule with `action: halt` or change an existing halt rule; only you make halt rules, in the app or CLI | local LLM, then decision model |
 | `annotate` | Marks a run or span as issue, good, or a note | none |
 | `replay` | Re-sends one LLM span's messages (edited, or with another model or system prompt) and stores the answer as a new run | the configured LLM |
 | `rerun` | Re-runs the whole agent through its registered command or endpoint (`neatroots rerun add`), optionally with a new input, model or system prompt | none |
+
+`create_check` with `save=false` still returns a draft only. Saving creates a local pending proposal shown in Checks; it remains inactive until a person approves it there. Editing an approved check keeps the current version active and unchanged while the proposal waits. `preview_check` by id previews the pending version when one exists. Approval exclusively creates a new file in the selected user or registered project checks directory and retains its MCP origin. Existing destinations require **Review manually** and an explicit human **Save check**; they are never overwritten by approval. The editor preserves the exact reviewed target and rejects stale or unregistered targets. Manual save does not approve or discard the pending proposal; reject it separately afterward. Rejection discards only the proposal. These actions are local and do not send anything to Neatlogs Cloud. Successful human saves clear MCP provenance while preserving check history and any disabled state; they do not implicitly re-enable a disabled check. The existing CLI `checks` commands only list or validate files; they are unchanged.
 
 ### Neatlogs Cloud
 

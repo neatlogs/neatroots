@@ -1,3 +1,4 @@
+import path from "node:path";
 import { z } from "zod";
 import { checkWarnings } from "../checks/lint.js";
 import type { Roots } from "../core.js";
@@ -356,13 +357,13 @@ export const TOOLS = [
     name: "create_check",
     title: "Create check",
     description:
-      "Add a check. Give either `concern` (plain language; the local LLM writes the question) or `check` (YAML or JSON in neatroots check format). Set save=false to only draft it. Saved checks go to ~/.neatroots/checks or a registered project directory. Halt rules can't be saved or changed here: save a rule with action: flag, and the user can switch it to halt in the app or CLI.",
+      "Propose a check. Give either `concern` (plain language; the local LLM writes the question) or `check` (YAML or JSON in neatroots check format). Set save=false to return a draft only. Saving creates an inactive local proposal that a person reviews in Checks. Approval only creates a new file; existing destinations require manual review and save in the editor, taking human ownership. The proposal remains pending until rejected; its existing active version is unchanged. Halt rules cannot be saved or changed here: save a rule with action: flag, and the user can switch it to halt in the app or CLI.",
     input: {
       concern: z.string().optional(),
       check: z.string().optional().describe("YAML or JSON check definition"),
       workflow: z.string().optional(),
       save: z.boolean().optional(),
-      dir: z.string().optional().describe("A registered project checks directory"),
+      dir: z.string().min(1, "dir must not be empty").optional().describe("A registered project checks directory"),
     },
     run: async (roots, a) => {
       let check;
@@ -382,14 +383,31 @@ export const TOOLS = [
         const state = checkDirState(a.dir);
         if (!state.ok && !state.creatable) throw new Error(`that checks directory ${state.reason}`);
       }
-      const saved = roots.checks.save(check, a.dir ? { dir: a.dir } : "user", "mcp");
-      return { saved: true, id: saved.check.id, path: saved.path, yaml: checkToYaml(saved.check), warnings: checkWarnings(saved.check) };
+      const active = roots.checks.get(check.id);
+      const prior = roots.checks.pendingMcpCheck(check.id);
+      const targetDir = a.dir ?? prior?.target_dir ?? (active?.path && active.source !== "library" ? path.dirname(active.path) : null);
+      const proposal = roots.checks.proposeMcp(check, targetDir);
+      roots.bus.emit("checks", { id: proposal.check.id });
+      return {
+        saved: true,
+        id: proposal.check.id,
+        path: null,
+        yaml: checkToYaml(proposal.check),
+        warnings: checkWarnings(proposal.check),
+        revision: proposal.revision,
+        pending_approval: true,
+        approved: false,
+        active_version_unchanged: proposal.has_active_version,
+        target_dir: proposal.target_dir,
+        target_path: proposal.target_path,
+        manual_application_required: proposal.manual_application_required,
+      };
     },
   }),
   def({
     name: "preview_check",
     title: "Preview check",
-    description: "Run a check (by id, YAML or JSON) over recent finished runs without raising findings, and report how often it fires.",
+    description: "Run a check (by id, YAML or JSON) over recent finished runs without raising findings, and report how often it fires. An id with an inactive MCP proposal previews the proposed version.",
     input: {
       id: z.string().optional(),
       check: z.string().optional(),
@@ -399,7 +417,7 @@ export const TOOLS = [
     run: async (roots, a) => {
       if (!roots.engine) throw new Error("engine not running");
       let check;
-      if (a.id) check = roots.checks.get(a.id)?.check;
+      if (a.id) check = roots.checks.pendingMcpCheck(a.id)?.check ?? roots.checks.get(a.id)?.check;
       else if (a.check) {
         const text = a.check.trim();
         check = checkFromInput(text.startsWith("{") ? JSON.parse(text) : text).check;

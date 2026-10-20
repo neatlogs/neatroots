@@ -5,6 +5,7 @@ import { rootsHome } from "../config.js";
 import { loadTrace } from "../engine/trace.js";
 import { parseTraceFile } from "../ingest/importers/file.js";
 import { Store } from "../store/db.js";
+import { copyOfflineApprovalState } from "./offline-approval-state.js";
 import { CheckRegistry } from "./registry.js";
 import { evaluateRule } from "./rules.js";
 import { isRule, type RuleCheck } from "./types.js";
@@ -36,7 +37,9 @@ export function checkFiles(files: string[], opts: OfflineOptions = {}): { runs: 
   const store = new Store(dir);
   try {
     if (opts.only && !opts.only.length) throw new Error("--only names no rule ids");
-    const registry = new CheckRegistry(store, path.join(rootsHome(), "checks"), () => opts.dirs ?? []);
+    const home = rootsHome();
+    copyOfflineApprovalState(home, store);
+    const registry = new CheckRegistry(store, path.join(home, "checks"), () => opts.dirs ?? []);
     const errors = registry.errors.map((e) => `${e.path}: ${e.message.split("\n")[0]}`);
     const loaded = registry.rules().filter((lc) => isRule(lc.check) && (!opts.only || opts.only.includes(lc.check.id)));
     const rules = loaded.map((lc) => lc.check as RuleCheck);

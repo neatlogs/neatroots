@@ -389,6 +389,20 @@ export interface CheckRow {
   check: Record<string, unknown>;
 }
 
+export interface CheckApprovalRow {
+  id: string;
+  revision: string;
+  kind: string;
+  title: string;
+  yaml: string;
+  check: Record<string, unknown>;
+  created_ms: number;
+  target_dir: string | null;
+  has_active_version: boolean;
+  target_path: string;
+  manual_application_required: boolean;
+}
+
 export interface ProjectRow {
   project: string;
   runs: number;
