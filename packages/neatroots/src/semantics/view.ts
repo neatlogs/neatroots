@@ -51,6 +51,8 @@ export interface SpanView {
   input?: Plain;
   output?: Plain;
   error?: string;
+  /** Public SDK flag: the caller abandoned a streamed reply. Missing is unknown. */
+  streamCancelled?: boolean;
   interrupted?: boolean;
   terminationReason?: string;
   /** Tool calls the LLM asked for (LLM spans only). */
@@ -338,6 +340,7 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
   if (span.status.code === 2) view.error = span.status.message || exceptionMessage(span) || "error";
   else view.error = exceptionMessage(span);
   if (attrs["neatlogs.trace.interrupted"] === true || attrs["neatlogs.trace.interrupted"] === "true") view.interrupted = true;
+  if (typeof attrs["neatlogs.stream.cancelled"] === "boolean") view.streamCancelled = attrs["neatlogs.stream.cancelled"];
   view.terminationReason = str(attrs["neatlogs.trace.termination.reason"]);
   return view;
 }
