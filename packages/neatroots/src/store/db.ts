@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { BlobStore } from "./blobs.js";
+import { initReviews } from "./reviews.js";
 import { SearchIds } from "./search-ids.js";
 import { sha256, newId } from "../util/ids.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
@@ -49,6 +50,8 @@ CREATE TABLE IF NOT EXISTS runs (
   ended_ms INTEGER,
   last_span_ms INTEGER,
   span_count INTEGER NOT NULL DEFAULT 0,
+  evidence_seq INTEGER NOT NULL DEFAULT 0,
+  evidence_spans INTEGER NOT NULL DEFAULT 0,
   llm_calls INTEGER NOT NULL DEFAULT 0,
   tool_calls INTEGER NOT NULL DEFAULT 0,
   error_count INTEGER NOT NULL DEFAULT 0,
@@ -428,8 +431,10 @@ export class Store {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("busy_timeout = 5000");
+    this.db.pragma("foreign_keys = ON");
     this.db.exec(SCHEMA);
     this.migrate();
+    initReviews(this.db);
     this.searchIds = new SearchIds(this.db);
     this.blobs = new BlobStore(path.join(dir, "blobs"));
     const row = this.db.prepare("SELECT MAX(seq) AS s FROM spans").get() as { s: number | null };
@@ -444,9 +449,19 @@ export class Store {
   private migrate(): void {
     const ensure = (table: string, column: string, type: string) => {
       const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-      if (!cols.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+      if (cols.some((c) => c.name === column)) return false;
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+      return true;
     };
     ensure("plans", "body", "TEXT");
+    // Backfill once, in the same transaction as the columns, preserving existing review versions.
+    this.db.transaction(() => {
+      const seq = ensure("runs", "evidence_seq", "INTEGER NOT NULL DEFAULT 0");
+      const count = ensure("runs", "evidence_spans", "INTEGER NOT NULL DEFAULT 0");
+      if (seq || count) this.db.exec(`UPDATE runs SET
+        evidence_seq = COALESCE((SELECT MAX(seq) FROM spans WHERE spans.trace_id = runs.trace_id), 0),
+        evidence_spans = (SELECT COUNT(*) FROM spans WHERE spans.trace_id = runs.trace_id)`);
+    })();
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
     this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
@@ -591,6 +606,7 @@ export class Store {
     return row;
   }
 
+  /** Updates run aggregates; evidence counts every stored span, including completion markers. */
   private updateRun(
     span: OtlpSpan,
     view: SpanView,
@@ -621,8 +637,9 @@ export class Store {
       flags.created = true;
       run = this.getRun(span.traceId)!;
     }
-    const sets: string[] = ["updated_ms = @now", "last_span_ms = MAX(COALESCE(last_span_ms, 0), @end)"];
-    const p: Record<string, unknown> = { now, end: row.end_ms, trace: span.traceId };
+    const sets: string[] = ["updated_ms = @now", "last_span_ms = MAX(COALESCE(last_span_ms, 0), @end)",
+      "evidence_seq = @seq", "evidence_spans = evidence_spans + @newSpan"];
+    const p: Record<string, unknown> = { now, end: row.end_ms, trace: span.traceId, seq: row.seq, newSpan: Number(!previous) };
     if (!run.started_ms || row.start_ms < run.started_ms) {
       sets.push("started_ms = @start");
       p.start = row.start_ms;

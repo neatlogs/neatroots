@@ -1,10 +1,11 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 import { Toaster } from "sonner";
 import { PageErrorBoundary } from "@/components/page-error-boundary";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ChecksPage } from "@/features/checks/_components/checks-page";
+import { ReviewsPage } from "@/features/reviews/reviews-page";
 import { HomePage } from "@/features/home/_components/home-page";
 import { RunDetail } from "@/features/runs/_components/run-detail";
 import { RunsPage } from "@/features/runs/_components/runs-page";
@@ -28,7 +29,16 @@ export function App() {
   const [theme, setTheme] = useTheme();
   const { connected } = useLiveEvents();
   const { data: status } = useQuery({ queryKey: appKeys.status, queryFn: () => api<Status>("/api/status"), refetchInterval: 10_000 });
-  const runId = page === "runs" ? route[1] : undefined;
+  const runId = route[1];
+  const pages: Record<string, ReactNode> = {
+    checks: <ChecksPage />,
+    reviews: <ReviewsPage query={query} />,
+    search: <SearchPage query={query} />,
+    agents: <AgentsPage sessionId={route[1]} query={query} />,
+    "add-data": <AddDataPage status={status} tab={route[1]} />,
+    settings: <SettingsPage status={status} tab={route[1]} />,
+    runs: runId ? <RunDetail key={runId} traceId={runId} query={query} /> : <RunsPage status={status} query={query} />,
+  };
 
   // ⌘K / Ctrl+K anywhere opens search.
   useEffect(() => {
@@ -61,23 +71,7 @@ export function App() {
           <PushBanner />
           <div className="min-h-0 flex-1">
           <PageErrorBoundary key={route.join("/")}>
-          {page === "checks" ? (
-            <ChecksPage />
-          ) : page === "search" ? (
-            <SearchPage query={query} />
-          ) : page === "agents" ? (
-            <AgentsPage sessionId={route[1]} query={query} />
-          ) : page === "add-data" ? (
-            <AddDataPage status={status} tab={route[1]} />
-          ) : page === "settings" ? (
-            <SettingsPage status={status} tab={route[1]} />
-          ) : page === "runs" && runId ? (
-            <RunDetail key={runId} traceId={runId} query={query} />
-          ) : page === "runs" ? (
-            <RunsPage status={status} query={query} />
-          ) : (
-            <HomePage status={status} />
-          )}
+          {Object.hasOwn(pages, page) ? pages[page] : <HomePage status={status} />}
           </PageErrorBoundary>
           </div>
         </SidebarInset>
