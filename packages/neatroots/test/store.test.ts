@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Store } from "../src/store/db.js";
 import { traceReadback } from "../src/server/readback.js";
 import { batch, closeTrackedStores, hex, llmSpan, markerSpan, s, span, tmpHome, toolSpan, trackedStore } from "./helpers.js";
@@ -10,6 +10,12 @@ function store(): Store {
   const h = tmpHome();
   homes.push(h);
   return trackedStore(path.join(h, "data"));
+}
+function storedLog(st: Store, traceId: string | null, receivedMs: number, body: string): number {
+  const result = st.db
+    .prepare("INSERT INTO logs (trace_id, span_id, time_ns, severity, body, attributes, resource_id, received_ms) VALUES (?, NULL, ?, ?, ?, ?, NULL, ?)")
+    .run(traceId, "123", "INFO", body, "{}", receivedMs);
+  return Number(result.lastInsertRowid);
 }
 afterEach(() => {
   closeTrackedStores();
@@ -274,13 +280,75 @@ describe("store", () => {
   it("does not delete every run when retention days is 0", () => {
     const st = store();
     for (let i = 0; i < 4; i++) st.ingest([batch([span({ traceId: hex(16), spanId: hex(8), name: "r", kind: "workflow", attrs: [s("neatlogs.workflow.input", `"req ${i}"`)] })])]);
+    storedLog(st, null, 1, "retention disabled");
     // Even with ended/received times in the past, days=0 must NOT wipe everything.
     st.db.prepare("UPDATE runs SET received_ms = 1, ended_ms = 1").run();
     expect(st.sweep(0, 5 * 1024 ** 3)).toBe(0);
     expect(st.listRuns({ limit: 500 }).length).toBe(4);
+    expect(st.db.prepare("SELECT body FROM logs WHERE trace_id IS NULL").get()).toEqual({ body: "retention disabled" });
     // a normal positive retention still prunes old runs
     expect(st.sweep(14, 5 * 1024 ** 3)).toBe(4);
     expect(st.listRuns({ limit: 500 }).length).toBe(0);
+    expect(st.db.prepare("SELECT body FROM logs WHERE trace_id IS NULL").get()).toBeUndefined();
+  });
+
+  it("ages out old unassociated logs at a strict age boundary and keeps traced logs with their run", () => {
+    vi.useFakeTimers();
+    try {
+      const now = new Date("2026-10-16T12:00:00.000Z");
+      vi.setSystemTime(now);
+      const st = store();
+      const traceId = hex(16);
+      st.ingest([batch([span({ traceId, spanId: hex(8), name: "fresh", kind: "workflow" })])]);
+      const cutoff = now.getTime() - 86_400_000;
+      storedLog(st, null, cutoff - 1, "older than cutoff");
+      storedLog(st, null, cutoff, "exactly at cutoff");
+      storedLog(st, null, cutoff + 1, "newer than cutoff");
+      storedLog(st, traceId, cutoff - 1, "old traced log owned by fresh run");
+
+      expect(st.sweep(1, Number.POSITIVE_INFINITY)).toBe(0);
+      const rows = st.db.prepare("SELECT trace_id, body FROM logs ORDER BY id").all() as { trace_id: string | null; body: string }[];
+      expect(rows).toEqual([
+        { trace_id: null, body: "exactly at cutoff" },
+        { trace_id: null, body: "newer than cutoff" },
+        { trace_id: traceId, body: "old traced log owned by fresh run" },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("trims oldest unassociated logs before unrelated runs when the store exceeds its cap", () => {
+    const st = store();
+    const runIds = [hex(16), hex(16), hex(16)];
+    for (const traceId of runIds) st.ingest([batch([span({ traceId, spanId: hex(8), name: "fresh", kind: "workflow" })])]);
+    st.setPinned(runIds[0], true);
+
+    const now = Date.now();
+    // Equal timestamps exercise the id tie-breaker across multiple bounded trim batches.
+    const logIds = Array.from({ length: 520 }, (_, i) => storedLog(st, null, now, `${i}: ${"x".repeat(4_000)}`));
+    storedLog(st, runIds[1], now + logIds.length, "traced log remains with its run");
+    // Start with the same compacted accounting state that sweep uses before size trimming.
+    st.db.prepare("INSERT INTO span_fts(span_fts) VALUES('optimize')").run();
+    const before = st.storedBytes();
+    const cap = Math.floor(before * 0.25);
+
+    expect(st.sweep(999_999, cap)).toBe(0);
+    expect(runIds.every((traceId) => st.getRun(traceId) !== undefined)).toBe(true);
+    const after = st.storedBytes();
+    expect(after).toBeLessThan(before);
+    expect(after).toBeLessThanOrEqual(cap);
+
+    const remainingIds = (st.db.prepare("SELECT id FROM logs WHERE trace_id IS NULL ORDER BY received_ms, id").all() as { id: number }[]).map((row) => row.id);
+    expect(remainingIds.length).toBeLessThan(logIds.length);
+    expect(logIds.length - remainingIds.length).toBeGreaterThan(256);
+    expect(remainingIds).toEqual(logIds.slice(logIds.length - remainingIds.length));
+    expect(st.db.prepare("SELECT body FROM logs WHERE trace_id = ?").get(runIds[1])).toEqual({ body: "traced log remains with its run" });
+
+    expect(st.sweep(999_999, cap)).toBe(0);
+    expect(st.storedBytes()).toBe(after);
+    expect((st.db.prepare("SELECT id FROM logs WHERE trace_id IS NULL ORDER BY received_ms, id").all() as { id: number }[]).map((row) => row.id)).toEqual(remainingIds);
+    st.close();
   });
 
   it("trims to the size cap by removing the oldest runs, not every run", () => {
@@ -343,6 +411,7 @@ describe("store", () => {
   it("doesn't compact or trim a store that is under its cap", () => {
     const st = store();
     for (let i = 0; i < 10; i++) st.ingest([batch([span({ traceId: hex(16), spanId: hex(8), name: `r${i}`, kind: "workflow", attrs: [s("input.value", "hello ".repeat(200))] })])]);
+    storedLog(st, null, Date.now(), "recent log stays under the default cap");
     let compactions = 0;
     const orig = st.db.prepare.bind(st.db);
     st.db.prepare = ((sql: string) => {
@@ -352,6 +421,7 @@ describe("store", () => {
     expect(st.sweep(14, 5 * 1024 ** 3)).toBe(0);
     st.db.prepare = orig;
     expect(compactions).toBe(0);
+    expect(st.db.prepare("SELECT body FROM logs WHERE trace_id IS NULL").get()).toEqual({ body: "recent log stays under the default cap" });
   });
 
   it("clamps bad limit/offset values instead of crashing or ignoring them", () => {

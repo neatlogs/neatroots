@@ -3,6 +3,8 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { BlobStore } from "./blobs.js";
 import { SearchIds } from "./search-ids.js";
+import { runDatabaseWeights, trimOrphanLogs } from "./retention.js";
+import { log } from "../util/log.js";
 import { sha256, newId } from "../util/ids.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
 import { kvToPlain, type KeyValue, type OtlpResource, type OtlpScope, type OtlpSpan, type Plain, type ResourceSpansBatch } from "../otlp/types.js";
@@ -132,6 +134,7 @@ CREATE TABLE IF NOT EXISTS logs (
   received_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS logs_trace ON logs (trace_id);
+CREATE INDEX IF NOT EXISTS logs_received ON logs (received_ms, id);
 
 CREATE TABLE IF NOT EXISTS plans (
   id TEXT PRIMARY KEY,
@@ -1296,6 +1299,8 @@ export class Store {
   /** Deletes the oldest unpinned runs past the age or size limit. Returns how many runs were removed. */
   sweep(maxAgeDays: number, maxBytes: number): number {
     let removed = 0;
+    let removedLogs = 0;
+    let removedForSize = 0;
     // Skip the age sweep for a non-positive age: a cutoff of "now" (days = 0)
     // would delete every unpinned run. maxBytes pruning below still runs.
     if (Number.isFinite(maxAgeDays) && maxAgeDays >= 1) {
@@ -1305,69 +1310,79 @@ export class Store {
         .all(cutoff) as { trace_id: string }[];
       this.deleteRuns(old.map((r) => r.trace_id));
       removed += old.length;
+      removedLogs += trimOrphanLogs(this.db, { cutoff });
     }
     // Measure what the database holds, not the file size: SQLite keeps the file (and WAL) at its
     // high-water mark after a delete and reuses the freed pages, so the file size never drops
     // after a delete and measuring it would delete every unpinned run.
-    let size = this.storedBytes();
+    // Age pruning above can remove blobs; log trimming and FTS compaction below cannot.
+    // Read the blob directory once, then measure actual SQLite pages after each bounded batch.
+    const blobBytes = this.blobs.size();
+    let size = this.databaseBytes() + blobBytes;
     if (size > maxBytes) {
       // Deleting from the full-text index leaves "deleted" markers until it is compacted, so the
       // size can read high. Compact (once per sweep, and only when over the cap) before trusting it.
       this.compactSearchIndex();
-      size = this.storedBytes();
+      size = this.databaseBytes() + blobBytes;
     }
     if (size > maxBytes) {
-      // Trim the oldest unpinned runs down to a low-water mark below the cap, so a store sitting
-      // at its cap isn't trimmed (and compacted) again on every hourly sweep.
-      const oldest = this.oldestRunsCovering(size - maxBytes * RETENTION_LOW_WATER, size);
-      this.deleteRuns(oldest);
-      removed += oldest.length;
+      // Trim to a low-water mark below the cap, reclaiming orphan logs before unrelated runs.
+      // This keeps a store sitting at its cap from being trimmed again on every hourly sweep.
+      const target = maxBytes * RETENTION_LOW_WATER;
+      removedLogs += trimOrphanLogs(this.db, { excess: () => this.databaseBytes() + blobBytes - target });
+      size = this.databaseBytes() + blobBytes;
+      if (size > maxBytes) {
+        const oldest = this.oldestRunsCovering(maxBytes);
+        this.deleteRuns(oldest);
+        removed += oldest.length;
+        removedForSize += oldest.length;
+      }
     }
-    if (removed) this.db.pragma("wal_checkpoint(TRUNCATE)");
+    if (removed || removedLogs) this.db.pragma("wal_checkpoint(TRUNCATE)");
+    // Keep reporting the actual total even when protected/non-run data makes the cap impossible.
+    const remaining = this.databaseBytes() + (removedForSize ? this.blobs.size() : blobBytes);
+    if (remaining > maxBytes) log.warn(`retention remains above size cap: ${remaining} bytes stored, ${maxBytes} byte cap; protected or non-run data retained`);
     return removed;
   }
 
-  /**
-   * The oldest unpinned runs whose share of storedBytes() adds up to `excess`. A run's span rows
-   * are scaled to the database's share of `stored` (which also holds the search index and table
-   * overhead). Blobs are shared between runs, so a blob counts only toward the run whose deletion
-   * actually frees it: the newest run that references it, and never one a pinned run still uses.
-   * Returns at least one run while any unpinned run exists.
-   */
-  private oldestRunsCovering(excess: number, stored: number): string[] {
-    const rowBytes = `octet_length(s.attributes) + octet_length(s.events) + octet_length(s.links) + IFNULL(octet_length(s.extra), 0) + IFNULL(octet_length(s.input_preview), 0) + IFNULL(octet_length(s.output_preview), 0) + octet_length(s.name)`;
-    // A big value lives in a blob file but its text is also in the search index, so the
-    // indexed text counts toward the run too.
-    const indexed = new Map(
-      (this.db.prepare("SELECT trace_id AS t, SUM(octet_length(name) + octet_length(tool_name) + octet_length(body)) AS f FROM span_fts GROUP BY trace_id").all() as { t: string; f: number }[]).map((r) => [r.t, r.f]),
-    );
-    const rows = (
-      this.db
-        .prepare(
-          `SELECT r.trace_id AS t, r.pinned AS pinned, COALESCE(SUM(${rowBytes}), 0) AS w, group_concat(s.blobs, '') AS b
-           FROM runs r LEFT JOIN spans s ON s.trace_id = r.trace_id
-           GROUP BY r.trace_id ORDER BY COALESCE(r.ended_ms, r.received_ms) ASC`,
-        )
-        .all() as { t: string; pinned: number; w: number; b: string | null }[]
-    ).map((r) => ({ ...r, w: r.w + (indexed.get(r.t) ?? 0) }));
-    const shas = rows.map((r) => (r.b ? [...new Set(r.b.match(/[0-9a-f]{64}/g) ?? [])] : []));
+  /** Evict only when run-owned data exceeds its budget; unrelated pages never inflate weights. */
+  private oldestRunsCovering(maxBytes: number): string[] {
+    const weights = runDatabaseWeights(this.db);
+    if (!weights) return [];
+    // Root pages are an unavoidable database floor, not payload attributed to a run.
+    const fixedPages = (this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_schema WHERE rootpage > 0").get() as { n: number }).n;
+    const fixed = fixedPages * (this.db.pragma("page_size", { simple: true }) as number);
+    const budget = Math.max(0, maxBytes - fixed);
+    const rows = this.db.prepare(
+      `SELECT r.trace_id AS t, r.pinned, group_concat(s.blobs, '') AS b
+       FROM runs r LEFT JOIN spans s ON s.trace_id = r.trace_id
+       GROUP BY r.trace_id ORDER BY COALESCE(r.ended_ms, r.received_ms) ASC`,
+    ).all() as { t: string; pinned: number; b: string | null }[];
     const lastRef = new Map<string, number>();
-    shas.forEach((list, i) => list.forEach((sha) => lastRef.set(sha, rows[i].pinned ? Infinity : Math.max(lastRef.get(sha) ?? -1, i))));
-    const blobTotal = this.blobs.size();
-    const rowTotal = rows.reduce((n, r) => n + r.w, 0);
-    // Every table and index keeps at least its root page however many runs are deleted.
-    const fixed = (this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_schema WHERE rootpage > 0").get() as { n: number }).n * (this.db.pragma("page_size", { simple: true }) as number);
-    const rowScale = rowTotal > 0 ? Math.max(0, stored - blobTotal - fixed) / rowTotal : 0;
-    const pick: string[] = [];
+    rows.forEach((row, i) => {
+      for (const sha of new Set(row.b?.match(/[0-9a-f]{64}/g) ?? [])) {
+        lastRef.set(sha, row.pinned ? Infinity : Math.max(lastRef.get(sha) ?? -1, i));
+      }
+    });
+    let protectedBytes = rows.reduce((n, row) => n + (row.pinned ? weights.get(row.t) ?? 0 : 0), 0);
+    for (const [sha, index] of lastRef) {
+      if (index === Infinity) protectedBytes += this.blobs.sizeOf(sha);
+      else weights.set(rows[index].t, (weights.get(rows[index].t) ?? 0) + this.blobs.sizeOf(sha));
+    }
+    // If protected data alone exceeds the cap, deleting unrelated runs cannot meet it.
+    if (protectedBytes >= budget) return [];
+    const total = protectedBytes + rows.reduce((n, row) => n + (!row.pinned ? weights.get(row.t) ?? 0 : 0), 0);
+    if (total <= budget) return [];
+    const excess = total - Math.max(0, maxBytes * RETENTION_LOW_WATER - fixed);
+    const picked: string[] = [];
     let freed = 0;
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i].pinned) continue;
-      pick.push(rows[i].t);
-      freed += rows[i].w * rowScale;
-      for (const sha of shas[i]) if (lastRef.get(sha) === i) freed += this.blobs.sizeOf(sha);
+    for (const row of rows) {
+      if (row.pinned) continue;
+      picked.push(row.t);
+      freed += weights.get(row.t) ?? 0;
       if (freed >= excess) break;
     }
-    return pick;
+    return picked;
   }
 
   /** Merges the full-text index so space held by deleted spans is actually released. */
@@ -1377,10 +1392,14 @@ export class Store {
 
   /** Bytes of data actually stored: database pages in use (not free pages) plus payload blobs. */
   storedBytes(): number {
+    return this.databaseBytes() + this.blobs.size();
+  }
+
+  private databaseBytes(): number {
     const pages = this.db.pragma("page_count", { simple: true }) as number;
     const free = this.db.pragma("freelist_count", { simple: true }) as number;
     const pageSize = this.db.pragma("page_size", { simple: true }) as number;
-    return (pages - free) * pageSize + this.blobs.size();
+    return (pages - free) * pageSize;
   }
 
   diskBytes(): number {
