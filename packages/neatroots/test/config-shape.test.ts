@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defaultConfig, loadConfig } from "../src/config.js";
+import { defaultConfig, loadConfig, projectSettings } from "../src/config.js";
 
 describe("loadConfig with a hand-edited value of the wrong shape", () => {
   const prev = process.env.NEATROOTS_HOME;
@@ -41,6 +41,16 @@ describe("loadConfig with a hand-edited value of the wrong shape", () => {
   it("ignores a list setting given as a number", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(load("checkDirs: 3\n").checkDirs).toEqual([]);
+  });
+
+  it("keeps audit disabled for malformed YAML values and preserves project false overrides", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(load("audit: enabled\n").audit.enabled).toBe(false);
+    expect(load('audit:\n  enabled: "false"\n  directory: 8\n').audit).toEqual({ enabled: false, directory: "" });
+    const cfg = load("audit:\n  enabled: true\nprojects:\n  excluded:\n    audit: false\n  malformed:\n    audit: yes\n");
+    expect(projectSettings(cfg, "excluded").audit).toBe(false);
+    expect(projectSettings(cfg, "included").audit).toBe(true);
+    expect(projectSettings(cfg, "malformed").audit).toBe(true);
   });
 
   it("still merges well-formed settings", () => {

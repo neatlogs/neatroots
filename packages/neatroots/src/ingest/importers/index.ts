@@ -116,7 +116,7 @@ export class ImportJobs {
             continue;
           }
           try {
-            const updates = this.roots.ingest(t.batches);
+            const updates = this.roots.ingest(t.batches, { importSource: source.id });
             job.traces += 1;
             job.spans += t.batches.reduce((n, b) => n + b.spans.length, 0);
             for (const u of updates) if (job.trace_ids.length < 20 && !job.trace_ids.includes(u.traceId)) job.trace_ids.push(u.traceId);
