@@ -6,6 +6,7 @@ import type { Command } from "commander";
 import { rootsHome, loadConfig } from "../config.js";
 import { api, port, running } from "./util.js";
 import { bundleDir, cliPath, sourceDir } from "../util/install.js";
+import { bundleRoot, readBuild, staleAfterUpdate } from "../util/build.js";
 
 const LABEL = "com.neatlogs.neatroots";
 
@@ -173,6 +174,13 @@ export function registerServiceCommands(program: Command): void {
       const bundle = bundleDir();
       const dir = bundle ? undefined : sourceDir();
       if (!bundle && !dir) throw new Error("this copy of neatroots wasn't installed with the install script; reinstall with it to get updates");
+      // The bundle root, read before the install: the install replaces the app directory, and
+      // with it the script this command is running from.
+      const root = bundleRoot();
+      // The build on disk right now, before the install replaces it. The copy that is running
+      // was started from this build, so it is what the running server falls back to when it
+      // cannot report a build of its own.
+      const before = bundle ? readBuild(root) : null;
       // Keep the Node this runs on, and rewrite the command where it was installed.
       const env: NodeJS.ProcessEnv = { ...process.env, NEATROOTS_UPDATE: "1", NEATROOTS_NODE: process.execPath };
       if (process.env.NEATROOTS_WRAPPER) env.NEATROOTS_BIN_DIR = path.dirname(process.env.NEATROOTS_WRAPPER);
@@ -198,7 +206,14 @@ export function registerServiceCommands(program: Command): void {
       if (!(await running(p))) return;
       const cli = bundle ? path.join(bundle, "neatroots", "dist", "cli.js") : path.join(dir!, "packages", "neatroots", "dist", "cli.js");
       const fresh = spawnSync(process.execPath, [cli, "--version"], { encoding: "utf8" }).stdout.trim();
-      const live = await api<{ version: string }>(p, "/api/status").then((s) => s.version).catch(() => "");
-      if (fresh && live && live !== fresh) console.log(`! neatroots ${live} is still running on port ${p}. Restart it to use ${fresh}: Ctrl+C in its terminal, then neatroots start`);
+      const status = await api<{ version: string; build?: { commit: string } | null }>(p, "/api/status").catch(() => undefined);
+      // The build that was just installed, and the build the running copy was started from. The
+      // version cannot tell a release candidate from its release; the commit can.
+      const after = bundle ? readBuild(root) : null;
+      const stale = staleAfterUpdate(
+        { version: status?.version ?? "", commit: status?.build?.commit ?? before?.commit ?? "" },
+        { version: fresh, commit: after?.commit ?? "" },
+      );
+      if (stale) console.log(`! ${stale} on port ${p}. Restart it: Ctrl+C in its terminal, then neatroots start`);
     });
 }

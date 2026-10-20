@@ -18,6 +18,7 @@ import { mountAgentsApi } from "./api-agents.js";
 import { importSource, mountExploreApi } from "./api-explore.js";
 import { checkCoverage } from "./coverage.js";
 import { installInfo } from "../util/install.js";
+import { RUNNING_BUILD } from "../util/build.js";
 import { err, body, clampInt, isTraceIds } from "./util.js";
 import { checkDirState } from "../checks/registry.js";
 import { askRuns } from "../engine/assist.js";
@@ -123,6 +124,9 @@ export function mountApi(app: Hono, roots: Roots): void {
     return c.json({
       name: "neatroots",
       version: VERSION,
+      // Which build this process is running. The version cannot tell a release candidate from
+      // its release, so `neatroots update` compares the build.
+      build: RUNNING_BUILD ? { commit: RUNNING_BUILD.commit, built: RUNNING_BUILD.built } : null,
       uptime_ms: Date.now() - roots.startedMs,
       port: roots.config.port,
       home: roots.home,
