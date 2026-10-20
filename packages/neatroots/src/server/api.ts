@@ -130,7 +130,13 @@ export function mountApi(app: Hono, roots: Roots): void {
       stats: roots.store.stats(),
       engine: status,
       tier: { ...tier, platform: `${os.platform()} ${os.arch()}` },
-      steering: { enabled: roots.config.steering.enabled, hooks_connected: roots.steering.listeners },
+      steering: {
+        enabled: roots.config.steering.enabled,
+        hooks_connected: roots.steering.listeners, // Legacy alias retained for status consumers.
+        stream_clients: roots.steering.listeners,
+        // Process-local; resets when this server restarts. Null means no contact observed this run.
+        last_seen_ms: roots.steerSeenMs,
+      },
       mcp: { last_seen_ms: roots.mcpSeenMs },
       cloud: { endpoint: roots.relay.endpoint(), has_key: !!(await getCloudKey()), has_token: !!(await getCloudToken()), project_id: roots.config.cloud.projectId ?? null },
       classifier: {
@@ -428,6 +434,7 @@ export function mountApi(app: Hono, roots: Roots): void {
         queue.push({ event: e.event, data: JSON.stringify(e.data) });
         wake?.();
       });
+      roots.steerSeenMs = Date.now();
       stream.onAbort(() => off());
       await stream.writeSSE({ event: "hello", data: JSON.stringify({ version: VERSION, enabled: roots.config.steering.enabled }) });
       while (!stream.aborted) {
@@ -456,10 +463,14 @@ export function mountApi(app: Hono, roots: Roots): void {
     const run = roots.store.getRun(b.trace_id);
     // Before any span of this run has arrived neatroots cannot know its project; say so, so the
     // hook flushes the SDK and asks again instead of caching "off".
-    if (!run && !b.project) return c.json({ mode: "unknown", known: false, note: null });
+    if (!run && !b.project) {
+      roots.steerSeenMs = Date.now();
+      return c.json({ mode: "unknown", known: false, note: null });
+    }
     const mode = roots.steering.mode(run?.project ?? b.project);
     const wait = mode === "gate" ? (b.gate_ms ?? roots.config.steering.gateWaitMs) : 0;
     const note = wait > 0 ? await roots.steering.gate(b.trace_id, wait, b.span_id) : roots.steering.claim(b.trace_id, b.span_id);
+    roots.steerSeenMs = Date.now();
     return c.json({ mode, note: note ? { id: note.id, kind: note.kind, text: note.text, finding_id: note.finding_id } : null });
   });
 
