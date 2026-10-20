@@ -214,6 +214,7 @@ export class CheckRegistry {
     for (const [id, lc] of next) {
       this.store.upsertCheckRow({ id, kind: lc.check.kind === "rule" ? "rule" : "question", source: lc.source, path: lc.path, body: checkToYaml(lc.check), enabled: lc.check.enabled });
     }
+    this.store.checkHistory.setActive([...next.values()].map((lc) => lc.check));
     this.checks = next;
     const seen = new Set(this.errors.map((e) => `${e.path}|${e.id}|${e.message}`));
     this.errors = errors;

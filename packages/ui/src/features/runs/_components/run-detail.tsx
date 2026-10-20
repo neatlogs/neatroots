@@ -1,4 +1,5 @@
 import { BarChartHorizontalIcon, Download01Icon, GitForkIcon, MoreHorizontalIcon, PinIcon, PinOffIcon } from "@hugeicons/core-free-icons";
+import { RunCheckHistory } from "../../checks/_components/check-history";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DetailBreadcrumb, DetailLayout, DetailRailGroup, DetailTitle, PropertyRow } from "@/components/detail/detail-layout";
@@ -266,6 +267,7 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
           }}
         />
         <RunViews traceId={traceId} spans={d.spans} flagged={flagged} view={view} onView={setView} selected={highlighted} onSelect={setOpen} hasSession={!!r.session_id} fork={fork} />
+        <RunCheckHistory traceId={traceId} />
         <ReplaysPanel replays={d.replays} />
         <SteeringNotes notes={d.notes} />
       </div>

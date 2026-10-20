@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { BlobStore } from "./blobs.js";
+import { CheckHistory } from "./check-history.js";
 import { SearchIds } from "./search-ids.js";
 import { sha256, newId } from "../util/ids.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
@@ -420,6 +421,8 @@ export class Store {
     return !fs.existsSync(current) && fs.existsSync(legacy) ? legacy : current;
   }
 
+  readonly checkHistory: CheckHistory;
+
   constructor(dir: string) {
     this.dir = dir;
     fs.mkdirSync(dir, { recursive: true });
@@ -430,6 +433,7 @@ export class Store {
     this.db.pragma("busy_timeout = 5000");
     this.db.exec(SCHEMA);
     this.migrate();
+    this.checkHistory = new CheckHistory(this.db);
     this.searchIds = new SearchIds(this.db);
     this.blobs = new BlobStore(path.join(dir, "blobs"));
     const row = this.db.prepare("SELECT MAX(seq) AS s FROM spans").get() as { s: number | null };
@@ -1411,10 +1415,11 @@ export class Store {
     const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
     const tx = this.db.transaction(() => {
       this.searchIds.deleteRuns(ids);
-      for (const t of ["spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
+      for (const t of ["spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations", "check_evaluations", "check_history_runs"]) {
         this.db.prepare(`DELETE FROM ${t} WHERE ${inIds}`).run(ids);
       }
       this.db.prepare(`DELETE FROM runs WHERE ${inIds}`).run(ids);
+      this.checkHistory.collect();
     });
     tx();
     this.reclaimUnreferencedBlobs(shas);
