@@ -17,6 +17,7 @@ import { useRunActions, useRunDetail } from "../_services/run-queries";
 import { useReplay, useReplayOptions } from "../_services/view-queries";
 import { DeleteRunDialog } from "./delete-run-dialog";
 import { ForwardDialog } from "./forward-dialog";
+import { DiagnosticExportDialog } from "./diagnostic-export-dialog";
 import { SteeringNotes } from "./notes-panel";
 import { ProblemsPanel } from "./problems-panel";
 import { ReplayDialog } from "./replay-dialog";
@@ -43,6 +44,7 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
   const replay = useReplay(traceId);
   const [open, setOpen] = useState<string | undefined>(query?.get("span") ?? undefined);
   const [preview, setPreview] = useState<ForwardPreview>();
+  const [diagnosticExportOpen, setDiagnosticExportOpen] = useState(false);
   const [investigating, setInvestigating] = useState<string>();
   const [replayFor, setReplayFor] = useState<{ span?: string } | null>(null);
   const [forking, setForking] = useState<"llm" | "run" | null>(null);
@@ -136,6 +138,7 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
         <DropdownMenuContent align="end" className="w-56">
           <DropdownMenuItem onClick={() => actions.recheck.mutate(undefined, { onSuccess: () => toast.success("Re-running checks on this run") })}>Re-run checks</DropdownMenuItem>
           <DropdownMenuItem onClick={() => go(`agents?trace=${traceId}`)}>Ask a coding agent</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setDiagnosticExportOpen(true)}>Prepare diagnostic export</DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
             onClick={() =>
@@ -279,6 +282,7 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
         onReplay={(spanId) => setReplayFor({ span: spanId })}
       />
       <ForwardDialog preview={preview} pending={actions.forward.isPending} onSend={() => actions.forward.mutateAsync()} onClose={() => setPreview(undefined)} />
+      <DiagnosticExportDialog traceId={traceId} open={diagnosticExportOpen} onOpenChange={setDiagnosticExportOpen} />
       {replayFor && <ReplayDialog traceId={traceId} spans={d.spans} initialSpan={replayFor.span} onClose={() => setReplayFor(null)} />}
     </DetailLayout>
   );
