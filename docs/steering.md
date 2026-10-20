@@ -79,3 +79,9 @@ disables it in a process.
 The same hook reads a replay's overrides: `neatroots_steer.replay_input()` (`replayInput()` in
 TypeScript) returns the replay's input, and `wrap()` applies its model and system prompt. See
 [replay.md](replay.md).
+
+## Diagnose opt-in steering
+
+`neatroots doctor` reads the running server's effective project modes. The global switch being on does not opt a project in: omitted project settings default to `off`, as do unconfigured projects. When the global switch is off or no project has an enabled mode, the steering line is informational. When at least one project has `advisory`, `gate` or `self-check` enabled, no observed hook contact produces a setup warning, not a failing doctor exit code. Add the hook above and make an agent call to exercise it.
+
+Contact is process-local history **since server start**, not current connectivity, health, note delivery or a project-specific observation. A missing timestamp from an older server means unknown; it does not prove no contact. A restart clears the history. TypeScript polling can record contact while the stream count stays zero. Python's listener contributes to the stream count only while connected. `hooks_connected` remains a compatibility alias for `stream_clients`; neither counts all hooks. Status labels stored contact as historical while the global switch is off.
