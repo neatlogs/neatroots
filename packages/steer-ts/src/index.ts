@@ -331,6 +331,40 @@ const overrideAnthropic: Override = (p, o) => ({ ...p, ...(o.model ? { model: o.
 
 // --------------------------------------------------------------------- wrap
 
+/**
+ * The method the object actually holds, without a wrapper layer in between.
+ *
+ * The neatlogs SDK wraps its client in a Proxy whose get trap instruments
+ * `chat.completions.create` on every read (#601). Reading the method through
+ * that Proxy captures the SDK's tracer, and the SDK then wraps our own wrapper
+ * again on the next read - so the provider call ends up instrumented twice and
+ * every LLM call is recorded twice.
+ *
+ * Looking the method up on the object and its prototype chain finds the
+ * provider's own function instead, so the SDK's tracer wraps only that one.
+ */
+function readMethod(owner: Record<string, unknown>, name: string): unknown {
+  let target: object | null = owner;
+  while (target) {
+    const desc = Object.getOwnPropertyDescriptor(target, name);
+    if (desc) {
+      // An accessor has no function value to call; fall back to the plain read.
+      if (!("value" in desc)) return owner[name];
+      return desc.value;
+    }
+    target = Object.getPrototypeOf(target);
+  }
+  return owner[name];
+}
+
+/**
+ * Wrap one provider method so every call is steered and recorded.
+ *
+ * The method is read from the object itself (own property, then its prototype
+ * chain) instead of from a wrapper layer, so a client that instruments its
+ * methods on read - like the neatlogs SDK client - is wrapped exactly once
+ * (#601).
+ */
 function wrapMethod(
   owner: Record<string, unknown> | undefined,
   name: string,
@@ -338,7 +372,7 @@ function wrapMethod(
   override: Override = (p) => p,
 ): void {
   if (!owner) return;
-  const original = owner[name] as ((...a: unknown[]) => unknown) & { __neatroots?: boolean };
+  const original = readMethod(owner, name) as ((...a: unknown[]) => unknown) & { __neatroots?: boolean };
   if (typeof original !== "function" || original.__neatroots) return;
   const wrapped = function (this: unknown, ...args: unknown[]) {
     const request = (async () => {
