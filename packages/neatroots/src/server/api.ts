@@ -132,7 +132,7 @@ export function mountApi(app: Hono, roots: Roots): void {
       tier: { ...tier, platform: `${os.platform()} ${os.arch()}` },
       steering: { enabled: roots.config.steering.enabled, hooks_connected: roots.steering.listeners },
       mcp: { last_seen_ms: roots.mcpSeenMs },
-      cloud: { endpoint: roots.relay.endpoint(), has_key: !!(await getCloudKey()), has_token: !!(await getCloudToken()), project_id: roots.config.cloud.projectId ?? null },
+      cloud: { endpoint: roots.relay.endpoint(), has_key: !!(await getCloudKey()), has_token: !!(await getCloudToken()), project_id: roots.config.cloud.projectId ?? null, redact_patterns: roots.config.cloud.redactPatterns },
       classifier: {
         laya: { ...roots.laya.state, consent: roots.config.classifier.laya.consent ?? null },
         trust: Object.entries(roots.decisions.trust.all())
