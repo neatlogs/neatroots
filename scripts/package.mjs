@@ -73,7 +73,8 @@ try {
 } catch {
   /* not a checkout */
 }
-fs.writeFileSync(path.join(stage, ".neatroots-bundle"), `${JSON.stringify({ version, commit, built: new Date().toISOString() }, null, 2)}\n`);
+const tag = process.env.GITHUB_REF_TYPE === "tag" ? process.env.GITHUB_REF_NAME : undefined;
+fs.writeFileSync(path.join(stage, ".neatroots-bundle"), `${JSON.stringify({ version, tag, commit, built: new Date().toISOString() }, null, 2)}\n`);
 
 // ------------------------------------------------------------ links in the shipped docs resolve
 {

@@ -5,7 +5,7 @@ import path from "node:path";
 import type { Command } from "commander";
 import { rootsHome, loadConfig } from "../config.js";
 import { api, port, running } from "./util.js";
-import { bundleDir, cliPath, sourceDir } from "../util/install.js";
+import { bundleBuild, bundleDir, cliPath, sourceDir } from "../util/install.js";
 
 const LABEL = "com.neatlogs.neatroots";
 
@@ -198,7 +198,13 @@ export function registerServiceCommands(program: Command): void {
       if (!(await running(p))) return;
       const cli = bundle ? path.join(bundle, "neatroots", "dist", "cli.js") : path.join(dir!, "packages", "neatroots", "dist", "cli.js");
       const fresh = spawnSync(process.execPath, [cli, "--version"], { encoding: "utf8" }).stdout.trim();
-      const live = await api<{ version: string }>(p, "/api/status").then((s) => s.version).catch(() => "");
-      if (fresh && live && live !== fresh) console.log(`! neatroots ${live} is still running on port ${p}. Restart it to use ${fresh}: Ctrl+C in its terminal, then neatroots start`);
+      const live = await api<{ version: string; build?: string | null }>(p, "/api/status").catch(() => null);
+      const freshBuild = bundleBuild(bundle);
+      // A legacy server without a build identity cannot confirm it is running the new bundle.
+      if (fresh && live?.version && (live.version !== fresh || (freshBuild && live.build !== freshBuild))) {
+        const from = live.build ? `${live.version} (${live.build})` : live.version;
+        const to = freshBuild ? `${fresh} (${freshBuild})` : fresh;
+        console.log(`! neatroots ${from} is still running on port ${p}. Restart it to use ${to}: Ctrl+C in its terminal, then neatroots start`);
+      }
     });
 }
