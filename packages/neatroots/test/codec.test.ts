@@ -107,6 +107,15 @@ describe("OTLP codec", () => {
     expect(decodeTraceJson({ resourceSpans: [] } as any)).toEqual([]);
   });
 
+  it("rejects malformed OTLP timestamps before storage", () => {
+    const make = (startTimeUnixNano: unknown) => ({
+      resourceSpans: [{ scopeSpans: [{ spans: [{ traceId: hex(16), spanId: hex(8), name: "bad-time", startTimeUnixNano }] }] }],
+    });
+    expect(() => decodeTraceJson(make("not-a-time"))).toThrow(/invalid OTLP timestamp/);
+    expect(() => decodeTraceJson(make("-1"))).toThrow(/invalid OTLP timestamp/);
+    expect(() => decodeTraceJson(make("18446744073709551616"))).toThrow(/invalid OTLP timestamp/);
+  });
+
   it("normalizes non-string status.message to string without dropping or throwing", () => {
     const traceId = hex(16);
     const spanId = hex(8);

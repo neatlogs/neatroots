@@ -83,6 +83,12 @@ function longToString(v: unknown): string {
   return String(v);
 }
 
+function timeToString(v: unknown): string {
+  const text = longToString(v);
+  if (!/^\d+$/.test(text) || BigInt(text) > 18_446_744_073_709_551_615n) throw new Error(`invalid OTLP timestamp: ${text}`);
+  return text;
+}
+
 // ---------------------------------------------------------- value normalizer
 
 /** Accepts protobufjs toObject output or OTLP/JSON (camelCase or snake_case). */
@@ -169,13 +175,13 @@ function normSpan(s: any): OtlpSpan | null {
     flags: num(s.flags) || undefined,
     name: String(s.name ?? ""),
     kind: normKind(s.kind),
-    startTimeUnixNano: longToString(g(s, "startTimeUnixNano", "start_time_unix_nano")),
-    endTimeUnixNano: longToString(g(s, "endTimeUnixNano", "end_time_unix_nano")),
+    startTimeUnixNano: timeToString(g(s, "startTimeUnixNano", "start_time_unix_nano")),
+    endTimeUnixNano: timeToString(g(s, "endTimeUnixNano", "end_time_unix_nano")),
     attributes: normKvs(s.attributes),
     droppedAttributesCount: num(g(s, "droppedAttributesCount", "dropped_attributes_count")) || undefined,
     events: (s.events ?? []).map(
       (e: any): OtlpEvent => ({
-        timeUnixNano: longToString(g(e, "timeUnixNano", "time_unix_nano")),
+        timeUnixNano: timeToString(g(e, "timeUnixNano", "time_unix_nano")),
         name: String(e.name ?? ""),
         attributes: normKvs(e.attributes),
         droppedAttributesCount: num(g(e, "droppedAttributesCount", "dropped_attributes_count")) || undefined,
@@ -271,7 +277,7 @@ function normLogs(obj: any): OtlpLogRecord[] {
       const scope = normScope(sl.scope);
       for (const lr of objects(g(sl, "logRecords", "log_records"), "logRecords")) {
         out.push({
-          timeUnixNano: longToString(g(lr, "timeUnixNano", "time_unix_nano") ?? g(lr, "observedTimeUnixNano", "observed_time_unix_nano")),
+          timeUnixNano: timeToString(g(lr, "timeUnixNano", "time_unix_nano") ?? g(lr, "observedTimeUnixNano", "observed_time_unix_nano")),
           severityText: g(lr, "severityText", "severity_text") || undefined,
           severityNumber: num(g(lr, "severityNumber", "severity_number")),
           body: normValue(lr.body),
