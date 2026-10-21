@@ -17,6 +17,15 @@ test.describe("search", () => {
     await expect(page.getByText("Nothing matched")).toBeVisible();
   });
 
+  test("a since: it can't read says so instead of showing every run", async ({ page }) => {
+    await open(page, "search?q=delivered");
+    await expect(page.getByText(/\d+ runs?/).first()).toBeVisible();
+    await page.getByRole("textbox", { name: "Search runs" }).fill("delivered since:30x");
+    await expect(page.getByText("Can't read that search")).toBeVisible();
+    await expect(page.getByText(/since: takes 30m, 24h, 7d, 2w or a date/)).toBeVisible();
+    await expect(page.getByText(/\d+ runs?/)).toHaveCount(0);
+  });
+
   test("quick filter chips add and remove tokens", async ({ page }) => {
     await open(page, "search");
     await page.getByRole("button", { name: "Failed", exact: true }).click();

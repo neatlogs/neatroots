@@ -6,6 +6,7 @@ import { cloudApiBase, listCloudProjects } from "../ingest/importers/neatlogs-cl
 import { endpointProblem } from "../relay/endpoint.js";
 import { deleteCloudToken, getCloudToken, setCloudToken } from "../relay/keychain.js";
 import type { ImportSource } from "../ingest/importers/types.js";
+import { parseSince, SINCE_FORMS } from "../util/since.js";
 import { api, ask, port, running } from "./util.js";
 
 // neatroots import, replay and rerun: bring runs in from files and Neatlogs Cloud, and re-run them.
@@ -19,11 +20,9 @@ const CLOUD: Pick<ImportSource, "id" | "label" | "description" | "fields"> = {
 const SOURCES = [CLOUD];
 
 function windowMs(v: string | undefined, fallbackDays: number): number {
-  if (!v) return Date.now() - fallbackDays * 86_400_000;
-  const m = /^(\d+)([hdw])$/.exec(v);
-  if (m) return Date.now() - Number(m[1]) * { h: 3_600_000, d: 86_400_000, w: 604_800_000 }[m[2] as "h" | "d" | "w"];
-  const t = Date.parse(v);
-  if (Number.isNaN(t)) throw new Error(`--since takes 24h, 7d, 2w or a date, not "${v}"`);
+  if (v === undefined) return Date.now() - fallbackDays * 86_400_000;
+  const t = parseSince(v);
+  if (t === undefined) throw new Error(`--since takes ${SINCE_FORMS}, not "${v}"`);
   return t;
 }
 
@@ -40,7 +39,7 @@ export function registerDataCommands(program: Command): void {
     .command("import")
     .argument("[files...]", "trace files (.json, .jsonl), or neatlogs-cloud")
     .description("Bring traces into neatroots: trace files, or your Neatlogs Cloud project")
-    .option("--since <when>", "earliest trace to import: 24h, 7d, 2w or a date (default 7d)")
+    .option("--since <when>", "earliest trace to import: 30m, 24h, 7d, 2w or a date (default 7d)")
     .option("--limit <n>", "most traces to import (default 100)")
     .option("--project <name>", "local project name for the imported runs")
     .option("--list", "show what each kind of import needs")
