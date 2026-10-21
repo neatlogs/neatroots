@@ -14,7 +14,7 @@ const SQL_CELL_CHARS = 2000;
 const CHILD = String.raw`
 const [driver, file, cap, cellChars] = process.argv.slice(1);
 const Database = require(driver);
-const clipCell = (v) => (typeof v === "string" && v.length > +cellChars ? v.slice(0, +cellChars - 1) + "\u2026" : v);
+const clipCell = (v) => Buffer.isBuffer(v) ? "<BLOB " + v.length + " bytes>" : (typeof v === "string" && v.length > +cellChars ? v.slice(0, +cellChars - 1) + "\u2026" : v);
 let sql = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (d) => (sql += d));
