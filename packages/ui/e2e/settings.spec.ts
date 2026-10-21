@@ -68,4 +68,34 @@ test.describe("settings", () => {
     await expect(page.getByText("Not connected")).toBeVisible();
     await expect(page.getByRole("button", { name: "Store key" })).toBeDisabled();
   });
+
+  test("Neatlogs Cloud loads, edits and clears saved redaction patterns", async ({ page }) => {
+    type CloudStatus = { cloud: { redact_patterns: string[] } };
+    const original = await api<CloudStatus>("/api/status");
+    const savePatterns = (patterns: string[]) => api("/api/settings", {
+      method: "POST", body: JSON.stringify({ redact_patterns: patterns }),
+    });
+    const initial = ["secret_[0-9]+", "\\bcust_[0-9]+\\b"];
+    try {
+      await savePatterns(initial);
+      await open(page, "settings/cloud");
+      const patterns = page.getByRole("textbox", { name: "Extra redaction patterns" });
+      await expect(patterns).toHaveValue(initial.join("\n"));
+
+      const updated = [...initial, "order_[0-9]+,private"];
+      await patterns.fill(`  ${initial[0]}  \n\n${initial[1]}\n  ${updated[2]}  \n`);
+      await page.getByRole("button", { name: "Save cloud settings" }).click();
+      await expect.poll(async () => (await api<CloudStatus>("/api/status")).cloud.redact_patterns).toEqual(updated);
+      await page.reload();
+      await expect(patterns).toHaveValue(updated.join("\n"));
+
+      await patterns.fill("");
+      await page.getByRole("button", { name: "Save cloud settings" }).click();
+      await expect.poll(async () => (await api<CloudStatus>("/api/status")).cloud.redact_patterns).toEqual([]);
+      await page.reload();
+      await expect(patterns).toHaveValue("");
+    } finally {
+      await savePatterns(original.cloud.redact_patterns ?? []);
+    }
+  });
 });
