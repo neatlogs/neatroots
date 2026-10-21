@@ -127,6 +127,26 @@ describe("hosted OpenAI-compatible provider", () => {
     );
     await expect(llm.chat([{ role: "user", content: "hi" }])).rejects.toBeInstanceOf(LlmUnavailableError);
   });
+
+  it("uses stated confidence when a provider rejects requested logprobs", async () => {
+    const srv = await mock((r) =>
+      r.body.logprobs
+        ? { status: 400, json: { error: { message: "logprobs are not supported" } } }
+        : { json: chatReply('{"answer":"yes","confidence":0.95}') },
+    );
+    closers.push(srv.close);
+    const llm = new LlmClient(
+      cfgWith((c) => Object.assign(c.external, { enabled: true, provider: "openai", baseUrl: `${srv.url}/v1`, model: "remote-model" })),
+      { secret: async () => "test-key-123456" },
+    );
+
+    const r = await new LlmDecisionBackend(llm).decide("evidence", [{ name: "q", type: "yes_no", ask: "Did it fail?" }]);
+
+    expect(r.answers.q.probability).toBeCloseTo(0.86, 2);
+    const calls = srv.seen.filter((s) => s.path.endsWith("/chat/completions"));
+    expect(calls[0].body.response_format.json_schema.schema.required).toEqual(["answer", "confidence"]);
+    expect(calls.at(-1)?.body.logprobs).toBeUndefined();
+  });
 });
 
 describe("Anthropic provider", () => {
@@ -193,6 +213,27 @@ describe("Anthropic provider", () => {
     const r = await new LlmDecisionBackend(llm).decide("evidence", [{ name: "q", type: "yes_no", ask: "Did it fail?" }]);
     expect(r.answers.q.probability).toBeCloseTo(0.86, 2); // its stated 0.95, pulled toward even odds (uncalibrated)
     expect(srv.seen[0].body.output_config.format.schema.required).toEqual(["answer", "confidence"]);
+  });
+});
+
+describe("local decision calibration", () => {
+  it("asks for confidence when a local server omits logprobs", async () => {
+    const srv = await mock((r) =>
+      r.path.endsWith("/models") ? { json: { data: [{ id: "local-model" }] } } : { json: chatReply('{"answer": "yes", "confidence": 0.95}') },
+    );
+    closers.push(srv.close);
+    const llm = new LlmClient(cfgWith((c) => Object.assign(c, { baseUrl: `${srv.url}/v1`, enabled: true })), { secret: async () => undefined });
+    const r = await new LlmDecisionBackend(llm).decide("evidence", [{ name: "q", type: "yes_no", ask: "Did it fail?" }]);
+    expect(r.answers.q.probability).toBeCloseTo(0.86, 2);
+    const request = srv.seen.find((s) => s.path.endsWith("/chat/completions"));
+    expect(request?.body.response_format.json_schema.schema.required).toEqual(["answer", "confidence"]);
+  });
+
+  it("rejects malformed answers instead of turning them into an even yes", async () => {
+    const srv = await mock((r) => (r.path.endsWith("/models") ? { json: { data: [{ id: "local-model" }] } } : { json: chatReply("not json") }));
+    closers.push(srv.close);
+    const llm = new LlmClient(cfgWith((c) => Object.assign(c, { baseUrl: `${srv.url}/v1`, enabled: true })), { secret: async () => undefined });
+    await expect(new LlmDecisionBackend(llm).decide("evidence", [{ name: "q", type: "yes_no", ask: "Did it fail?" }])).rejects.toThrow(/invalid answer/);
   });
 });
 
