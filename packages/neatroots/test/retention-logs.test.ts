@@ -74,4 +74,20 @@ describe("retention of logs that belong to no run", () => {
     st.sweep(999_999, Math.floor(st.storedBytes() * 0.5));
     expect(logCount(st, `trace_id = '${early}'`)).toBe(1);
   });
+
+  it("leaves logs alone while the store is under its cap", () => {
+    const st = store();
+    runs(st, 2);
+    st.ingestLogs(Array.from({ length: 50 }, () => log()));
+    expect(st.sweep(999_999, st.storedBytes() * 2)).toBe(0);
+    expect(logCount(st)).toBe(50);
+  });
+
+  it("ages out more logs than one delete batch holds", () => {
+    const st = store();
+    st.ingestLogs(Array.from({ length: 5_200 }, () => log("", "short")));
+    st.db.prepare("UPDATE logs SET received_ms = ?").run(Date.now() - 30 * 86_400_000);
+    st.sweep(14, Number.POSITIVE_INFINITY);
+    expect(logCount(st)).toBe(0);
+  });
 });

@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS logs (
   received_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS logs_trace ON logs (trace_id);
+CREATE INDEX IF NOT EXISTS logs_received ON logs (received_ms);
 
 CREATE TABLE IF NOT EXISTS plans (
   id TEXT PRIMARY KEY,
@@ -1374,8 +1375,10 @@ export class Store {
       // size can read high. Compact (once per sweep, and only when over the cap) before trusting it.
       this.compactSearchIndex();
       size = this.storedBytes();
-      // Logs that belong to no run go first: deleting runs can't free their space (#267). Row
-      // sizes understate the pages they use, so measure again and trim more if needed.
+    }
+    if (size > maxBytes) {
+      // Logs that belong to no run go first, down to the low-water mark: deleting runs can't free
+      // their space (#267). Row sizes understate the pages they use, so measure again and trim more.
       for (let i = 0; i < 8 && size > maxBytes * RETENTION_LOW_WATER; i++) {
         const n = trimUnattachedLogs(this.db, size - maxBytes * RETENTION_LOW_WATER);
         if (!n) break;
