@@ -505,4 +505,23 @@ describe("server", () => {
     });
     expect(rLogs.status).toBe(413);
   });
+
+  it("returns 413 for gzip-compressed bodies that decompress beyond the limit", async () => {
+    const tb = await served();
+    const huge = Buffer.alloc(270 * 1024 * 1024);
+    const compressed = zlib.gzipSync(huge);
+
+    for (const [path, ct] of [
+      ["/v1/traces", "application/x-protobuf"],
+      ["/v1/trace", "application/json"],
+      ["/v1/logs", "application/x-protobuf"],
+    ] as const) {
+      const r = await fetch(`${tb.url}${path}`, {
+        method: "POST",
+        headers: { "content-type": ct, "content-encoding": "gzip" },
+        body: compressed,
+      });
+      expect(r.status, path).toBe(413);
+    }
+  });
 });
