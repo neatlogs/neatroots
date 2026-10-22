@@ -436,9 +436,11 @@ export class Engine {
   // ----------------------------------------------------------------- rules
 
   private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>): void {
+    // A late root can change the workflow after the live state and its plan were created.
+    const scope = snap.run ? { project: snap.run.project ?? "unknown", workflow: snap.run.workflow ?? snap.run.project ?? "unknown" } : run;
     for (const lc of this.registry.rules()) {
       const rule = lc.check as RuleCheck;
-      if (!this.appliesTo(rule, run)) continue;
+      if (!this.appliesTo(rule, scope)) continue;
       if (this.roots.store.latestFindingFor(run.traceId, rule.id)?.status === "dismissed") continue;
       if (rule.rule.type === "run_end" && !atEnd) continue;
       let hit: RuleHit | null;
