@@ -72,17 +72,30 @@ export class BlobStore {
   files(): { path: string; sha?: string; size: number; mtimeMs: number }[] {
     const out: { path: string; sha?: string; size: number; mtimeMs: number }[] = [];
     if (!fs.existsSync(this.dir)) return out;
+    // An entry another writer renames or removes mid-scan is skipped, not fatal to the whole scan.
+    const gone = (err: unknown) => ["ENOENT", "ENOTDIR"].includes((err as NodeJS.ErrnoException).code ?? "");
     for (const sub of fs.readdirSync(this.dir)) {
       if (!/^[0-9a-f]{2}$/.test(sub)) continue;
       const d = path.join(this.dir, sub);
-      // lstat, not stat: a symlink here isn't ours, and following it could delete files elsewhere.
-      if (!fs.lstatSync(d).isDirectory()) continue;
-      for (const name of fs.readdirSync(d)) {
+      let names: string[];
+      try {
+        // lstat, not stat: a symlink here isn't ours, and following it could delete files elsewhere.
+        if (!fs.lstatSync(d).isDirectory()) continue;
+        names = fs.readdirSync(d);
+      } catch (err) {
+        if (gone(err)) continue;
+        throw err;
+      }
+      for (const name of names) {
         const blob = /^[0-9a-f]{62}$/.test(name);
         if (!blob && !/^[0-9a-f]{62}\.\d+\.[0-9a-f]+\.tmp$/.test(name)) continue;
         const p = path.join(d, name);
-        const st = fs.lstatSync(p);
-        if (st.isFile()) out.push({ path: p, sha: blob ? sub + name : undefined, size: st.size, mtimeMs: st.mtimeMs });
+        try {
+          const st = fs.lstatSync(p);
+          if (st.isFile()) out.push({ path: p, sha: blob ? sub + name : undefined, size: st.size, mtimeMs: st.mtimeMs });
+        } catch (err) {
+          if (!gone(err)) throw err;
+        }
       }
     }
     return out;

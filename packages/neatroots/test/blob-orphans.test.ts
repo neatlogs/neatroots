@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { sha256 } from "../src/util/ids.js";
 import { batch, closeTrackedStores, hex, makeRoots, s, span, tmpHome, trackedStore } from "./helpers.js";
 
@@ -72,5 +72,28 @@ describe("orphaned blob files", () => {
     fs.symlinkSync(elsewhere, path.join(h, "data", "blobs", sha.slice(0, 2)));
     expect(st.reclaimOrphanBlobs().files).toBe(0);
     expect(fs.existsSync(victim)).toBe(true);
+  });
+
+  it("skips a file that disappears while the folder is scanned", () => {
+    const h = tmpHome();
+    homes.push(h);
+    const st = trackedStore(path.join(h, "data"));
+    const dir = path.join(h, "data", "blobs");
+    const vanishing = put(dir, blobName("vanishing"), "vanishing", 2 * 3_600_000);
+    const orphan = put(dir, blobName("orphan"), "orphan", 2 * 3_600_000);
+    const real = fs.lstatSync;
+    const spy = vi.spyOn(fs, "lstatSync").mockImplementation(((p: fs.PathLike, o?: fs.StatSyncOptions) => {
+      if (String(p) === vanishing && fs.existsSync(vanishing)) {
+        fs.unlinkSync(vanishing);
+        throw Object.assign(new Error("gone"), { code: "ENOENT" });
+      }
+      return real(p, o);
+    }) as typeof fs.lstatSync);
+    try {
+      expect(st.reclaimOrphanBlobs().files).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(fs.existsSync(orphan)).toBe(false);
   });
 });
