@@ -353,6 +353,18 @@ function spanForEncode(s: OtlpSpan): any {
   };
 }
 
+/** Stored batches as an OTLP/JSON ExportTraceServiceRequest: the file `neatroots check` and `neatroots import` read. */
+export function encodeTraceJson(batches: ResourceSpansBatch[]): { resourceSpans: unknown[] } {
+  return {
+    // OTLP keeps schemaUrl on resourceSpans and scopeSpans, not inside resource and scope, which is where the decoder reads it.
+    resourceSpans: batches.map(({ resource: { schemaUrl, ...resource }, scope: { schemaUrl: scopeSchemaUrl, ...scope }, spans }) => ({
+      resource,
+      schemaUrl,
+      scopeSpans: [{ scope, schemaUrl: scopeSchemaUrl, spans }],
+    })),
+  };
+}
+
 /** Builds an OTLP/protobuf ExportTraceServiceRequest from stored batches. */
 export function encodeTraceRequest(batches: ResourceSpansBatch[]): Uint8Array {
   const T = type(TRACE_REQ);
