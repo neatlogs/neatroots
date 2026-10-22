@@ -136,6 +136,7 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
         <DropdownMenuContent align="end" className="w-56">
           <DropdownMenuItem onClick={() => actions.recheck.mutate(undefined, { onSuccess: () => toast.success("Re-running checks on this run") })}>Re-run checks</DropdownMenuItem>
           <DropdownMenuItem onClick={() => go(`agents?trace=${traceId}`)}>Ask a coding agent</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => go(`compare?${new URLSearchParams({ a: d.replay_of?.trace_id ?? traceId, b: d.replay_of ? traceId : "" })}`)}>Compare runs</DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
             onClick={() =>
@@ -157,6 +158,7 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
         </DropdownMenuContent>
       </DropdownMenu>
       <DeleteRunDialog traceId={traceId} open={deleting} onOpenChange={setDeleting} />
+      <Button className="hidden md:inline-flex" variant="secondary" onClick={() => go(`compare?${new URLSearchParams({ a: d.replay_of?.trace_id ?? traceId, b: d.replay_of ? traceId : "" })}`)}>Compare runs</Button>
       <Button variant="secondary" onClick={() => setReplayFor({})}>
         <Icon icon={GitForkIcon} size="xs" />
         Replay
