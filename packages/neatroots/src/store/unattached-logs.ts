@@ -15,15 +15,23 @@ const BATCH = 5_000;
 
 const deleteIds = (db: Database.Database, ids: number[]) => db.prepare("DELETE FROM logs WHERE id IN (SELECT value FROM json_each(?))").run(JSON.stringify(ids)).changes;
 
-/** Deletes logs with no run received before `cutoffMs`, oldest first, in batches. Returns how many went. */
+/**
+ * Deletes logs with no run received before `cutoffMs`, oldest first, in batches. Each batch starts
+ * where the last one stopped, so old logs that belong to a kept run are read once, not per batch.
+ * Returns how many went.
+ */
 export function deleteUnattachedLogsBefore(db: Database.Database, cutoffMs: number, now = Date.now()): number {
-  const pick = db.prepare(`SELECT id FROM logs WHERE received_ms < @cutoff AND ${UNATTACHED} ORDER BY received_ms, id LIMIT ${BATCH}`).pluck();
+  const pick = db.prepare(
+    `SELECT id, received_ms AS ms FROM logs WHERE received_ms < @cutoff AND (received_ms > @ms OR (received_ms = @ms AND id > @id)) AND ${UNATTACHED} ORDER BY received_ms, id LIMIT ${BATCH}`,
+  );
   let total = 0;
+  let after = { ms: -1, id: -1 };
   for (;;) {
-    const ids = pick.all({ cutoff: cutoffMs, grace: now - LOG_GRACE_MS }) as number[];
-    if (!ids.length) return total;
-    total += deleteIds(db, ids);
-    if (ids.length < BATCH) return total;
+    const rows = pick.all({ cutoff: cutoffMs, grace: now - LOG_GRACE_MS, ...after }) as { id: number; ms: number }[];
+    if (!rows.length) return total;
+    total += deleteIds(db, rows.map((r) => r.id));
+    if (rows.length < BATCH) return total;
+    after = { ms: rows[rows.length - 1].ms, id: rows[rows.length - 1].id };
   }
 }
 
