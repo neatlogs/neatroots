@@ -29,6 +29,17 @@ program.name("neatroots").description("neatroots: local, private checks for AI a
 // Root options only before the command, so `neatroots update --version <tag>` reaches update.
 program.enablePositionalOptions();
 
+/** The status line's hook contact; undefined comes from an older server without the field. */
+function steeringHookContact(lastSeenMs: number | null | undefined): string {
+  if (lastSeenMs === null) return "no hook contact since the server started";
+  if (lastSeenMs === undefined) return "hook last contact unknown";
+  const seconds = Math.max(0, Math.round((Date.now() - lastSeenMs) / 1000));
+  const minutes = Math.round(seconds / 60);
+  const hours = Math.round(minutes / 60);
+  const ago = seconds < 60 ? `${seconds}s` : minutes < 60 ? `${minutes}m` : hours < 24 ? `${hours}h` : `${Math.round(hours / 24)}d`;
+  return `hook last contact ${ago} ago`;
+}
+
 // ------------------------------------------------------------------- start
 
 program
@@ -216,7 +227,7 @@ program
       console.log(`  decisions ${s.engine.decision.backend ?? "unavailable"}${s.engine.decision.model ? ` (${s.engine.decision.model})` : ""}`);
       console.log(`  live runs ${s.engine.liveRuns} · pending checks ${s.engine.pendingJobs}`);
     }
-    console.log(`  steering ${s.steering.enabled ? "on" : "OFF (global switch)"} · hooks connected ${s.steering.hooks_connected}`);
+    console.log(`  steering ${s.steering.enabled ? "on" : "OFF (global switch)"} · ${steeringHookContact(s.steering.last_seen_ms)}`);
     console.log(`  cloud ${s.cloud.has_key ? "key stored" : "no key"} → ${s.cloud.endpoint}`);
   });
 

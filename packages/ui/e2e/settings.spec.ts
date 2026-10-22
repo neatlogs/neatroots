@@ -27,6 +27,12 @@ test.describe("settings", () => {
     expect(s.config.retention.days).toBe(21);
   });
 
+  test("Projects shows the steering hook setup without a connection count", async ({ page }) => {
+    await open(page, "settings/projects");
+    await expect(page.getByText("Steering hook", { exact: true })).toBeVisible();
+    await expect(page.getByText(/connected now|SSE stream/)).toHaveCount(0);
+  });
+
   test("Projects sets up a replay command for a project", async ({ page }) => {
     // Other tests expect e2e-support to have no replay command; leave it the way we found it.
     const clear = () => api("/api/projects/e2e-support/rerun", { method: "POST", body: "{}" });
