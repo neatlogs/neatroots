@@ -1067,13 +1067,14 @@ ${library}`;
       this.roots.store.updateNote(n.id, { status: "expired" });
       this.roots.bus.emit("note", { ...n, status: "expired" });
     }
+    // Rules need no model, so they don't wait for the planner's LLM call.
+    this.applyRules(run, loadTrace(this.roots.store, run.traceId), true);
     if (run.planning) await run.planning;
     let snap = loadTrace(this.roots.store, run.traceId);
     if (!run.plan) this.ensurePlan(run, snap);
     if (run.planning) await run.planning;
     if (stale()) return;
     snap = loadTrace(this.roots.store, run.traceId);
-    this.applyRules(run, snap, true);
     // Final pass: end-only questions, and live questions with evidence they have not seen.
     for (const { check, params } of this.questionsFor(run)) {
       if (check.scope === "span") {
