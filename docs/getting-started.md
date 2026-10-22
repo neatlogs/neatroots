@@ -178,7 +178,7 @@ ingest:
   allowedOrigins: ["https://staging.example.com"]   # "*" accepts every website
 ```
 
-With OpenTelemetry, `OTEL_SERVICE_NAME` becomes the project. neatroots reads Neatlogs, OpenInference, OpenLLMetry (`traceloop.*`), GenAI semantic-convention and Vercel AI SDK attributes, so LLM messages, tool calls, models and tokens show up whichever instrumentation you use.
+With OpenTelemetry, `OTEL_SERVICE_NAME` becomes the project. neatroots reads Neatlogs, OpenInference, OpenLLMetry (`traceloop.*`), GenAI semantic-convention and Vercel AI SDK attributes, so LLM messages, tool calls, models and tokens show up whichever instrumentation you use. LangChain and LangGraph runs are read through their serialized messages: a tool span shows the `ToolMessage`'s content as its result, and a graph whose output is the `{"messages": [...]}` state is answered by its last AI message, so the built-in checks compare what the tools returned and what the agent finally said, not the envelopes around them.
 
 ### Import runs
 
