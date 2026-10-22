@@ -217,6 +217,10 @@ describe("server", () => {
     const text = (r: any) => JSON.parse(r.content[0].text);
     const search = text(await client.callTool({ name: "search_runs", arguments: { text: "4512" } }));
     expect(search.runs[0].trace_id).toBe(t);
+    const searchClean = text(await client.callTool({ name: "search_runs", arguments: { has_finding: false } }));
+    expect(searchClean.runs.map((r: any) => r.trace_id)).toContain(t);
+    const searchWithFinding = text(await client.callTool({ name: "search_runs", arguments: { has_finding: true } }));
+    expect(searchWithFinding.runs.map((r: any) => r.trace_id)).not.toContain(t);
     const outline = text(await client.callTool({ name: "get_run_outline", arguments: { trace_id: t.slice(0, 10) } }));
     expect(outline.outline).toContain("lookup_order");
     const toolId = batches[0].spans[1].spanId;
@@ -243,12 +247,35 @@ describe("server", () => {
     const get = async (q: string) => (await (await fetch(`${tb.url}/api/runs?${q}`, { headers: origin })).json()) as { runs: unknown[]; total: number; matching: number };
     expect(await get("")).toMatchObject({ total: 3, matching: 3 });
     expect(await get("has_finding=1")).toMatchObject({ total: 3, matching: 1 });
+    expect(await get("has_finding=true")).toMatchObject({ total: 3, matching: 1 });
+    expect(await get("has_finding=0")).toMatchObject({ total: 3, matching: 2 });
+    expect(await get("has_finding=false")).toMatchObject({ total: 3, matching: 2 });
+    expect(await get("has_finding=")).toMatchObject({ total: 3, matching: 3 });
     expect(await get("status=error")).toMatchObject({ total: 3, matching: 1 });
     // matching counts every match, not just the page; there was no such count, so with more matches
     // than the page holds (it asks for 150) the runs page read "150 matching" however many matched
     const page = await get("limit=2");
     expect(page.runs).toHaveLength(2);
     expect(page).toMatchObject({ total: 3, matching: 3 });
+  });
+
+  it("refuses an annotation for a run or span it does not have", async () => {
+    const tb = await served();
+    const t = hex(16);
+    const sp = hex(8);
+    tb.roots.ingest([batch([span({ traceId: t, spanId: sp, name: "agent", kind: "workflow" })])]);
+    const origin = { origin: tb.url.replace("127.0.0.1", "localhost"), "content-type": "application/json" };
+    const post = (b: unknown) => fetch(`${tb.url}/api/annotations`, { method: "POST", headers: origin, body: JSON.stringify(b) });
+    // Orphan rows used to be stored and never shown anywhere
+    const badRun = await post({ trace_id: hex(16), label: "issue", text: "x" });
+    expect(badRun.status).toBe(404);
+    expect(await badRun.json()).toEqual({ error: "run not found" });
+    const badSpan = await post({ trace_id: t, span_id: hex(8), label: "note", text: "x" });
+    expect(badSpan.status).toBe(404);
+    expect(await badSpan.json()).toEqual({ error: "span not found" });
+    const ok = await post({ trace_id: t, span_id: sp, label: "good", text: "x" });
+    expect(ok.status).toBe(200);
+    expect(tb.roots.store.annotationsForTrace(t)).toHaveLength(1);
   });
 
   it("MCP tools use the latest run once the run in focus is deleted", async () => {
@@ -303,6 +330,80 @@ describe("server", () => {
     expect(await r.json()).toEqual({ mode: "unknown", known: false, note: null });
   });
 
+  it("rejects trace_ids that aren't a list of run ids on the cloud routes, without storing anything", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const post = (path: string, trace_ids: unknown) => fetch(`${tb.url}${path}`, { method: "POST", headers, body: JSON.stringify({ trace_ids }) });
+    for (const path of ["/api/cloud/preview", "/api/cloud/forward", "/api/cloud/import"]) {
+      for (const bad of [{ length: 3 }, "notarray", [1, 2], [""], []]) {
+        const r = await post(path, bad);
+        expect(r.status, `${path} ${JSON.stringify(bad)}`).toBe(400); // preview was a 500 for an object, 200 for a string
+        expect(((await r.json()) as { error: string }).error).toMatch(/trace_ids/);
+      }
+    }
+    expect(tb.roots.store.listForwards(10)).toEqual([]); // forward used to save the bad value as a failed send
+    // a real list still works, on every route
+    const { t, batches } = sampleRun();
+    tb.roots.ingest(batches);
+    const ok = await post("/api/cloud/preview", [t]);
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { span_count: number }).span_count).toBe(3);
+    // Forward and import only ever reach this local stand-in for the cloud; keys come from the
+    // environment, never the Keychain.
+    const seen: string[] = [];
+    const exported = JSON.stringify({
+      success: true,
+      data: {
+        schemaVersion: 1,
+        trace: { traceId: t, workflowName: "prod-agent", startedAt: "2026-10-09T10:00:00Z" },
+        spans: [{ traceId: t, spanId: hex(8), parentSpanId: null, spanName: "root", spanType: "workflow", startedAt: "2026-10-09T10:00:00Z", endedAt: "2026-10-09T10:00:01Z", durationMs: 1000, status: "OK" }],
+      },
+    });
+    const cloud = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        const url = req.url ?? "";
+        seen.push(url);
+        res.setHeader("content-type", "application/json");
+        if (url === "/v1/traces") res.end("{}");
+        else if (url.startsWith(`/api/v1/public/traces/${t}/export`)) res.end(exported);
+        else {
+          res.statusCode = 404;
+          res.end("{}");
+        }
+      });
+    });
+    await new Promise<void>((r) => cloud.listen(0, "127.0.0.1", r));
+    const base = `http://127.0.0.1:${(cloud.address() as { port: number }).port}`;
+    tb.roots.config.cloud.endpoint = base;
+    tb.roots.config.cloud.apiBase = `${base}/api/v1/public`;
+    const saved = { NEATLOGS_CLOUD_API_KEY: process.env.NEATLOGS_CLOUD_API_KEY, NEATLOGS_SERVICE_TOKEN: process.env.NEATLOGS_SERVICE_TOKEN };
+    process.env.NEATLOGS_CLOUD_API_KEY = "nl-test-key";
+    process.env.NEATLOGS_SERVICE_TOKEN = "nlsa_test_token";
+    try {
+      const forward = await post("/api/cloud/forward", [t]);
+      expect(forward.status).toBe(200);
+      expect(((await forward.json()) as { status: string }).status).toBe("ok");
+      expect(seen.filter((u) => u === "/v1/traces").length).toBeGreaterThan(0);
+      const imported = await post("/api/cloud/import", [t]);
+      expect(imported.status).toBe(202);
+      const { id } = (await imported.json()) as { id: string };
+      const job = await until(() => {
+        const j = tb.roots.imports.get(id);
+        return j && j.state !== "running" ? j : undefined;
+      });
+      // t was captured here, so the import keeps the local run instead of fetching Cloud's copy.
+      expect(job).toMatchObject({ state: "succeeded", traces: 0, skipped: 1, failed: 0 });
+      expect(seen.some((u) => u.startsWith(`/api/v1/public/traces/${t}/export`))).toBe(false);
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      cloud.close();
+    }
+  });
+
   it("rejects non-string trace ids before querying the store", async () => {
     const tb = await served(false);
     const headers = { "content-type": "application/json" };
@@ -350,6 +451,26 @@ describe("server", () => {
     expect(tb.roots.config.steering.enabled).toBe(true);
     expect(tb.roots.config.classifier.jevCloud.enabled).toBe(true);
     expect(tb.roots.config.classifier.laya.enabled).toBe(true);
+  });
+
+  it("refuses non-string or non-boolean external LLM fields instead of a 500 or a silent enable", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const put = (b: unknown) => fetch(`${tb.url}/api/llm/external`, { method: "POST", headers, body: JSON.stringify(b) });
+    const before = { ...tb.roots.config.llm.external };
+    for (const [field, value, message] of [
+      ["model", 123, "model must be a string"],
+      ["base_url", 123, "base_url must be a string"],
+      ["enabled", "false", "enabled must be a boolean"],
+      ["fallback_to_local", "false", "fallback_to_local must be a boolean"],
+    ] as const) {
+      const r = await put({ [field]: value }); // was a 500 for model/base_url, and a silent enable for the string booleans
+      expect(r.status, field).toBe(400);
+      expect(((await r.json()) as { error: string }).error).toBe(message);
+    }
+    expect(tb.roots.config.llm.external).toEqual(before);
+    expect((await put({ model: "m", fallback_to_local: true })).status).toBe(200);
+    expect(tb.roots.config.llm.external).toMatchObject({ model: "m", fallbackToLocal: true });
   });
 
   it("clamps the findings list limit instead of failing on a bad value", async () => {
@@ -411,6 +532,44 @@ describe("server", () => {
     expect(await r.json()).toEqual({ error: "text is required" });
   });
 
+  it("keeps internal chat state out of the session PATCH API", async () => {
+    const tb = await served();
+    const id = tb.roots.chats.create({ agent: "claude", cwd: os.tmpdir() }).id;
+    const patch = (body: unknown) => fetch(`${tb.url}/api/chat/sessions/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") },
+      body: JSON.stringify(body),
+    });
+
+    const r = await patch({ title: "Renamed", state: "running", agent_session_id: "forged" });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ title: "Renamed", state: "idle", agent_session_id: null });
+    expect(tb.roots.chats.get(id)).toMatchObject({ title: "Renamed", state: "idle", agent_session_id: null });
+
+    for (const bad of [{ allow_edits: "false" }, { allow_commands: "false" }, { title: 5 }]) {
+      expect((await patch(bad)).status, JSON.stringify(bad)).toBe(400);
+    }
+    expect(tb.roots.chats.get(id)).toMatchObject({ title: "Renamed", allow_edits: false, allow_commands: false });
+
+    expect((await patch({ allow_edits: true, allow_commands: true, title: "Editable" })).status).toBe(200);
+    expect(tb.roots.chats.get(id)).toMatchObject({ title: "Editable", allow_edits: true, allow_commands: true });
+  });
+
+  it("requires boolean permissions when creating a coding-agent chat", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    for (const field of ["allow_edits", "allow_commands"] as const) {
+      const r = await fetch(`${tb.url}/api/chat/sessions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ agent: "codex", cwd: os.tmpdir(), [field]: "false" }),
+      });
+      expect(r.status).toBe(400);
+      expect(await r.json()).toEqual({ error: `${field} must be a boolean` });
+    }
+    expect(tb.roots.chats.list()).toEqual([]);
+  });
+
   it("returns 404 JSON for unknown /api and /v1 routes, not the SPA", async () => {
     const tb = await served();
     for (const path of ["/api/anything-unknown", "/api/imports/abc", "/v1/unknown"]) {
@@ -423,6 +582,20 @@ describe("server", () => {
     expect((await fetch(`${tb.url}/api/status`, { headers: { origin: tb.url.replace("127.0.0.1", "localhost") } })).status).toBe(200);
     const ui = await fetch(`${tb.url}/runs/some-id`);
     expect(ui.headers.get("content-type")).toMatch(/text\/html/);
+  });
+
+  it("returns 404 for a snapshot of a run that does not exist, like the other run routes", async () => {
+    const tb = await served();
+    const origin = { headers: { origin: tb.url.replace("127.0.0.1", "localhost") } };
+    const missing = await fetch(`${tb.url}/api/runs/${hex(16)}/snapshot`, origin);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "run not found" });
+
+    const { t, batches } = sampleRun();
+    await fetch(`${tb.url}/v1/traces`, { method: "POST", headers: { "content-type": "application/x-protobuf" }, body: encodeTraceRequest(batches) });
+    const ok = await fetch(`${tb.url}/api/runs/${t}/snapshot`, origin);
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { spans: unknown[] }).spans.length).toBeGreaterThan(0);
   });
 
   it("path traversal: a request that escapes uiDir into a sibling folder returns index.html, not the sibling file", async () => {

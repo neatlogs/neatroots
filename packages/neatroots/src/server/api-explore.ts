@@ -7,7 +7,7 @@ import { listCloudProjects, listCloudTraces, NO_CLOUD_TOKEN } from "../ingest/im
 import { cloudImportAuth, cloudImportBase, ImportError, parseTraceFile } from "../ingest/importers/index.js";
 import { deleteCloudToken, getCloudToken, setCloudToken } from "../relay/keychain.js";
 import { buildChat } from "../semantics/chat-view.js";
-import { body, clampInt, err } from "./util.js";
+import { body, clampInt, err, isTraceIds } from "./util.js";
 import { runSummary } from "./api.js";
 import { bodyLimit } from "hono/body-limit";
 import type { RunFilter } from "../store/db.js";
@@ -175,8 +175,8 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
     }
   });
   app.post("/api/cloud/import", async (c) => {
-    const b = await body<{ trace_ids: string[] }>(c);
-    if (!b.trace_ids?.length) return err(c, 400, "trace_ids is required");
+    const b = await body<{ trace_ids?: unknown }>(c);
+    if (!isTraceIds(b.trace_ids)) return err(c, 400, "trace_ids must be a non-empty array of run ids");
     try {
       const { job } = roots.imports.start("neatlogs-cloud", { traceIds: b.trace_ids.join(",") }, { limit: b.trace_ids.length });
       return c.json(job, 202);
@@ -238,6 +238,9 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   app.post("/api/chat/sessions", async (c) => {
     const b = await body<{ agent: "claude" | "codex"; cwd?: string; trace_id?: string; allow_edits?: boolean; allow_commands?: boolean; title?: string }>(c);
     if (b.agent !== "claude" && b.agent !== "codex") return err(c, 400, "agent must be claude or codex");
+    for (const field of ["allow_edits", "allow_commands"] as const) {
+      if (b[field] !== undefined && typeof b[field] !== "boolean") return err(c, 400, `${field} must be a boolean`);
+    }
     try {
       return c.json(roots.chats.create(b), 201);
     } catch (e) {
@@ -250,8 +253,15 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
   });
   app.patch("/api/chat/sessions/:id", async (c) => {
     const b = await body<{ allow_edits?: boolean; allow_commands?: boolean; title?: string }>(c);
+    if (b.allow_edits !== undefined && typeof b.allow_edits !== "boolean") return err(c, 400, "allow_edits must be a boolean");
+    if (b.allow_commands !== undefined && typeof b.allow_commands !== "boolean") return err(c, 400, "allow_commands must be a boolean");
+    if (b.title !== undefined && typeof b.title !== "string") return err(c, 400, "title must be a string");
+    const patch: { allow_edits?: boolean; allow_commands?: boolean; title?: string } = {};
+    if (b.allow_edits !== undefined) patch.allow_edits = b.allow_edits;
+    if (b.allow_commands !== undefined) patch.allow_commands = b.allow_commands;
+    if (b.title !== undefined) patch.title = b.title;
     try {
-      return c.json(roots.chats.update(c.req.param("id"), b));
+      return c.json(roots.chats.update(c.req.param("id"), patch));
     } catch (e) {
       return err(c, 404, (e as Error).message);
     }

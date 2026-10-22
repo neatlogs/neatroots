@@ -94,6 +94,10 @@ program
     };
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
+    // Agent chats run in their own session, so closing the terminal doesn't reach them: stop
+    // neatroots (and them) on SIGHUP too. The exit hook covers a crash.
+    process.on("SIGHUP", stop);
+    process.on("exit", () => roots.chats.close());
   });
 
 // --------------------------------------------------------------------- mcp

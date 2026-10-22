@@ -129,17 +129,27 @@ function redactValue(v: AnyValue, rules: RedactionRule[], where: string, hits: R
 }
 
 function redactKvs(kvs: KeyValue[], rules: RedactionRule[], where: string, hits: RedactionHit[]): KeyValue[] {
-  return kvs.map((kv) => ({ key: kv.key, value: redactValue(kv.value, rules, `${where} ${kv.key}`, hits) }));
+  return kvs.map((kv, index) => {
+    // Locations describe structure, never raw keys: a key may itself contain a secret.
+    const location = `${where} attribute[${index}]`;
+    return { key: redactString(kv.key, rules, `${location} key`, hits), value: redactValue(kv.value, rules, location, hits) };
+  });
 }
 
 /** Returns redacted copies of the batches and every redaction made. */
 export function redactBatches(batches: ResourceSpansBatch[], rules: RedactionRule[]): { batches: ResourceSpansBatch[]; hits: RedactionHit[] } {
   const hits: RedactionHit[] = [];
   const out = batches.map((b) => ({
-    resource: { ...b.resource, attributes: redactKvs(b.resource.attributes, rules, "resource", hits) },
+    resource: {
+      ...b.resource,
+      ...(b.resource.schemaUrl !== undefined ? { schemaUrl: redactString(b.resource.schemaUrl, rules, "resource schema URL", hits) } : {}),
+      attributes: redactKvs(b.resource.attributes, rules, "resource", hits),
+    },
     scope: {
       ...b.scope,
       ...(b.scope.name ? { name: redactString(b.scope.name, rules, "scope name", hits) } : {}),
+      ...(b.scope.version !== undefined ? { version: redactString(b.scope.version, rules, "scope version", hits) } : {}),
+      ...(b.scope.schemaUrl !== undefined ? { schemaUrl: redactString(b.scope.schemaUrl, rules, "scope schema URL", hits) } : {}),
       ...(b.scope.attributes ? { attributes: redactKvs(b.scope.attributes, rules, "scope", hits) } : {}),
     },
     spans: b.spans.map((s) => {
@@ -149,12 +159,17 @@ export function redactBatches(batches: ResourceSpansBatch[], rules: RedactionRul
       return {
         ...s,
         name,
+        ...(s.traceState !== undefined ? { traceState: redactString(s.traceState, rules, `${name} trace state`, hits) } : {}),
         attributes: redactKvs(s.attributes, rules, `${name} [${s.spanId.slice(0, 6)}]`, hits),
         events: s.events.map((e) => {
           const eventName = redactString(e.name, rules, `${name} event name`, hits);
           return { ...e, name: eventName, attributes: redactKvs(e.attributes, rules, `${name} event ${eventName}`, hits) };
         }),
-        links: s.links.map((l) => ({ ...l, attributes: redactKvs(l.attributes, rules, `${name} link`, hits) })),
+        links: s.links.map((l) => ({
+          ...l,
+          ...(l.traceState !== undefined ? { traceState: redactString(l.traceState, rules, `${name} link trace state`, hits) } : {}),
+          attributes: redactKvs(l.attributes, rules, `${name} link`, hits),
+        })),
         status: s.status.message ? { ...s.status, message: redactString(s.status.message, rules, `${name} status`, hits) } : s.status,
       };
     }),

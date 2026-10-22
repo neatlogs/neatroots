@@ -20,6 +20,10 @@ export interface ExternalLlmInput {
 /** Applies a change to llm.external, returning an error message when it is invalid. */
 export function applyExternalLlm(cfg: RootsConfig["llm"]["external"], b: ExternalLlmInput): string | undefined {
   const next = { ...cfg };
+  if (b.model !== undefined && typeof b.model !== "string") return "model must be a string";
+  if (b.base_url !== undefined && typeof b.base_url !== "string") return "base_url must be a string";
+  if (b.enabled !== undefined && typeof b.enabled !== "boolean") return "enabled must be a boolean";
+  if (b.fallback_to_local !== undefined && typeof b.fallback_to_local !== "boolean") return "fallback_to_local must be a boolean";
   if (b.provider !== undefined) {
     const p = providerById(b.provider);
     if (!p) return `provider must be one of ${PROVIDERS.map((x) => x.id).join(", ")}`;

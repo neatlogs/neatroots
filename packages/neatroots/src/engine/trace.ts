@@ -1,6 +1,6 @@
 import type { Store } from "../store/db.js";
 import { buildView, isSystemRole, preview, type SpanKind } from "../semantics/view.js";
-import type { Plain } from "../otlp/types.js";
+import { hasRemoteParent, type Plain } from "../otlp/types.js";
 import type { Evidence, EvidenceField, SpanSelector } from "../checks/types.js";
 import type { RunRow, SpanRow } from "../types.js";
 
@@ -9,6 +9,8 @@ export interface SpanInfo {
   /** Short reference used in prompts; the first 6 hex characters of the span id. */
   ref: string;
   parentId: string | null;
+  /** OTLP span flags; bit 9 marks a parent in another process. */
+  flags?: number;
   name: string;
   kind: SpanKind;
   startMs: number;
@@ -16,6 +18,7 @@ export interface SpanInfo {
   durationMs: number;
   status: "ok" | "error" | "unset";
   error?: string;
+  finishReason?: string;
   toolName?: string;
   model?: string;
   tokens?: number;
@@ -80,6 +83,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
       id: row.span_id,
       ref: row.span_id.slice(0, 6),
       parentId: row.parent_span_id,
+      flags: full.span.flags,
       name: row.name,
       kind: v.kind,
       startMs: row.start_ms,
@@ -87,6 +91,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
       durationMs: row.duration_ms,
       status: statusOf(row),
       error: v.error,
+      finishReason: v.finishReason,
       toolName: v.toolName,
       model: v.model,
       tokens: v.totalTokens,
@@ -133,6 +138,20 @@ function textOf(v: Plain | undefined): string | undefined {
   return JSON.stringify(v);
 }
 
+/**
+ * The run's top span: one with no parent, or, when the trace holds none, one whose parent stayed
+ * outside it. A remote-parent span never stands in for a parentless one: when two agents in one
+ * trace both export here, context propagation gives the callee's top span a remote parent while the
+ * caller's parentless top span is in the same trace, and the run ends on the caller's span, not the
+ * callee's (the remote-parent read is for the case where the caller's span never arrives, #157).
+ */
+export function runRoot(spans: SpanInfo[]): SpanInfo | undefined {
+  const top = spans.find((s) => !s.parentId);
+  if (top) return top;
+  const ids = new Set(spans.map((s) => s.id));
+  return spans.find((s) => !!s.parentId && !ids.has(s.parentId) && hasRemoteParent(s));
+}
+
 /** The run's goal: its system prompt and first user message, or the root input. */
 export function runGoal(t: TraceSnapshot): { system?: string; user?: string; rootInput?: string } {
   const goal: { system?: string; user?: string; rootInput?: string } = {};
@@ -144,7 +163,7 @@ export function runGoal(t: TraceSnapshot): { system?: string; user?: string; roo
       if (m.role === "user" && !goal.user) goal.user = textOf(m.content);
     }
   }
-  const root = t.spans.find((s) => !s.parentId);
+  const root = runRoot(t.spans);
   if (root?.input !== undefined) goal.rootInput = textOf(root.input);
   return goal;
 }
@@ -163,7 +182,7 @@ function replyText(output: Plain | undefined): string | undefined {
 
 /** The run's final answer: the root output, or the text of the last LLM reply. Undefined when empty. */
 export function finalOutput(t: TraceSnapshot): string | undefined {
-  const root = t.spans.find((s) => !s.parentId);
+  const root = runRoot(t.spans);
   const rootOut = textOf(root?.output);
   if (rootOut && rootOut !== '""' && rootOut !== "null") return rootOut;
   const llms = t.spans.filter((s) => s.kind === "LLM" && s.output !== undefined);

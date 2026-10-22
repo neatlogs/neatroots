@@ -207,6 +207,11 @@ export function neatlogsCloudSource(base: () => string, auth: () => Promise<Clou
       }
       let failedInARow = 0;
       for (const id of ids) {
+        const kept = o.kept?.(id);
+        if (kept) {
+          yield { sourceId: id, batches: [], kept };
+          continue;
+        }
         let read: { nodes: SpanNode[]; workflow: string };
         try {
           read = await fetchCloudTrace(b, k, id, o.signal);

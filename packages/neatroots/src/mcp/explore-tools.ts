@@ -234,7 +234,8 @@ export const EXPLORE_TOOLS = [
       const job = await done;
       if (job.state !== "succeeded" || !job.trace_ids.length) throw new Error(job.last_error ?? "the trace was not imported");
       const run = roots.store.getRun(job.trace_ids[0]);
-      return { imported: true, trace_id: job.trace_ids[0], run: run ? runSummary(roots, run) : null };
+      // A run captured here (sent to Cloud from this machine) is kept as it is and returned instead.
+      return { imported: job.traces > 0, trace_id: job.trace_ids[0], run: run ? runSummary(roots, run) : null };
     },
   }),
 ] as ToolDef[];
