@@ -40,7 +40,7 @@ function steps(status: Status, projects: ProjectRow[], agents: AgentClient[]): S
       short: "Runs arriving",
       title: "Send your agent's runs to neatroots",
       done: status.stats.runs > 0,
-      state: `${status.stats.runs.toLocaleString()} runs from ${names.length} project${names.length === 1 ? "" : "s"}${names.length ? ` (${names.slice(0, 3).join(", ")})` : ""}`,
+      state: `${status.stats.runs.toLocaleString()} runs from ${names.length} project${names.length === 1 ? "" : "s"}${names.length ? ` (${names.slice(0, 3).join(", ")}${names.length > 3 ? `, and ${names.length - 3} more` : ""})` : ""}`,
       body: (
         <>
           <p>neatroots reads what the Neatlogs SDK already sends. Set two variables where your agent runs; no code change is needed.</p>
@@ -56,7 +56,15 @@ function steps(status: Status, projects: ProjectRow[], agents: AgentClient[]): S
       title: "Give neatroots an LLM to ask questions with",
       done: !!llm?.ok,
       state: llm?.ok ? `${llm.model}${hosted ? ` (hosted: ${llm.where})` : " on this machine"}` : "",
-      body: (
+      body: llm?.ok ? (
+        <>
+          <p>{llm.model ?? "The configured LLM"} is available{hosted ? ` through ${llm.where}` : " on this machine"} for questions, explanations and summaries.</p>
+          <p>
+            Change the model or troubleshoot its connection in{" "}
+            <a className="text-foreground underline-offset-4 hover:underline" href="#/settings/models">Settings → Models</a>.
+          </p>
+        </>
+      ) : (
         <>
           <p>Rules run without one. An LLM lets it pick the questions that fit your agent, explain problems and summarize runs. Run one locally:</p>
           <CodeLine text="ollama pull qwen3:8b" />
