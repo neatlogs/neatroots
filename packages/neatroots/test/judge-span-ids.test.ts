@@ -9,11 +9,12 @@ afterEach(async () => {
 async function setup() {
   const tb = await makeRoots({ serve: true });
   cleanup.push(() => tb.close());
-  // Stand-in decision model: records the evidence it is asked to judge.
+  // Stand-in decision model: records the evidence it is asked to judge for these tests' question.
+  // The engine's own checks on the ingested run use it too, in the background; those aren't counted.
   const seen: string[] = [];
   (tb.roots.engine as unknown as { decisions: unknown }).decisions = {
-    decide: async (text: string) => {
-      seen.push(text);
+    decide: async (text: string, questions: { ask: string }[] = []) => {
+      if (questions.some((q) => q.ask === "Did a tool call fail?")) seen.push(text);
       return { answers: { q: { probability: 0.9 } }, backend: "stub", model: "stub", latencyMs: 0 };
     },
   };
