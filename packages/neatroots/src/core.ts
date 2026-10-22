@@ -100,6 +100,13 @@ export class Roots {
         log.warn(`retention failed: ${(err as Error).message}`);
       }
     };
+    // Files a crash during ingest left behind; only a crash makes them, so once at startup is enough.
+    try {
+      const orphans = this.store.reclaimOrphanBlobs();
+      if (orphans.files) log.info(`removed ${orphans.files} payload files no run uses (${Math.round(orphans.bytes / 1024)} KB)`);
+    } catch (err) {
+      log.warn(`payload cleanup failed: ${(err as Error).message}`);
+    }
     run();
     this.sweeper = setInterval(run, 3_600_000);
     this.sweeper.unref();

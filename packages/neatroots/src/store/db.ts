@@ -1476,6 +1476,27 @@ export class Store {
     this.reclaimUnreferencedBlobs(shas);
   }
 
+  /**
+   * Removes payload files no span references and temporary files from unfinished writes: what a
+   * crash during ingest leaves behind (#407). They stay on disk and count toward the size cap
+   * otherwise. Only files older than `minAgeMs` go, so a write still in progress (in another
+   * process using this store) is never touched. Run at startup, before the first sweep.
+   */
+  reclaimOrphanBlobs(minAgeMs = 3_600_000, now = Date.now()): { files: number; bytes: number } {
+    const old = this.blobs.files().filter((f) => now - f.mtimeMs >= minAgeMs);
+    if (!old.length) return { files: 0, bytes: 0 };
+    const used = new Set((this.db.prepare("SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.blobs IS NOT NULL").all() as { sha: string }[]).map((r) => r.sha));
+    let files = 0;
+    let bytes = 0;
+    for (const f of old) {
+      if (f.sha && used.has(f.sha)) continue;
+      fs.rmSync(f.path, { force: true });
+      files++;
+      bytes += f.size;
+    }
+    return { files, bytes };
+  }
+
   /** Deletes candidate payloads only after checking every remaining span reference. */
   private reclaimUnreferencedBlobs(candidates: Iterable<string>): void {
     const shas = [...new Set(candidates)];

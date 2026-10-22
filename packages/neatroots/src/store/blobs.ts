@@ -65,6 +65,28 @@ export class BlobStore {
     }
   }
 
+  /**
+   * Every payload file and leftover temporary file (`<sha>.<pid>.<rand>.tmp`, from a write that
+   * never finished), with its size and age. Other names are not ours and aren't listed.
+   */
+  files(): { path: string; sha?: string; size: number; mtimeMs: number }[] {
+    const out: { path: string; sha?: string; size: number; mtimeMs: number }[] = [];
+    if (!fs.existsSync(this.dir)) return out;
+    for (const sub of fs.readdirSync(this.dir)) {
+      if (!/^[0-9a-f]{2}$/.test(sub)) continue;
+      const d = path.join(this.dir, sub);
+      if (!fs.statSync(d).isDirectory()) continue;
+      for (const name of fs.readdirSync(d)) {
+        const blob = /^[0-9a-f]{62}$/.test(name);
+        if (!blob && !/^[0-9a-f]{62}\.\d+\.[0-9a-f]+\.tmp$/.test(name)) continue;
+        const p = path.join(d, name);
+        const st = fs.statSync(p);
+        if (st.isFile()) out.push({ path: p, sha: blob ? sub + name : undefined, size: st.size, mtimeMs: st.mtimeMs });
+      }
+    }
+    return out;
+  }
+
   /** Total bytes on disk, for retention. */
   size(): number {
     let total = 0;
