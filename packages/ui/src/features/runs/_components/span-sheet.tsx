@@ -90,6 +90,16 @@ export function SpanSheet({
               </>
             )}
           </SheetDescription>
+          {d?.kind === "LLM" && (
+            <p aria-label="Streaming response timing" className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground tabular-nums">
+              <span title="Time from the call starting to its first response chunk, which may contain no text.">
+                First chunk: {v?.firstChunkMs === undefined ? "not captured" : dur(v.firstChunkMs)}
+              </span>
+              <span title="Time to the first non-empty text chunk. Reasoning and tool arguments do not count.">
+                First text: {v?.firstTextMs === undefined ? "not captured" : dur(v.firstTextMs)}
+              </span>
+            </p>
+          )}
         </SheetHeader>
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-6 py-4">
           {error && <p className="text-sm text-muted-foreground">Couldn't load this span: {(error as Error).message}</p>}
