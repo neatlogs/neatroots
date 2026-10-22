@@ -37,10 +37,10 @@ interface Step {
   ancestors?: Ancestor[];
 }
 /** One run: the given tool calls in order, then a final answer (or none), then the root. */
-function run(st: Store, steps: Step[], opts: { answer?: string | null; rootError?: string } = {}): string {
+function run(st: Store, steps: Step[], opts: { answer?: string | null; llmAnswer?: string; rootError?: string } = {}): string {
   const t = hex(16);
   const root = hex(8);
-  const spans = [llmSpan(t, root, { user: "do the task", out: "ok" })];
+  const spans = [llmSpan(t, root, { user: "do the task", out: opts.llmAnswer ?? "ok" })];
   const parents = new Map<string, string>();
   for (const x of steps) {
     let parent = root;
@@ -196,7 +196,7 @@ describe("unrecovered_error rule", () => {
   it("leaves failed or blank-answer runs to the other rules", () => {
     const st = store();
     expect(hit(st, run(st, [{ tool: "x", fail: true }], { rootError: "crashed" }))).toBeNull();
-    expect(hit(st, run(st, [{ tool: "x", fail: true }], { answer: "   " }))).toBeNull();
+    expect(hit(st, run(st, [{ tool: "x", fail: true }], { answer: "   ", llmAnswer: "" }))).toBeNull();
   });
 
   it("stays quiet when the answer admits the failure", () => {
