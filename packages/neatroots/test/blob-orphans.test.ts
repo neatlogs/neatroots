@@ -61,4 +61,16 @@ describe("orphaned blob files", () => {
       await t.close();
     }
   });
+
+  it("doesn't follow a symlinked folder out of blobs/", () => {
+    const h = tmpHome();
+    homes.push(h);
+    const st = trackedStore(path.join(h, "data"));
+    const elsewhere = path.join(h, "elsewhere");
+    const victim = put(elsewhere, blobName("someone else's file").slice(3), "someone else's file", 2 * 3_600_000);
+    const sha = sha256("someone else's file");
+    fs.symlinkSync(elsewhere, path.join(h, "data", "blobs", sha.slice(0, 2)));
+    expect(st.reclaimOrphanBlobs().files).toBe(0);
+    expect(fs.existsSync(victim)).toBe(true);
+  });
 });
