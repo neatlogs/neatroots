@@ -789,6 +789,10 @@
   --color-track-active: var(--color-track-active);
   --color-track-strong: var(--color-track-strong);
 
+  /* ── Trace activity chart bar (values live in :root / .dark below) ── */
+  --color-chart-bar: var(--color-chart-bar);
+  --color-chart-bar-hover: var(--color-chart-bar-hover);
+
   /* ── Brand green ── */
   --color-brand-green: var(--brand-green);
   --color-brand-green-surface: var(--brand-green-surface);
