@@ -1005,7 +1005,9 @@ ${library}`;
         ],
         { schema: { name: "plan", schema: PLANNER_SCHEMA }, maxTokens: 900, priority: "high", timeoutSec: 90 },
       );
-      out = r.json as typeof out;
+      const candidate = r.json as typeof out;
+      if (!candidate || !Array.isArray(candidate.checks) || !Array.isArray(candidate.new_questions)) throw new Error("planner returned an invalid plan");
+      out = candidate;
       model = r.model;
     } catch (err) {
       log.warn(`planner failed, using default checks: ${(err as Error).message}`);
