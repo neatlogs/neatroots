@@ -28,3 +28,11 @@ describe("JSON and line formats", () => {
     }
   });
 });
+
+describe("OTLP JSON import marker", () => {
+  it("marks a collector dump as imported", () => {
+    const data = { resourceSpans: [{ resource: { attributes: [] }, scopeSpans: [{ scope: { name: "x" }, spans: [{ traceId: "0123456789abcdef0123456789abcdef", spanId: "0123456789abcdef", name: "root", startTimeUnixNano: "1", endTimeUnixNano: "2", attributes: [] }] }] }] };
+    const [b] = parseTraceFile(JSON.stringify(data), "dump.json");
+    expect(b.resource.attributes.find((a) => a.key === "neatroots.import.source")?.value).toEqual({ stringValue: "file" });
+  });
+});
