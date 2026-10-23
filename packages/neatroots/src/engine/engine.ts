@@ -70,6 +70,8 @@ interface LiveRun {
   planning?: Promise<void>;
   used: { plans: number; investigations: number; notes: number; summaries: number };
   deferred: (() => Promise<void>)[];
+  /** Triage of raised findings still deciding whether to queue an investigation; the end pass waits for it. */
+  triaging: Set<Promise<unknown>>;
   spanDone: Set<string>;
   /** Per span-scope check: spans waiting to be asked about, newest last. */
   spanQueue: Map<string, string[]>;
@@ -255,6 +257,7 @@ export class Engine {
       workflow: row.workflow ?? row.project ?? "unknown",
       used: { plans: 0, investigations: 0, notes: 0, summaries: 0 },
       deferred: [],
+      triaging: new Set(),
       spanDone: new Set(),
       spanQueue: new Map(),
       spanBusy: new Set(),
@@ -757,7 +760,9 @@ export class Engine {
       });
       this.roots.bus.emit("note", note);
     }
-    void this.track(run.traceId, this.triage(run, f));
+    const triage = this.track(run.traceId, this.triage(run, f));
+    run.triaging.add(triage);
+    void triage.finally(() => run.triaging.delete(triage));
     void snap;
   }
 
@@ -1101,17 +1106,32 @@ ${library}`;
     }
     if (stale()) return;
     // Deferred investigations await models too, so a hand-back during one leaves the rest for the
-    // next pass instead of running them over the callee's slice of the trace.
-    const pending = run.deferred.splice(0);
-    let next = 0;
-    for (; next < pending.length; next++) {
-      if (stale()) break;
-      await pending[next]();
+    // next pass instead of running them over the callee's slice of the trace. One that fails (a
+    // model error) is skipped: it must not take the rest, the summary or the release with it.
+    for (;;) {
+      // Triage of the findings raised during this pass may still be deciding whether to queue an
+      // investigation; wait for it so what it queues is in this drain, not left behind.
+      while (run.triaging.size) await Promise.all([...run.triaging]);
+      if (stale()) return;
+      const pending = run.deferred.splice(0);
+      if (!pending.length) break;
+      let next = 0;
+      for (; next < pending.length; next++) {
+        if (stale()) break;
+        try {
+          await pending[next]();
+        } catch (err) {
+          log.warn(`investigation for ${run.traceId.slice(0, 8)} failed: ${(err as Error).message}`);
+        }
+      }
+      run.deferred.push(...pending.slice(next));
+      if (stale()) return;
     }
-    run.deferred.push(...pending.slice(next));
-    if (stale()) return;
-    await this.summarize(run, snap, stale);
-    this.scheduleLiveRelease(run);
+    try {
+      await this.summarize(run, snap, stale);
+    } finally {
+      this.scheduleLiveRelease(run);
+    }
   }
 
   /**
@@ -1140,7 +1160,11 @@ ${library}`;
       return;
     }
     run.used.investigations++;
-    await this.explainRun(run.traceId);
+    try {
+      await this.explainRun(run.traceId);
+    } catch (err) {
+      log.warn(`explaining ${run.traceId.slice(0, 8)} failed: ${(err as Error).message}`);
+    }
   }
 
   /** Explains a whole run: likely cause, the spans that show it, and a fix. */
