@@ -67,6 +67,8 @@ program
       throw err;
     }
     roots.startRetention();
+    // Runs the last neatroots queued for auto-forward but didn't send (a restart, a crash).
+    roots.relay.resume();
     if (roots.config.classifier.laya.enabled && !roots.laya.installed()) {
       const consent = roots.config.classifier.laya.consent;
       if (consent === "yes") log.info(`installing Laya, the local decision model, in the background (about ${(LAYA_DOWNLOAD_MB / 1000).toFixed(1)} GB to ${roots.laya.dir}). Skip with --no-laya.`);

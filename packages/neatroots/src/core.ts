@@ -121,6 +121,7 @@ export class Roots {
 
   close(): void {
     clearInterval(this.sweeper);
+    this.relay.close();
     this.chats.close();
     this.laya.stop();
     this.store.close();
