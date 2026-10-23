@@ -122,7 +122,7 @@ describe("Laya trust", () => {
     const { defaultConfig } = await import("../src/config.js");
     const { LlmClient } = await import("../src/models/llm.js");
     const { DecisionModel, memoryTrust, TRUST_MIN_SAMPLES } = await import("../src/models/decision.js");
-    const { mockLlm } = await import("./helpers.js");
+    const { mockLlm, until } = await import("./helpers.js");
     const llm = await mockLlm({ yesWhen: ["bad"] });
     let layaCalls = 0;
     const laya = http.createServer((req, res) => {
@@ -147,7 +147,9 @@ describe("Laya trust", () => {
     const q = [{ name: "bad-check", type: "yes_no" as const, ask: "Is this bad?" }];
     const first = await dm.decide("state one", q);
     expect(first.backend).toBe("llm");
-    for (let i = 0; i < 50 && trust.get("bad-check").n < 1; i++) await new Promise((r) => setTimeout(r, 20));
+    // The shadow answer lands on its own; give it the standard wait instead of a one-second one,
+    // which a loaded machine can miss.
+    await until(() => trust.get("bad-check").n >= 1);
     expect(trust.get("bad-check")).toEqual({ n: 1, agree: 1 });
     for (let i = 1; i < TRUST_MIN_SAMPLES; i++) trust.record("bad-check", true);
     expect(dm.trusted(q)).toBe(true);
@@ -159,7 +161,9 @@ describe("Laya trust", () => {
     expect((await dm.decide("state three", [{ name: "other", type: "yes_no", ask: "Is this bad?" }])).backend).toBe("llm");
     laya.close();
     await llm.close();
-  });
+    // Two servers and three decisions take about 11 s on their own, so 20 s is not enough when the
+    // machine is busy.
+  }, 60_000);
 });
 
 describe("decision requests that leave the machine", () => {
