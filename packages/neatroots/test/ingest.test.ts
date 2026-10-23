@@ -8,6 +8,7 @@ import { startGrpc } from "../src/ingest/grpc.js";
 import { parseTraceFile } from "../src/ingest/importers/file.js";
 import { buildSpan, toNs } from "../src/ingest/build.js";
 import { encodeTraceRequest } from "../src/otlp/codec.js";
+import { plainToAny } from "../src/otlp/types.js";
 import { buildView } from "../src/semantics/view.js";
 import { batch, freePort, hex, makeRoots, s, span, type TestRoots } from "./helpers.js";
 
@@ -267,8 +268,22 @@ describe("other conventions", () => {
 
   it("reads OpenTelemetry GenAI parts and OpenLLMetry entity input", () => {
     const tid = hex(16);
-    const llm = span({ traceId: tid, name: "chat", kind: "", attrs: [s("gen_ai.operation.name", "chat"), s("gen_ai.input.messages", JSON.stringify([{ role: "user", parts: [{ type: "text", content: "Q?" }] }]))] });
-    expect(buildView({ ...llm, attributes: llm.attributes.filter((a) => a.key !== "neatlogs.span.kind") }, []).input).toEqual([{ role: "user", content: "Q?" }]);
+    const message = s("gen_ai.input.messages", JSON.stringify([{ role: "user", parts: [{ type: "text", content: "Q?" }] }]));
+    const llm = span({ traceId: tid, name: "chat", kind: "", attrs: [s("gen_ai.operation.name", "chat"), message, s("gen_ai.system_instructions", JSON.stringify([{ type: "text", content: "Be careful." }]))] });
+    expect(buildView({ ...llm, attributes: llm.attributes.filter((a) => a.key !== "neatlogs.span.kind") }, []).input).toEqual([
+      { role: "system", content: "Be careful." },
+      { role: "user", content: "Q?" },
+    ]);
+    const structured = span({ traceId: tid, name: "chat", kind: "", attrs: [s("gen_ai.operation.name", "chat"), message, { key: "gen_ai.system_instructions", value: plainToAny([{ type: "text", content: "Use lookup_order." }]) }] });
+    expect(buildView({ ...structured, attributes: structured.attributes.filter((a) => a.key !== "neatlogs.span.kind") }, []).input).toEqual([
+      { role: "system", content: "Use lookup_order." },
+      { role: "user", content: "Q?" },
+    ]);
+    const existing = span({ traceId: tid, name: "chat", kind: "", attrs: [s("gen_ai.operation.name", "chat"), s("gen_ai.input.messages", JSON.stringify([{ role: "system", parts: [{ type: "text", content: "Original." }] }, { role: "user", parts: [{ type: "text", content: "Q?" }] }])), s("gen_ai.system_instructions", '[{"type":"text","content":"Duplicate."}]')] });
+    expect(buildView({ ...existing, attributes: existing.attributes.filter((a) => a.key !== "neatlogs.span.kind") }, []).input).toEqual([
+      { role: "system", content: "Original." },
+      { role: "user", content: "Q?" },
+    ]);
     const wf = span({ traceId: tid, name: "plan.workflow", kind: "", attrs: [s("traceloop.span.kind", "workflow"), s("traceloop.entity.input", '{"q":1}')] });
     expect(buildView({ ...wf, attributes: wf.attributes.filter((a) => a.key !== "neatlogs.span.kind") }, [])).toMatchObject({ kind: "WORKFLOW", input: { q: 1 } });
   });
