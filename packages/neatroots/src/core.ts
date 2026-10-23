@@ -41,6 +41,9 @@ export class Roots {
   readonly replays: Replays;
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
+  private quietSweeper?: NodeJS.Timeout;
+  /** The first quiet-run sweep; resumeUnfinished waits on it so a run is not rechecked twice at startup. */
+  private initialQuiet?: Promise<void>;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
   /** The run and span the app has in focus, for the MCP get_current_run tool. */
@@ -75,7 +78,7 @@ export class Roots {
       const engine = new Engine(this, this.llm, this.decisions, this.checks, this.steering);
       this.engine = engine;
       // Finish check work a previous process accepted but didn't complete (a restart or a crash).
-      setTimeout(() => void resumeUnfinished(engine, this).catch((e: Error) => log.warn(`couldn't resume checks: ${e.message}`)), 1500).unref();
+      setTimeout(() => void (this.initialQuiet ?? Promise.resolve()).then(() => resumeUnfinished(engine, this)).catch((e: Error) => log.warn(`couldn't resume checks: ${e.message}`)), 1500).unref();
     }
   }
 
@@ -110,6 +113,17 @@ export class Roots {
     run();
     this.sweeper = setInterval(run, 3_600_000);
     this.sweeper.unref();
+    // Runs whose end never arrives (agent died, root span lost) get ended once they go quiet (issue #569).
+    const quiet = async () => {
+      try {
+        await this.engine?.endQuietRuns();
+      } catch (err) {
+        log.warn(`quiet-run sweep failed: ${(err as Error).message}`);
+      }
+    };
+    this.initialQuiet = quiet();
+    this.quietSweeper = setInterval(quiet, 60_000);
+    this.quietSweeper.unref();
   }
 
   /** Installs (first run) and starts Laya in the background; checks use the LLM until it is ready. */
@@ -122,6 +136,7 @@ export class Roots {
   close(): void {
     clearInterval(this.sweeper);
     this.chats.close();
+    clearInterval(this.quietSweeper);
     this.laya.stop();
     this.store.close();
   }

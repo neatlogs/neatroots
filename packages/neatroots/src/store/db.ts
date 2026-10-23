@@ -701,6 +701,12 @@ export class Store {
     // run is running again, and once the caller ends the run ends on the full trace rather than on
     // the callee's slice of it.
     const handedBack = !span.parentSpanId && !!run.root_span_id && this.rootCameFromRemoteParent(span.traceId, run.root_span_id);
+    // A run the quiet sweep marked interrupted ("no end received") can still be alive: its late
+    // root span or completion marker clears the inferred interruption and the run is running again.
+    if (!view.interrupted && run.status === "interrupted" && run.termination_reason === "no end received" && (view.isMarker || isTop)) {
+      sets.push("status = 'running'", "interrupted = 0", "termination_reason = NULL", "ended_ms = NULL");
+      run = { ...run, status: "running", interrupted: 0, termination_reason: null, ended_ms: null };
+    }
     if (isTop && !view.isMarker) {
       // Reported only when the root is really replaced: a parentless marker doesn't take it.
       if (handedBack) flags.rootHandedBack = true;
@@ -784,6 +790,25 @@ export class Store {
 
   getRun(traceId: string): RunRow | undefined {
     return this.db.prepare("SELECT * FROM runs WHERE trace_id = ?").get(traceId) as RunRow | undefined;
+  }
+
+  /** Runs still marked running, with no completion marker, that sent nothing for `quietMs` - their end never arrived (issue #213). */
+  quietRuns(quietMs: number, now = Date.now()): RunRow[] {
+    return this.db.prepare("SELECT * FROM runs WHERE status = 'running' AND doctor = 0 AND complete = 0 AND updated_ms < ?").all(now - quietMs) as RunRow[];
+  }
+
+  /**
+   * Marks a quiet run interrupted so the app can say "no end received" instead of showing it
+   * running forever. `cutoff` is the sweep's quiet threshold: a run that reported anything since
+   * the sweep listed it is left alone, so a live run is never marked interrupted.
+   */
+  markRunInterrupted(traceId: string, reason: string, cutoff: number, now = Date.now()): boolean {
+    const r = this.db
+      .prepare(
+        "UPDATE runs SET status = 'interrupted', interrupted = 1, termination_reason = ?, ended_ms = COALESCE(ended_ms, last_span_ms, ?), updated_ms = ? WHERE trace_id = ? AND status = 'running' AND updated_ms < ?",
+      )
+      .run(reason, now, now, traceId, cutoff);
+    return r.changes > 0;
   }
 
   /** The WHERE clauses and parameters for a run filter, shared by listing and counting. */

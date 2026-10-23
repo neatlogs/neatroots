@@ -154,6 +154,9 @@ function pickSpans<S extends { id: string }>(spans: S[], ids: string[], traceId:
   return spans.filter((s) => picked.has(s.id));
 }
 
+/** A run with no new spans for this long is treated as ended: its end never arrived (issue #213). */
+export const QUIET_RUN_MS = 30 * 60_000;
+
 export class Engine {
   private live = new Map<string, LiveRun>();
   private workflowPlanning = new Map<string, Promise<PlanRow | undefined>>();
@@ -1053,6 +1056,22 @@ ${library}`;
   }
 
   // --------------------------------------------------------------- run end
+
+  /**
+   * Ends runs that went quiet without an end: marks each one interrupted ("no end received")
+   * and runs its end-of-run pass on the spans that did arrive, so it does not sit "running"
+   * forever (issue #213). Runs at startup and on a timer; resumeUnfinished then treats these
+   * like any other ended run.
+   */
+  async endQuietRuns(quietMs = QUIET_RUN_MS): Promise<void> {
+    const now = Date.now();
+    const cutoff = now - quietMs;
+    for (const run of this.roots.store.quietRuns(quietMs, now)) {
+      // Only recheck when this sweep actually marked the run - an overlapping sweep
+      // that already claimed it must not repeat the end-of-run model calls.
+      if (this.roots.store.markRunInterrupted(run.trace_id, "no end received", cutoff)) await this.recheck(run.trace_id, { resume: true });
+    }
+  }
 
   private async handleEnd(run: LiveRun): Promise<void> {
     if (run.endHandled) return;
