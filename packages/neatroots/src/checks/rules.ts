@@ -1,6 +1,7 @@
 import type { RuleCheck } from "./types.js";
 import { finalOutput, runRoot, selectSpans, type SpanInfo, type TraceSnapshot } from "../engine/trace.js";
 import { preview } from "../semantics/view.js";
+import { resultActionHit } from "./result-action.js";
 import { log } from "../util/log.js";
 import { testWithin } from "../util/regex.js";
 
@@ -351,6 +352,8 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
         params: { pattern: names.slice(start, start + p).join(" -> "), count: String(Math.floor((end - start) / p)) },
       };
     }
+    case "result_action":
+      return atEnd ? resultActionHit(r, t) : null;
     case "run_end": {
       if (!atEnd || !t.run) return null;
       const root = runRoot(t.spans);
