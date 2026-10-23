@@ -7,7 +7,7 @@ import { toBatches, type SpanNode } from "../ingest/build.js";
 import type { ChatMessage } from "../models/llm.js";
 import type { Plain } from "../otlp/types.js";
 import { attr } from "../otlp/types.js";
-import { isSystemRole, preview } from "../semantics/view.js";
+import { isSystemRole, maybeJson, preview } from "../semantics/view.js";
 import { log } from "../util/log.js";
 
 // Replays. An LLM-call replay re-sends one LLM span's messages (as edited) to the configured LLM
@@ -17,14 +17,22 @@ import { log } from "../util/log.js";
 // answered by its findings.
 
 export interface ReplayOverrides {
-  /** LLM replay: the messages to send instead of the span's. */
-  messages?: { role: string; content: string }[];
+  /**
+   * LLM replay: the messages to send instead of the span's, in the shape the app read them from the
+   * span, so a tool turn keeps its `tool_calls` / `tool_call_id` and `toChat` can normalize them.
+   */
+  messages?: Plain[];
   /** LLM replay: change one recorded message (matched by its text) and keep the rest. */
   edit?: { from: string; to: string };
   /** Run replay: the user input to run the agent with. */
   input?: string;
   model?: string;
   system?: string;
+  /**
+   * LLM replay: send the call's recorded tool definitions (default) so the model can answer with
+   * a tool call; false replays in text-only mode.
+   */
+  tools?: boolean;
 }
 
 export interface Replay {
@@ -65,21 +73,62 @@ CREATE INDEX IF NOT EXISTS replays_new ON replays (new_trace_id);
 
 type Row = Omit<Replay, "overrides"> & { overrides: string };
 
-/** Chat messages as neatroots' LLM client takes them; tool turns become plain text. */
-export function toChat(messages: Plain | undefined): ChatMessage[] {
+function text(v: Plain | undefined): string | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v === "string") return v.length ? v : undefined;
+  return String(v);
+}
+
+/** Recorded tool calls on a message: an array, a JSON string, or the flattened per-index shape. */
+function callsOf(msg: Record<string, Plain>): Record<string, Plain>[] {
+  const raw = maybeJson(msg.tool_calls);
+  if (Array.isArray(raw)) return raw.filter((c): c is Record<string, Plain> => !!c && typeof c === "object" && !Array.isArray(c));
+  if (raw && typeof raw === "object") return Object.values(raw).filter((c): c is Record<string, Plain> => !!c && typeof c === "object" && !Array.isArray(c));
+  return [];
+}
+
+/**
+ * Chat messages as neatroots' LLM client takes them. By default tool turns become plain text;
+ * with structuredToolTurns they keep their shape (assistant tool_calls and tool results carrying
+ * the id they answer), which is what a replay sends when it offers the recorded tools again.
+ */
+export function toChat(messages: Plain | undefined, opts: { structuredToolTurns?: boolean } = {}): ChatMessage[] {
   if (!Array.isArray(messages)) return typeof messages === "string" ? [{ role: "user", content: messages }] : [];
   const out: ChatMessage[] = [];
+  // Ids of tool calls whose results have not been seen yet, for results recorded without one.
+  const pending: string[] = [];
+  let generated = 0;
   for (const m of messages) {
     if (!m || typeof m !== "object" || Array.isArray(m)) continue;
     const msg = m as Record<string, Plain>;
     const role = String(msg.role ?? "user");
-    let content = typeof msg.content === "string" ? msg.content : msg.content == null ? "" : JSON.stringify(msg.content);
-    if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
-      const calls = (msg.tool_calls as Record<string, Plain>[]).map((c) => `${c.name ?? "tool"}(${JSON.stringify(c.arguments ?? {})})`).join(", ");
-      content = `${content}${content ? "\n" : ""}[called ${calls}]`;
+    const content = typeof msg.content === "string" ? msg.content : msg.content == null ? "" : JSON.stringify(msg.content);
+    const calls = callsOf(msg);
+    if (role === "tool" || role === "function") {
+      if (!opts.structuredToolTurns) {
+        out.push({ role: "user", content: `[tool result${msg.name ? ` from ${msg.name}` : ""}]\n${content}` });
+        continue;
+      }
+      const id = text(msg.tool_call_id) ?? pending.shift() ?? `replay_tool_${generated++}`;
+      out.push({ role: "tool", content, tool_call_id: id, ...(text(msg.name) ? { name: text(msg.name) } : {}) });
+      continue;
     }
-    if (role === "tool" || role === "function") out.push({ role: "user", content: `[tool result${msg.name ? ` from ${msg.name}` : ""}]\n${content}` });
-    else out.push({ role: isSystemRole(role) ? "system" : role === "assistant" ? "assistant" : "user", content });
+    if (calls.length) {
+      if (!opts.structuredToolTurns) {
+        const named = calls.map((c) => `${c.name ?? "tool"}(${JSON.stringify(c.arguments ?? {})})`).join(", ");
+        out.push({ role: "assistant", content: `${content}${content ? "\n" : ""}[called ${named}]` });
+        continue;
+      }
+      const mapped = calls.map((c) => {
+        const id = text(c.id) ?? `replay_tool_${generated++}`;
+        pending.push(id);
+        // An empty arguments string is not valid JSON; a completed call carries an object.
+        return { id, name: text(c.name) ?? "tool", arguments: typeof c.arguments === "string" ? c.arguments.trim() || "{}" : JSON.stringify(c.arguments ?? {}) };
+      });
+      out.push({ role: "assistant", content, tool_calls: mapped });
+      continue;
+    }
+    out.push({ role: isSystemRole(role) ? "system" : role === "assistant" ? "assistant" : "user", content });
   }
   return out;
 }
@@ -164,7 +213,11 @@ export class Replays {
     const span = t.spans.find((s) => s.id === spanId || s.id.startsWith(spanId));
     if (!span) throw new Error("span not found");
     if (span.kind !== "LLM") throw new Error("only LLM spans can be replayed on their own; replay the whole run instead");
-    const messages: ChatMessage[] = overrides.messages?.length ? toChat(overrides.messages as Plain) : toChat(span.input);
+    // The recorded tools go back with the call unless the caller asked for a text-only replay.
+    const tools = overrides.tools === false ? [] : (span.toolDefinitions ?? []);
+    // Edited messages come from the app, so they carry tool fields the same way the recorded ones
+    // do; both paths keep the tool shape whenever the recorded tools are offered again.
+    const messages: ChatMessage[] = toChat(overrides.messages?.length ? overrides.messages : span.input, { structuredToolTurns: tools.length > 0 });
     if (overrides.edit) {
       const { from, to } = overrides.edit;
       const i = messages.findIndex((m) => m.content === from) >= 0 ? messages.findIndex((m) => m.content === from) : messages.findIndex((m) => m.content.trim() === from.trim());
@@ -183,13 +236,47 @@ export class Replays {
     const r = this.create(traceId, span.id, "llm", "llm", { ...rest, messages: messages.map((m) => ({ role: m.role, content: m.content })) });
     try {
       const startMs = Date.now();
-      const res = await this.roots.llm.chat(messages, { model: overrides.model, maxTokens: 2048, temperature: 0.2, priority: "high", timeoutSec: 180 });
+      const res = await this.roots.llm.chat(messages, {
+        model: overrides.model,
+        maxTokens: 2048,
+        temperature: 0.2,
+        priority: "high",
+        timeoutSec: 180,
+        ...(tools.length
+          ? {
+              tools: tools.map((d) => ({
+                name: d.name,
+                description: d.description,
+                parameters: d.parameters && typeof d.parameters === "object" && !Array.isArray(d.parameters) ? (d.parameters as Record<string, unknown>) : undefined,
+              })),
+            }
+          : {}),
+      });
       const endMs = Date.now();
       const newTrace = crypto.randomBytes(16).toString("hex");
-      const output = [{ role: "assistant", content: res.text }];
+      const calls = res.toolCalls ?? [];
+      const output = calls.length
+        ? [{ role: "assistant", content: res.text, tool_calls: calls.map((c) => ({ id: c.id ?? null, name: c.name, arguments: maybeJson(c.arguments) ?? c.arguments })) }]
+        : [{ role: "assistant", content: res.text }];
+      // A tool-call answer has no text; render it so the replay's preview and root output say something.
+      const answer = res.text.trim() || calls.map((c) => `${c.name}(${c.arguments})`).join(", ");
       const replayAttrs = { "neatroots.replay.id": r.id, "neatroots.replay.of_trace": traceId, "neatroots.replay.of_span": span.id };
+      // Record the offered tools and any tool call on the LLM span, as a recorded call carries them.
+      const toolAttrs: Record<string, unknown> = {};
+      calls.forEach((c, i) => {
+        if (c.id) toolAttrs[`neatlogs.llm.tool_calls.${i}.id`] = c.id;
+        toolAttrs[`neatlogs.llm.tool_calls.${i}.name`] = c.name;
+        toolAttrs[`neatlogs.llm.tool_calls.${i}.arguments`] = c.arguments;
+      });
+      if (tools.length) {
+        tools.forEach((d, i) => {
+          toolAttrs[`neatlogs.llm.tools.${i}.name`] = d.name;
+          if (d.description) toolAttrs[`neatlogs.llm.tools.${i}.description`] = d.description;
+          if (d.parameters !== undefined) toolAttrs[`neatlogs.llm.tools.${i}.input_schema`] = typeof d.parameters === "string" ? d.parameters : JSON.stringify(d.parameters);
+        });
+      }
       const nodes: SpanNode[] = [
-        { traceId: newTrace, spanId: `${newTrace}:root`, name: `replay: ${span.name}`, kind: "workflow", start: startMs, end: endMs, input: messages.filter((m) => m.role === "user").at(-1)?.content, output: res.text, attributes: replayAttrs },
+        { traceId: newTrace, spanId: `${newTrace}:root`, name: `replay: ${span.name}`, kind: "workflow", start: startMs, end: endMs, input: messages.filter((m) => m.role === "user").at(-1)?.content, output: answer, attributes: replayAttrs },
         {
           traceId: newTrace,
           spanId: `${newTrace}:llm`,
@@ -204,11 +291,11 @@ export class Replays {
           provider: res.where ?? null,
           promptTokens: res.usage?.prompt_tokens ?? null,
           completionTokens: res.usage?.completion_tokens ?? null,
-          attributes: replayAttrs,
+          attributes: { ...replayAttrs, ...toolAttrs },
         },
       ];
       this.roots.ingest(toBatches(nodes, { project: t.run?.project ?? "replay", source: "replay" }));
-      return this.finish(r, { state: "succeeded", new_trace_id: newTrace, output_preview: preview(res.text, 400) });
+      return this.finish(r, { state: "succeeded", new_trace_id: newTrace, output_preview: preview(answer, 400) });
     } catch (err) {
       return this.finish(r, { state: "failed", error: (err as Error).message });
     }

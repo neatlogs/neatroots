@@ -176,3 +176,16 @@ export function redactBatches(batches: ResourceSpansBatch[], rules: RedactionRul
   }));
   return { batches: out, hits };
 }
+
+/**
+ * Redacts every string inside a JSON value and keeps its shape. Tool definitions carry prose
+ * descriptions and default values, so a definition offered to a hosted LLM has to go through the
+ * same redaction as the messages. Keys are left as they are: they are property names the agent and
+ * the model have to agree on, and rewriting one would break the tool the schema describes.
+ */
+export function redactJsonStrings(v: unknown, redact: (s: string) => string): unknown {
+  if (typeof v === "string") return redact(v);
+  if (Array.isArray(v)) return v.map((x) => redactJsonStrings(x, redact));
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, redactJsonStrings(x, redact)]));
+  return v;
+}
