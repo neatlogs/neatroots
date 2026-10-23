@@ -110,6 +110,34 @@ describe("replay", () => {
     expect(t.roots.config.rerun["support-agent"]).toMatchObject({ command: "node agent.js", cwd: dir });
   });
 
+  it("refuses malformed replay overrides instead of storing a broken replay", async () => {
+    t = await makeRoots({ noEngine: true, serve: true });
+    const x = seed(t);
+    const post = async (body: unknown) => {
+      const r = await fetch(`${t!.url}/api/runs/${x.traceId}/replay`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      return { status: r.status, body: (await r.json()) as { error?: string } };
+    };
+    const cases: [unknown, string][] = [
+      [{ span_id: x.l2.spanId, system: 5 }, "system must be a string"], // was 200 with content: 5 in the stored replay
+      [{ span_id: x.l2.spanId, model: 5 }, "model must be a string"], // was 200, sent to the provider as-is
+      [{ span_id: x.l2.spanId, edit: { from: 5, to: "x" } }, "edit.from and edit.to must be strings"], // was 400 "from.trim is not a function"
+      [{ span_id: x.l2.spanId, edit: { from: "Is order 1001 ok?" } }, "edit.from and edit.to must be strings"], // was 200 with an undefined message
+      [{ span_id: x.l2.spanId, messages: 5 }, "messages must be an array of {role, content} strings"], // was 200, silently ignored
+      [{ span_id: x.l2.spanId, messages: [{ role: "user", content: 5 }] }, "messages must be an array of {role, content} strings"], // was 200, coerced to "5"
+      [{ span_id: 5 }, "span_id must be a string"], // was prefix-matched as "5"
+      [{ input: 5 }, "input must be a string"], // reached a rerun target as a number
+    ];
+    for (const [body, message] of cases) {
+      const r = await post(body);
+      expect(r.status, JSON.stringify(body)).toBe(400);
+      expect(r.body.error, JSON.stringify(body)).toBe(message);
+    }
+    expect(t.roots.replays.forRun(x.traceId)).toHaveLength(0);
+    // a well-formed edit still forks
+    expect((await post({ span_id: x.l2.spanId, edit: { from: "Is order 1001 ok?", to: "Is order 2002 ok?" } })).status).toBe(200);
+    expect(t.roots.replays.forRun(x.traceId)).toHaveLength(1);
+  });
+
   it("marks replays left running as failed on restart", async () => {
     t = await makeRoots({ noEngine: true });
     const id = `rp_${hex(6)}`;
