@@ -39,7 +39,7 @@ export function GeneralSection({ status }: { status: Status }) {
           Every way to send runs to neatroots
         </a>
       </SettingsCard>
-      <SettingsCard title="Storage" description="Runs are kept until they're older than the limit or the store passes its size cap, oldest first. Pinned runs are kept.">
+      <SettingsCard title="Storage" description="Runs are kept until they're older than the limit or the store passes its size cap. Past the cap, the oldest runs with no open findings go first; pinned runs are kept.">
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <Stat label="Runs" value={status.stats.runs.toLocaleString()} />
           <Stat label="Spans" value={status.stats.spans.toLocaleString()} />
