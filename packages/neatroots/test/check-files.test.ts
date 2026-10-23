@@ -107,6 +107,23 @@ describe("checkFiles", () => {
     expect({ tp, fn, fp, tn }).toEqual({ tp: 60, fn: 0, fp: 0, tn: 60 });
   });
 
+  it("honours applies_to the same way the engine does", () => {
+    const checks = path.join(dir, "scoped-checks");
+    fs.mkdirSync(checks, { recursive: true });
+    const scoped = (id: string, applies: string) => `id: ${id}\nkind: rule\napplies_to: ${applies}\nrule: {type: match, field: name, pattern: '^search$'}\n`;
+    // The run is project and workflow "check-demo", from the trace's service.name.
+    fs.writeFileSync(path.join(checks, "other.yaml"), scoped("other-project", "{project: some-other-agent}"));
+    fs.writeFileSync(path.join(checks, "mine.yaml"), scoped("this-project", "{project: check-demo}"));
+    fs.writeFileSync(path.join(checks, "one-of.yaml"), scoped("one-of-many", "{project: [some-other-agent, check-demo]}"));
+    fs.writeFileSync(path.join(checks, "wf.yaml"), scoped("other-workflow", "{workflow: some-other-flow}"));
+    fs.writeFileSync(path.join(checks, "both.yaml"), scoped("both-match", "{project: check-demo, workflow: check-demo}"));
+    fs.writeFileSync(path.join(checks, "any.yaml"), "id: any-project\nkind: rule\nrule: {type: match, field: name, pattern: '^search$'}\n");
+    const r = checkFiles([write([tool("search")])], { dirs: [checks] });
+    // Every rule is loaded, and only the ones watching this project and workflow report on it.
+    expect(r.rules).toEqual(expect.arrayContaining(["other-project", "this-project", "one-of-many", "other-workflow", "both-match", "any-project"]));
+    expect(r.runs[0].findings.map((f) => f.check_id).sort()).toEqual(["any-project", "both-match", "one-of-many", "this-project"]);
+  });
+
   it("gives each file its own verdict when two files share a trace id, in either order", () => {
     const checks = path.join(dir, "same-trace-checks");
     fs.mkdirSync(checks, { recursive: true });
