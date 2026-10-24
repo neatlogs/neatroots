@@ -49,6 +49,36 @@ function sdkRequest(read: () => unknown, response = new Response("ok")) {
   return request;
 }
 
+describe("composition with plain-promise inner wrapper", () => {
+  it("_thenUnwrap applies transform directly when inner value has no _thenUnwrap", async () => {
+    // Simulates neatlogs.wrapOpenAI: the wrapped create() returns a plain Promise, not an APIPromise.
+    const data = { choices: [{ message: { content: "ok" } }] };
+    const plainPromise = Promise.resolve(data);
+    const request = new SteeredRequest(Promise.resolve({ value: plainPromise }));
+    const result = await request._thenUnwrap((v) => (v as typeof data).choices[0].message.content);
+    expect(result).toBe("ok");
+  });
+
+  it("withResponse returns { data, response: undefined } when inner value has no withResponse", async () => {
+    const data = { answer: "yes" };
+    const plainPromise = Promise.resolve(data);
+    const request = new SteeredRequest(Promise.resolve({ value: plainPromise }));
+    const result = await request.withResponse() as { data: unknown; response: unknown };
+    expect(result.data).toEqual(data);
+    expect(result.response).toBeUndefined();
+  });
+
+  it("chained _thenUnwrap still works when outer resolves through a plain-promise inner", async () => {
+    const data = { score: 42 };
+    const plainPromise = Promise.resolve(data);
+    const request = new SteeredRequest(Promise.resolve({ value: plainPromise }));
+    const result = await request
+      ._thenUnwrap((v) => (v as typeof data).score)
+      ._thenUnwrap((v) => String(v));
+    expect(result).toBe("42");
+  });
+});
+
 describe("OpenAI parse helpers", () => {
   it.each(["chat", "responses"])("keeps %s parse requests lazy and preserves response helpers", async (api) => {
     const data = { refunded: true };
