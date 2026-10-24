@@ -133,7 +133,7 @@ export function mountModelsApi(app: Hono, roots: Roots): void {
     if (b.action === "install") {
       roots.config.classifier.laya.enabled = true;
       roots.config.classifier.laya.consent = "yes";
-      roots.saveConfig();
+      roots.saveConfig({ layaEnabled: true });
       void roots.laya.ensure({ install: true }).then(() => roots.decisions.reset());
     } else if (b.action === "skip") {
       // Not downloading Laya: Jev cloud (or the LLM, until then) answers checks.

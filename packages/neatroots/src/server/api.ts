@@ -336,7 +336,7 @@ export function mountApi(app: Hono, roots: Roots): void {
       roots.config.checkDirs.push(checkDir);
       roots.checks.reload();
     }
-    roots.saveConfig();
+    roots.saveConfig({ layaEnabled: b.laya_enabled });
     if (b.llm_model || b.llm_base_url) await roots.llm.probe(true);
     roots.bus.emit("settings", { project: b.project });
     return c.json({ ok: true, projects: projects(roots) });

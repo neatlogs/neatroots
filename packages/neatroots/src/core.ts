@@ -40,6 +40,7 @@ export class Roots {
   readonly imports: ImportJobs;
   readonly replays: Replays;
   readonly chats: AgentChats;
+  private startOverrides?: { port?: number; grpcPort?: number; layaEnabled?: boolean };
   private sweeper?: NodeJS.Timeout;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
@@ -85,9 +86,33 @@ export class Roots {
     return updates;
   }
 
-  /** Saves to this instance's own home (the one it was opened with), never another one. */
-  saveConfig(): void {
-    saveConfig(this.config, path.join(this.home, "config.yaml"));
+  /** Start flags affect this process only, even when Settings saves the config later. */
+  applyStartOverrides(opts: { port?: number; grpcPort?: number; disableLaya?: boolean }): void {
+    const original = (this.startOverrides ??= {});
+    if (opts.port !== undefined) {
+      original.port ??= this.config.port;
+      this.config.port = opts.port;
+    }
+    if (opts.grpcPort !== undefined) {
+      original.grpcPort ??= this.config.grpcPort;
+      this.config.grpcPort = opts.grpcPort;
+    }
+    if (opts.disableLaya) {
+      original.layaEnabled ??= this.config.classifier.laya.enabled;
+      this.config.classifier.laya.enabled = false;
+    }
+  }
+
+  /** Saves to this instance's own home, excluding start flags unless a setting was explicitly changed. */
+  saveConfig(changes: { layaEnabled?: boolean } = {}): void {
+    if (changes.layaEnabled !== undefined && this.startOverrides?.layaEnabled !== undefined) {
+      this.startOverrides.layaEnabled = changes.layaEnabled;
+    }
+    const config = structuredClone(this.config);
+    if (this.startOverrides?.port !== undefined) config.port = this.startOverrides.port;
+    if (this.startOverrides?.grpcPort !== undefined) config.grpcPort = this.startOverrides.grpcPort;
+    if (this.startOverrides?.layaEnabled !== undefined) config.classifier.laya.enabled = this.startOverrides.layaEnabled;
+    saveConfig(config, path.join(this.home, "config.yaml"));
   }
 
   /** Applies retention now and every hour. */
