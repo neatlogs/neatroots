@@ -1,8 +1,8 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
-import { distributionFromLogprobs, JevBackend, parseJevAnswer } from "../src/models/decision.js";
-import { parseJsonLoose } from "../src/models/llm.js";
+import { distributionFromLogprobs, JevBackend, LlmDecisionBackend, parseJevAnswer } from "../src/models/decision.js";
+import { parseJsonLoose, type LlmClient } from "../src/models/llm.js";
 
 describe("decision model", () => {
   it("turns answer-token logprobs into a distribution", () => {
@@ -66,6 +66,34 @@ describe("decision model", () => {
     expect(parseJsonLoose('```json\n{"a":1}\n```')).toEqual({ a: 1 });
     expect(parseJsonLoose('Sure! {"a": [1,2]} trailing')).toEqual({ a: [1, 2] });
     expect(parseJsonLoose("nope")).toBeUndefined();
+  });
+});
+
+describe("LLM decision backend", () => {
+  function makeMockLlm(response: { text: string; json: unknown; logprobs: undefined }): LlmClient {
+    return {
+      isAvailable: async () => true,
+      logprobs: true,
+      model: "mock-local",
+      chat: async () => ({ ...response, model: "mock-local", latencyMs: 5, where: "local" as const }),
+    } as unknown as LlmClient;
+  }
+
+  it("confident local yes without logprobs crosses flag_at 0.8", async () => {
+    const backend = new LlmDecisionBackend(makeMockLlm({ text: '{"answer":"yes"}', json: { answer: "yes" }, logprobs: undefined }));
+    const result = await backend.decide("the tool call failed", [{ name: "failed", type: "yes_no", ask: "Did it fail?" }]);
+    expect(result.answers.failed.probability).toBeGreaterThanOrEqual(0.8);
+  });
+
+  it("confident local no without logprobs also gets a meaningful distribution after shrink", async () => {
+    const backend = new LlmDecisionBackend(makeMockLlm({ text: '{"answer":"no"}', json: { answer: "no" }, logprobs: undefined }));
+    const result = await backend.decide("everything looked fine", [{ name: "failed", type: "yes_no", ask: "Did it fail?" }]);
+    expect(result.answers.failed.probability).toBeLessThan(0.5);
+  });
+
+  it("unparseable LLM response throws rather than returning 0.5 yes", async () => {
+    const backend = new LlmDecisionBackend(makeMockLlm({ text: "not json", json: undefined, logprobs: undefined }));
+    await expect(backend.decide("state", [{ name: "q", type: "yes_no", ask: "Did it fail?" }])).rejects.toThrow();
   });
 });
 
