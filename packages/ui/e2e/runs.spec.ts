@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { open, state } from "./util";
+import { api, open, state } from "./util";
 
 test.describe("runs list", () => {
   test("lists the seeded runs with their problems", async ({ page }) => {
@@ -25,6 +25,33 @@ test.describe("runs list", () => {
     await page.getByRole("cell", { name: "Is order 1001 ok?" }).click();
     await expect(page).toHaveURL(new RegExp(`#/runs/(${state().supportRun}|${state().secondTurn})|#/runs/[0-9a-f]{32}`));
     await expect(page.getByRole("heading", { name: "Is order 1001 ok?" })).toBeVisible();
+  });
+
+  test("With problems excludes resolved-only runs while has_finding keeps them", async ({ page }) => {
+    const project = `e2e-open-findings-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    const send = (input: string) => api<{ trace_id: string }>("/v1/trace", {
+      method: "POST",
+      body: JSON.stringify({ name: "support", project, input, children: [{ name: "answer", kind: "LLM", model: "mock", input: [{ role: "user", content: input }], output: "Our payments key is sk-live-4f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c." }] }),
+    });
+    const resolved = await send("Resolved finding request");
+    const raised = await send("Open finding request");
+    const findings = (id: string) => api<{ findings: { id: string }[] }>(`/api/findings?trace_id=${id}`);
+    await expect.poll(async () => (await findings(resolved.trace_id)).findings.length).toBeGreaterThan(0);
+    await expect.poll(async () => (await findings(raised.trace_id)).findings.length).toBeGreaterThan(0);
+    for (const id of [resolved.trace_id, raised.trace_id]) {
+      await expect.poll(async () => (await api<{ coverage: { state: string } }>(`/api/runs/${id}`)).coverage.state).not.toBe("checking");
+    }
+    for (const finding of (await findings(resolved.trace_id)).findings) {
+      await api(`/api/findings/${finding.id}`, { method: "POST", body: JSON.stringify({ status: "resolved" }) });
+    }
+    const all = await api<{ runs: { trace_id: string }[] }>(`/api/runs?project=${project}&has_finding=1`);
+    expect(all.runs.map((run) => run.trace_id).sort()).toEqual([resolved.trace_id, raised.trace_id].sort());
+    await open(page, `runs?project=${project}`);
+    await expect(page.getByRole("cell", { name: "Resolved finding request", exact: true })).toBeVisible();
+    await expect(page.getByRole("cell", { name: "Open finding request", exact: true })).toBeVisible();
+    await page.getByRole("tab", { name: "With problems", exact: true }).click();
+    await expect(page.getByRole("cell", { name: "Resolved finding request", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("cell", { name: "Open finding request", exact: true })).toBeVisible();
   });
 
   test("a new run shows up live without reloading", async ({ page }) => {

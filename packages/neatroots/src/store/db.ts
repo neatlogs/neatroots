@@ -289,6 +289,7 @@ export interface RunFilter {
   workflow?: string;
   status?: string;
   sessionId?: string;
+  /** Runs with any finding, open or resolved. */
   hasFinding?: boolean;
   /** Runs with an open or resolved finding from this check. */
   checkId?: string;
@@ -807,10 +808,9 @@ export class Store {
       where.push("session_id = @session");
       p.session = f.sessionId;
     }
-    if (f.hasFinding !== undefined) {
-      where.push(f.hasFinding ? "finding_count > 0" : "finding_count = 0");
-    }
+    if (f.hasFinding === false) where.push("finding_count = 0");
     if (f.hasOpenFinding) where.push("open_finding_count > 0");
+    else if (f.hasFinding) where.push("finding_count > 0");
     if (f.checkId) {
       where.push("trace_id IN (SELECT trace_id FROM findings WHERE check_id = @check AND status NOT IN ('dismissed', 'failed', 'quiet'))");
       p.check = f.checkId;
