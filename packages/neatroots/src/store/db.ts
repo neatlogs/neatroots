@@ -1121,6 +1121,20 @@ export class Store {
     return this.updateFinding(id, { status });
   }
 
+  /** A check's "could not run" rows on a run, newest first. */
+  failedFindingsFor(traceId: string, checkId: string): Finding[] {
+    return (
+      this.db.prepare("SELECT * FROM findings WHERE trace_id = ? AND check_id = ? AND status = 'failed' ORDER BY created_ms DESC").all(traceId, checkId) as Record<string, unknown>[]
+    ).map((r) => this.findingFromRow(r));
+  }
+
+  deleteFinding(id: string): void {
+    const cur = this.getFinding(id);
+    if (!cur) return;
+    this.db.prepare("DELETE FROM findings WHERE id = ?").run(id);
+    this.refreshFindingCounts(cur.trace_id);
+  }
+
   // -------------------------------------------------------------- decisions
 
   insertDecision(d: Omit<DecisionRow, "id" | "created_ms">): DecisionRow {

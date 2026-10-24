@@ -36,7 +36,7 @@ import type { Plain } from "../otlp/types.js";
 import { preview } from "../semantics/view.js";
 import { log } from "../util/log.js";
 import { CheckProgress } from "./progress.js";
-import { addOccurrence, dropOccurrence, findingSpans, isOpenFinding, newFindingStatus } from "./findings.js";
+import { addOccurrence, clearFailure, dropOccurrence, findingSpans, isOpenFinding, newFindingStatus, spanErrors } from "./findings.js";
 import { verifyFlag } from "./verify.js";
 
 /** Default library questions when no LLM is available to plan. */
@@ -565,8 +565,17 @@ export class Engine {
       }
       if (dismissed()) return;
       // A model error or timeout is a failed check, never a "no".
-      const existing = this.roots.store.latestFindingFor(run.traceId, check.id);
-      if (!existing || existing.status !== "failed") {
+      // One row per check per run: a span whose call fails joins it (with its own error), so each stays listed.
+      const message = (err as Error).message;
+      const existing = this.roots.store.failedFindingsFor(run.traceId, check.id)[0];
+      if (existing) {
+        if (spanId && !findingSpans(existing).includes(spanId)) {
+          const joined = addOccurrence(this.roots.store, existing, spanId, spanIds);
+          const errors = { ...spanErrors(existing), [spanId]: message };
+          const f = joined && this.roots.store.updateFinding(joined.id, { detail: { ...joined.detail, errors } });
+          if (f) this.roots.bus.emit("finding", f);
+        }
+      } else {
         const f = this.roots.store.insertFinding({
           trace_id: run.traceId,
           check_id: check.id,
@@ -575,7 +584,7 @@ export class Engine {
           probability: null,
           status: "failed",
           evidence_span_ids: spanIds,
-          detail: { error: (err as Error).message, span_id: spanId },
+          detail: { error: message, span_id: spanId, ...(spanId ? { errors: { [spanId]: message } } : {}) },
           model: null,
           triage_score: null,
           explanation_id: null,
@@ -596,6 +605,9 @@ export class Engine {
       backend: result.backend,
       latency_ms: result.latencyMs,
     });
+    // It ran this time, so an earlier "could not run" for this span (or the whole run) is stale:
+    // the panel would keep saying the check failed, and a flag now would sit next to it.
+    for (const f of clearFailure(this.roots.store, run.traceId, check.id, spanId)) this.roots.bus.emit("finding", f);
     const open = this.findOpen(run.traceId, check.id, spanId);
     if (verdict.flagged) {
       if (open) {
