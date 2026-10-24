@@ -241,6 +241,9 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
     for (const field of ["allow_edits", "allow_commands"] as const) {
       if (b[field] !== undefined && typeof b[field] !== "boolean") return err(c, 400, `${field} must be a boolean`);
     }
+    for (const field of ["cwd", "title", "trace_id"] as const) {
+      if (b[field] !== undefined && typeof b[field] !== "string") return err(c, 400, `${field} must be a string`);
+    }
     try {
       return c.json(roots.chats.create(b), 201);
     } catch (e) {
