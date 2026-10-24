@@ -650,7 +650,7 @@ export class Store {
     }
     const sets: string[] = ["updated_ms = @now", "last_span_ms = MAX(COALESCE(last_span_ms, 0), @end)"];
     const p: Record<string, unknown> = { now, end: row.end_ms, trace: span.traceId };
-    if (!run.started_ms || row.start_ms < run.started_ms) {
+    if (run.started_ms === null || row.start_ms < run.started_ms) {
       sets.push("started_ms = @start");
       p.start = row.start_ms;
     }
