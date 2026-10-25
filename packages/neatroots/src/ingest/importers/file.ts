@@ -12,7 +12,14 @@ function fromDoc(doc: unknown, project: string): ResourceSpansBatch[] {
   if (Array.isArray(doc)) return doc.flatMap((d) => fromDoc(d, project));
   if (!doc || typeof doc !== "object") throw new ImportError("expected a JSON object");
   const o = doc as Record<string, unknown>;
-  if (Array.isArray(o.resourceSpans) || Array.isArray(o.resource_spans)) return decodeTraceJson(o);
+  if (Array.isArray(o.resourceSpans) || Array.isArray(o.resource_spans)) {
+    // A collector dump has no import marker of its own; add one so retention treats it as imported.
+    const batches = decodeTraceJson(o);
+    for (const b of batches) {
+      if (!b.resource.attributes.some((a) => a.key === "neatroots.import.source")) b.resource.attributes.push({ key: "neatroots.import.source", value: { stringValue: "file" } });
+    }
+    return batches;
+  }
   const exp = (o.data && typeof o.data === "object" ? o.data : o) as Record<string, unknown>;
   if (Array.isArray(exp.spans) && exp.trace && typeof exp.trace === "object") return fromNeatlogsExport(exp, project);
   if (typeof o.name === "string") return httpTraceToBatches(o, project, { stableIds: true }).batches;
