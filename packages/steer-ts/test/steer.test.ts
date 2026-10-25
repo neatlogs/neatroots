@@ -68,6 +68,55 @@ describe("neatroots-steer (ts)", () => {
     expect(seen.messages[0].content).toContain("<neatroots-guidance>");
   });
 
+  // #601: the documented order - wrapOpenAI(neatlogs.wrapOpenAI(client)) - must
+  // record one call per provider call. The SDK's client is a Proxy that
+  // instruments `create` on every read, so the steer wrapper has to sit on the
+  // provider's own method: wrapping the SDK's instrumentation instead makes
+  // the SDK wrap our wrapper again, and the call is recorded twice.
+  it("records one call when the client is instrumented by a Proxy-based SDK wrapper (#601)", async () => {
+    notes.push(note());
+    let calls = 0;
+    let seen: any;
+    const provider = {
+      chat: {
+        completions: {
+          create: async (p: any) => ((seen = p), "ok"),
+        },
+      },
+    };
+    // The shape of the neatlogs SDK client: a Proxy that instruments `create`
+    // on every read of it.
+    const sdkClient: any = new Proxy(provider, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop !== "chat") return value;
+        return new Proxy(value, {
+          get(chatTarget, chatProp, chatReceiver) {
+            const chatValue = Reflect.get(chatTarget, chatProp, chatReceiver);
+            if (chatProp !== "completions") return chatValue;
+            return new Proxy(chatValue, {
+              get(completionsTarget, completionsProp, completionsReceiver) {
+                const fn = Reflect.get(completionsTarget, completionsProp, completionsReceiver);
+                if (completionsProp !== "create" || typeof fn !== "function") return fn;
+                return (...args: unknown[]) => {
+                  calls++;
+                  return fn.apply(completionsTarget, args);
+                };
+              },
+            });
+          },
+        });
+      },
+    });
+
+    const client: any = wrapOpenAI(sdkClient);
+    expect(
+      await client.chat.completions.create({ model: "m", messages: [{ role: "user", content: "q" }] }),
+    ).toBe("ok");
+    expect(calls).toBe(1);
+    expect(seen.messages[0].content).toContain("<neatroots-guidance>");
+  });
+
   it("wraps the client a withOptions copy returns", async () => {
     notes.push(note("Your rule says stop.", "halt"), note("Your rule says stop.", "halt"));
     const makeOpenAI = (): any => ({ chat: { completions: { create: async (_p: unknown) => "should not run" } }, withOptions: () => makeOpenAI() });
