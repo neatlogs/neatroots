@@ -1423,11 +1423,14 @@ export class Store {
   }
 
   /**
-   * The oldest unpinned runs whose share of storedBytes() adds up to `excess`. A run's span rows
-   * are scaled to the database's share of `stored` (which also holds the search index and table
-   * overhead). Blobs are shared between runs, so a blob counts only toward the run whose deletion
-   * actually frees it: the newest run that references it, and never one a pinned run still uses.
-   * Returns at least one run while any unpinned run exists.
+   * The oldest unpinned runs whose share of storedBytes() adds up to `excess`. Runs with no open
+   * findings come first: a run that raised something is evicted only once the clean runs cannot
+   * free the excess on their own, so a finding delays eviction without shielding the run from a
+   * cap that needs the space. A run's span rows are scaled to the database's share of `stored`
+   * (which also holds the search index and table overhead). Blobs are shared between runs, so a
+   * blob counts only toward the run whose deletion actually frees it: the newest run that
+   * references it, and never one a pinned run still uses. Returns at least one run while any
+   * unpinned run exists.
    */
   private oldestRunsCovering(excess: number, stored: number): string[] {
     const rowBytes = `octet_length(s.attributes) + octet_length(s.events) + octet_length(s.links) + IFNULL(octet_length(s.extra), 0) + IFNULL(octet_length(s.input_preview), 0) + IFNULL(octet_length(s.output_preview), 0) + octet_length(s.name)`;
@@ -1441,7 +1444,7 @@ export class Store {
         .prepare(
           `SELECT r.trace_id AS t, r.pinned AS pinned, COALESCE(SUM(${rowBytes}), 0) AS w, group_concat(s.blobs, '') AS b
            FROM runs r LEFT JOIN spans s ON s.trace_id = r.trace_id
-           GROUP BY r.trace_id ORDER BY COALESCE(r.ended_ms, r.received_ms) ASC`,
+           GROUP BY r.trace_id ORDER BY (r.open_finding_count > 0) ASC, COALESCE(r.ended_ms, r.received_ms) ASC`,
         )
         .all() as { t: string; pinned: number; w: number; b: string | null }[]
     ).map((r) => ({ ...r, w: r.w + (indexed.get(r.t) ?? 0) }));
