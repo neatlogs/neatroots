@@ -544,7 +544,10 @@ export class Engine {
     const key = ev.spanIds.join(",") + (check.evidence?.final_output ? `|${finalOutput(snap) ?? ""}` : "");
     if (run.traceEvidence.get(check.id) === key) return;
     run.traceEvidence.set(check.id, key);
-    const outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null);
+    // Evidence can change while the model call is out and a newer call asks again: only the newest
+    // writes. A cleared key means the newer call found no model, so this answer still stands.
+    const current = () => (run.traceEvidence.get(check.id) ?? key) === key;
+    const outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null, current);
     // Not asked after all, so the run-end pass asks again; unless an overlapping pass cached newer evidence.
     if (outcome === "unavailable" && run.traceEvidence.get(check.id) === key) run.traceEvidence.delete(check.id);
   }
@@ -557,6 +560,8 @@ export class Engine {
     spanIds: string[],
     snap: TraceSnapshot,
     spanId: string | null,
+    /** False once a newer call about this question took over, so this one's result is stale and dropped. */
+    current: () => boolean = () => true,
   ): Promise<"unavailable" | void> {
     const dismissed = () => this.roots.store.latestFindingFor(run.traceId, check.id)?.status === "dismissed";
     if (dismissed()) return;
@@ -570,7 +575,7 @@ export class Engine {
         this.decisionDown = true;
         return "unavailable";
       }
-      if (dismissed()) return;
+      if (dismissed() || !current()) return;
       // A model error or timeout is a failed check, never a "no".
       const existing = this.roots.store.latestFindingFor(run.traceId, check.id);
       if (!existing || existing.status !== "failed") {
@@ -591,7 +596,7 @@ export class Engine {
       }
       return;
     }
-    if (dismissed()) return;
+    if (dismissed() || !current()) return;
     const answer = result.answers[check.id];
     const verdict = flagged(check, result);
     this.roots.store.insertDecision({
@@ -621,7 +626,7 @@ export class Engine {
       // A second look, with a quote that must be in the run, before anything is raised.
       if ((run.rejected.get(check.id) ?? 0) >= 3) return;
       const check2 = check.kind === "yes_no" ? await verifyFlag(this.llm, fillTemplate(check.ask, params) || check.ask, evidence) : undefined;
-      if (dismissed()) return;
+      if (dismissed() || !current()) return;
       if (check2 && !check2.verified) {
         run.rejected.set(check.id, (run.rejected.get(check.id) ?? 0) + 1);
         log.debug(`${check.id}: flag not confirmed on a second look${check2.quote ? ` (quote: ${clip(check2.quote, 80)})` : ""}`);
