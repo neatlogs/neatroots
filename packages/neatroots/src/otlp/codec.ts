@@ -61,9 +61,9 @@ function bytesToHex(b: Uint8Array | string | undefined | null, expectedLen: numb
     if (b.length === 0) return "";
     if (b.length === expectedLen * 2 && HEX_RE.test(b)) return b.toLowerCase();
     const buf = Buffer.from(b, "base64");
-    return buf.length ? buf.toString("hex") : "";
+    return buf.length === expectedLen ? buf.toString("hex") : "";
   }
-  return b.length ? Buffer.from(b).toString("hex") : "";
+  return b.length === expectedLen ? Buffer.from(b).toString("hex") : "";
 }
 
 function isZeroId(hex: string): boolean {
