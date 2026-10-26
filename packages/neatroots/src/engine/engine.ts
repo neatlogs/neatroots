@@ -36,7 +36,7 @@ import type { Plain } from "../otlp/types.js";
 import { preview } from "../semantics/view.js";
 import { log } from "../util/log.js";
 import { CheckProgress } from "./progress.js";
-import { addOccurrence, clearFailure, dropOccurrence, findingSpans, isOpenFinding, newFindingStatus, spanErrors } from "./findings.js";
+import { addOccurrence, clearFailure, dropOccurrence, findingSpans, isOpenFinding, newFindingStatus, recordFailure } from "./findings.js";
 import { verifyFlag } from "./verify.js";
 
 /** Default library questions when no LLM is available to plan. */
@@ -565,36 +565,8 @@ export class Engine {
       }
       if (dismissed()) return;
       // A model error or timeout is a failed check, never a "no".
-      // One row per check per run: a span whose call fails joins it (with its own error), so each stays listed.
-      const message = (err as Error).message;
-      const existing = this.roots.store.failedFindingsFor(run.traceId, check.id)[0];
-      if (existing) {
-        if (spanId && !existing.detail.span_id) {
-          // A whole-run row from when the check was trace-scope: this span's failure takes it over.
-          const f = this.roots.store.updateFinding(existing.id, { evidence_span_ids: spanIds, detail: { ...existing.detail, span_id: spanId, occurrences: [], error: message, errors: { [spanId]: message } } });
-          if (f) this.roots.bus.emit("finding", f);
-        } else if (spanId && !findingSpans(existing).includes(spanId)) {
-          const joined = addOccurrence(this.roots.store, existing, spanId, spanIds);
-          const errors = { ...spanErrors(existing), [spanId]: message };
-          const f = joined && this.roots.store.updateFinding(joined.id, { detail: { ...joined.detail, errors } });
-          if (f) this.roots.bus.emit("finding", f);
-        }
-      } else {
-        const f = this.roots.store.insertFinding({
-          trace_id: run.traceId,
-          check_id: check.id,
-          check_kind: "question",
-          title: checkTitle(check),
-          probability: null,
-          status: "failed",
-          evidence_span_ids: spanIds,
-          detail: { error: message, span_id: spanId, ...(spanId ? { errors: { [spanId]: message } } : {}) },
-          model: null,
-          triage_score: null,
-          explanation_id: null,
-        });
-        this.roots.bus.emit("finding", f);
-      }
+      const f = recordFailure(this.roots.store, { traceId: run.traceId, checkId: check.id, title: checkTitle(check), spanId, spanIds, message: (err as Error).message });
+      if (f) this.roots.bus.emit("finding", f);
       return;
     }
     if (dismissed()) return;

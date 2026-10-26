@@ -216,6 +216,44 @@ describe("a question that could not run, then did", () => {
     expect((await page(tb, t)).statuses).toEqual([]);
   });
 
+  it("shows the newest error when the same span fails again", async () => {
+    let next: Answer = "error:first failure";
+    const tb = await setup("span", () => next);
+    (tb.roots as unknown as { decisions: { isSlow: () => Promise<boolean> } }).decisions.isSlow = async () => false;
+    const t = hex(16);
+    const r = hex(8);
+    const tool = toolSpan(t, r, "lookup", '{"order":"1001"}', '{"ok":true}');
+    tb.roots.ingest([batch([tool, span({ traceId: t, spanId: r, name: "agent", kind: "workflow" }), markerSpan(t, r)])]);
+    await finish(tb, t);
+    const failed = async () => (await page(tb, t)).findings.filter((f) => f.status === "failed").map((f) => [f.detail.span_id, (f.detail as { error?: string }).error]);
+    expect(await failed()).toEqual([[tool.spanId, "first failure"]]);
+
+    next = "error:second failure";
+    await recheck(tb, t);
+    expect(await failed()).toEqual([[tool.spanId, "second failure"]]); // was "first failure"
+  });
+
+  it("records a whole-run failure on a row a span failure left, after the check changes to trace scope", async () => {
+    let next: Answer = "error:span call failed";
+    const tb = await setup("span", () => next);
+    (tb.roots as unknown as { decisions: { isSlow: () => Promise<boolean> } }).decisions.isSlow = async () => false;
+    const t = hex(16);
+    const r = hex(8);
+    const tool = toolSpan(t, r, "lookup", '{"order":"1001"}', '{"ok":true}');
+    tb.roots.ingest([batch([tool, span({ traceId: t, spanId: r, name: "agent", kind: "workflow" }), markerSpan(t, r)])]);
+    await finish(tb, t);
+    const failed = async () => (await page(tb, t)).findings.filter((f) => f.status === "failed").map((f) => [f.detail.span_id ?? null, (f.detail as { error?: string }).error]);
+    expect(await failed()).toEqual([[tool.spanId, "span call failed"]]);
+
+    tb.roots.checks.save(refundCheck("trace", "tool"), "user");
+    next = "error:run call failed";
+    await recheck(tb, t);
+    expect(await failed()).toEqual([[null, "run call failed"]]); // was the span's old row and error
+    next = "no";
+    await recheck(tb, t);
+    expect((await page(tb, t)).statuses).toEqual([]);
+  });
+
   it("keeps a span's row while that span is still unjudged, and drops it once it is", async () => {
     let failA = true;
     const tb = await setup("span", (evidence) => (evidence.includes("lookup_a") && failA ? "error" : "no"));

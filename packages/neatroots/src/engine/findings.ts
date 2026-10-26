@@ -48,6 +48,42 @@ export function newFindingStatus(store: Store, checkId: string, project: string)
 }
 
 /**
+ * A question's model call failed. A check keeps one failed row per run: a span's failure joins it
+ * with its own error (or refreshes that error), and a whole-run failure, or a span failing on a
+ * whole-run row (the check changed scope), replaces what the row says. Returns the row written.
+ */
+export function recordFailure(
+  store: Store,
+  x: { traceId: string; checkId: string; title: string; spanId: string | null; spanIds: string[]; message: string },
+): Finding | undefined {
+  const { spanId, message } = x;
+  const existing = store.failedFindingsFor(x.traceId, x.checkId)[0];
+  if (!existing) {
+    return store.insertFinding({
+      trace_id: x.traceId,
+      check_id: x.checkId,
+      check_kind: "question",
+      title: x.title,
+      probability: null,
+      status: "failed",
+      evidence_span_ids: x.spanIds,
+      detail: { error: message, span_id: spanId, ...(spanId ? { errors: { [spanId]: message } } : {}) },
+      model: null,
+      triage_score: null,
+      explanation_id: null,
+    });
+  }
+  if (!spanId || !existing.detail.span_id) {
+    const detail = { ...existing.detail, span_id: spanId, occurrences: [], error: message, errors: spanId ? { [spanId]: message } : {} };
+    return store.updateFinding(existing.id, { evidence_span_ids: x.spanIds, detail });
+  }
+  const row = findingSpans(existing).includes(spanId) ? existing : addOccurrence(store, existing, spanId, x.spanIds);
+  if (!row) return undefined;
+  const errors = { ...spanErrors(existing), [spanId]: message };
+  return store.updateFinding(row.id, { detail: { ...row.detail, errors, error: errors[String(row.detail.span_id)] ?? message } });
+}
+
+/**
  * A question got an answer, so it no longer "could not run" there: the span leaves the check's
  * failed row (one per run, listing the spans whose call failed), which goes once no span is left.
  * For a whole-run question the row just goes. Returns the rows changed or removed.
