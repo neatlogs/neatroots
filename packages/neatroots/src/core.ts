@@ -174,6 +174,7 @@ export class Roots {
 
   close(): void {
     clearInterval(this.sweeper);
+    this.relay.close();
     this.chats.close();
     clearInterval(this.quietSweeper);
     this.laya.stop();
