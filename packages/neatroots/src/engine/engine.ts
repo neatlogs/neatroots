@@ -545,8 +545,9 @@ export class Engine {
     if (run.traceEvidence.get(check.id) === key) return;
     run.traceEvidence.set(check.id, key);
     // Evidence can change while the model call is out and a newer call asks again: only the newest
-    // writes. A cleared key means the newer call found no model, so this answer still stands.
-    const current = () => (run.traceEvidence.get(check.id) ?? key) === key;
+    // writes. A cleared key means the newer call found no model, so this answer still stands. Re-run
+    // checks replaces the live run, so a call from before it is stale too.
+    const current = () => this.live.get(run.traceId) === run && (run.traceEvidence.get(check.id) ?? key) === key;
     const outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null, current);
     // Not asked after all, so the run-end pass asks again; unless an overlapping pass cached newer evidence.
     if (outcome === "unavailable" && run.traceEvidence.get(check.id) === key) run.traceEvidence.delete(check.id);

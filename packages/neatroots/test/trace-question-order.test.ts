@@ -14,6 +14,17 @@ afterEach(async () => {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const refundCheck = () =>
+  parseChecks(`
+- id: refund-claimed
+  kind: yes_no
+  scope: trace
+  title: Claimed a refund it did not make
+  ask: Did the agent claim a refund it did not make?
+  flag_at: 0.5
+  evidence: { spans: { type: [llm] } }
+`).checks[0];
+
 /** The first call is slow and answers `older`; a call that sees the second span answers `newer` at once. */
 async function race(older: "yes" | "error", newer: "no" | "unavailable" = "no") {
   const llm = await mockLlm({});
@@ -22,18 +33,7 @@ async function race(older: "yes" | "error", newer: "no" | "unavailable" = "no") 
     await tb.close();
     await llm.close();
   });
-  tb.roots.checks.save(
-    parseChecks(`
-- id: refund-claimed
-  kind: yes_no
-  scope: trace
-  title: Claimed a refund it did not make
-  ask: Did the agent claim a refund it did not make?
-  flag_at: 0.5
-  evidence: { spans: { type: [llm] } }
-`).checks[0],
-    "user",
-  );
+  tb.roots.checks.save(refundCheck(), "user");
   const decisions = (tb.roots as unknown as { decisions: { decide: (e: string, q: { name: string }[], o?: unknown) => Promise<unknown> } }).decisions;
   const real = decisions.decide.bind(decisions);
   const order: string[] = [];
@@ -75,6 +75,36 @@ describe("a trace question asked again while its first call is out", () => {
     const r = await race("error");
     expect(r.statuses).toEqual([]); // was ["failed"]
     expect(r.decisions).toEqual([0.05]);
+  });
+
+  it("drops the older answer when Re-run checks asked again while it was out", async () => {
+    const llm = await mockLlm({});
+    const tb = await makeRoots({ serve: true, llmUrl: llm.url });
+    cleanup.push(async () => {
+      await tb.close();
+      await llm.close();
+    });
+    tb.roots.checks.save(refundCheck(), "user");
+    const decisions = (tb.roots as unknown as { decisions: { decide: (e: string, q: { name: string }[], o?: unknown) => Promise<unknown> } }).decisions;
+    const real = decisions.decide.bind(decisions);
+    const order: string[] = [];
+    let asked = 0;
+    decisions.decide = async (evidence, questions, o) => {
+      if (!questions.some((q) => q.name === "refund-claimed")) return real(evidence, questions, o);
+      const first = ++asked === 1;
+      if (first) await sleep(1000);
+      order.push(first ? "older" : "recheck");
+      return { answers: { "refund-claimed": { probability: first ? 0.95 : 0.05 } }, backend: "llm", model: "mock", latencyMs: 1 };
+    };
+    const t = hex(16);
+    const r = hex(8);
+    tb.roots.ingest([batch([llmSpan(t, r, { user: "refund order 1001", out: "Refund issued: ref 77" })])]);
+    await until(() => asked >= 1);
+    void tb.roots.engine!.recheck(t);
+    await until(() => order.length >= 2, 10_000);
+    await tb.roots.engine!.waitIdle(t, 10_000);
+    expect(order).toEqual(["recheck", "older"]);
+    expect(tb.roots.store.findingsForTrace(t).filter((f) => f.check_id === "refund-claimed").map((f) => f.status)).toEqual([]); // was ["raised"]
   });
 
   it("keeps the older answer when the newer call found no model", async () => {
