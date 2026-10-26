@@ -326,7 +326,7 @@ export function manualSnippet(c: ClientDef, cmd = serverCommand()): string {
   return `// ${c.json!.file()}\n${JSON.stringify({ [KEY[shape]]: { [SERVER_NAME]: entryFor(shape, cmd) } }, null, 2)}`;
 }
 
-function shellQuote(s: string): string {
+export function shellQuote(s: string): string {
   return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
