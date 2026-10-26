@@ -12,7 +12,12 @@ afterEach(async () => {
   for (const c of cleanup.splice(0)) await c();
 });
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Holds the older call until the test lets it go, so it finishes after the newer call, whatever the timing. */
+function gate() {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  return { held, release };
+}
 
 const refundCheck = () =>
   parseChecks(`
@@ -25,7 +30,7 @@ const refundCheck = () =>
   evidence: { spans: { type: [llm] } }
 `).checks[0];
 
-/** The first call is slow and answers `older`; a call that sees the second span answers `newer` at once. */
+/** The first call is held and answers `older`; a call that sees the second span answers `newer` at once. */
 async function race(older: "yes" | "error", newer: "no" | "unavailable" = "no") {
   const llm = await mockLlm({});
   const tb = await makeRoots({ serve: true, llmUrl: llm.url });
@@ -37,12 +42,13 @@ async function race(older: "yes" | "error", newer: "no" | "unavailable" = "no") 
   const decisions = (tb.roots as unknown as { decisions: { decide: (e: string, q: { name: string }[], o?: unknown) => Promise<unknown> } }).decisions;
   const real = decisions.decide.bind(decisions);
   const order: string[] = [];
+  const first = gate();
   let asked = 0;
   decisions.decide = async (evidence, questions, o) => {
     if (!questions.some((q) => q.name === "refund-claimed")) return real(evidence, questions, o);
     asked++;
     const isNewer = evidence.includes("Refund issued: ref 77");
-    if (!isNewer) await sleep(1000);
+    if (!isNewer) await first.held;
     const a = isNewer ? newer : older;
     order.push(isNewer ? "newer" : "older");
     if (a === "unavailable") throw new DecisionUnavailableError("no decision model available");
@@ -55,6 +61,9 @@ async function race(older: "yes" | "error", newer: "no" | "unavailable" = "no") 
   await until(() => asked >= 1);
   // While the first call is out, the evidence changes.
   tb.roots.ingest([batch([llmSpan(t, r, { user: "confirm", out: "Refund issued: ref 77" })])]);
+  // The newer call's result is written in microtasks, before this poll's next timer turn: only then let the older go.
+  await until(() => order.includes("newer"), 10_000);
+  first.release();
   await until(() => order.length >= 2, 10_000);
   await tb.roots.engine!.waitIdle(t, 10_000);
   expect(order).toEqual(["newer", "older"]); // the race happened: the older call finished last
@@ -88,11 +97,12 @@ describe("a trace question asked again while its first call is out", () => {
     const decisions = (tb.roots as unknown as { decisions: { decide: (e: string, q: { name: string }[], o?: unknown) => Promise<unknown> } }).decisions;
     const real = decisions.decide.bind(decisions);
     const order: string[] = [];
+    const held = gate();
     let asked = 0;
     decisions.decide = async (evidence, questions, o) => {
       if (!questions.some((q) => q.name === "refund-claimed")) return real(evidence, questions, o);
       const first = ++asked === 1;
-      if (first) await sleep(1000);
+      if (first) await held.held;
       order.push(first ? "older" : "recheck");
       return { answers: { "refund-claimed": { probability: first ? 0.95 : 0.05 } }, backend: "llm", model: "mock", latencyMs: 1 };
     };
@@ -101,6 +111,8 @@ describe("a trace question asked again while its first call is out", () => {
     tb.roots.ingest([batch([llmSpan(t, r, { user: "refund order 1001", out: "Refund issued: ref 77" })])]);
     await until(() => asked >= 1);
     void tb.roots.engine!.recheck(t);
+    await until(() => order.includes("recheck"), 10_000);
+    held.release();
     await until(() => order.length >= 2, 10_000);
     await tb.roots.engine!.waitIdle(t, 10_000);
     expect(order).toEqual(["recheck", "older"]);
