@@ -276,6 +276,7 @@ export const TOOLS = [
       const d = spanDetail(roots, traceId, spanId)!;
       const doc = { name: d.name, kind: d.kind, status: d.status, input: d.view.input ?? null, output: d.view.output ?? null, error: d.view.error ?? null, attributes: d.attributes, events: d.events, resource: d.resource };
       const selected = a.path ? jsonPath(doc, a.path) : doc;
+      if (selected === undefined) return { trace_id: traceId, span_id: spanId, path: a.path ?? "$", note: `the path ${a.path} matched nothing in this span`, ...fallbackNote(r) };
       const text = typeof selected === "string" ? selected : JSON.stringify(selected, null, 1);
       const offset = a.offset ?? 0;
       const limit = a.limit ?? 6000;
