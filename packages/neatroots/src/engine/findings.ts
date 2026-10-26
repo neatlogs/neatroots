@@ -55,8 +55,10 @@ export function newFindingStatus(store: Store, checkId: string, project: string)
 export function clearFailure(store: Store, traceId: string, checkId: string, spanId: string | null): Finding[] {
   const changed: Finding[] = [];
   for (const f of store.failedFindingsFor(traceId, checkId)) {
-    if (spanId && !findingSpans(f).includes(spanId)) continue;
-    const rest = spanId ? dropOccurrence(store, f, spanId) : undefined;
+    // A whole-run row (no span: the check was trace-scope when it failed) goes on any answer.
+    const wholeRun = !f.detail.span_id;
+    if (spanId && !wholeRun && !findingSpans(f).includes(spanId)) continue;
+    const rest = spanId && !wholeRun ? dropOccurrence(store, f, spanId) : undefined;
     if (!rest) {
       store.deleteFinding(f.id);
       changed.push(f);

@@ -569,7 +569,11 @@ export class Engine {
       const message = (err as Error).message;
       const existing = this.roots.store.failedFindingsFor(run.traceId, check.id)[0];
       if (existing) {
-        if (spanId && !findingSpans(existing).includes(spanId)) {
+        if (spanId && !existing.detail.span_id) {
+          // A whole-run row from when the check was trace-scope: this span's failure takes it over.
+          const f = this.roots.store.updateFinding(existing.id, { evidence_span_ids: spanIds, detail: { ...existing.detail, span_id: spanId, occurrences: [], error: message, errors: { [spanId]: message } } });
+          if (f) this.roots.bus.emit("finding", f);
+        } else if (spanId && !findingSpans(existing).includes(spanId)) {
           const joined = addOccurrence(this.roots.store, existing, spanId, spanIds);
           const errors = { ...spanErrors(existing), [spanId]: message };
           const f = joined && this.roots.store.updateFinding(joined.id, { detail: { ...joined.detail, errors } });

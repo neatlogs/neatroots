@@ -16,6 +16,17 @@ afterEach(async () => {
 
 type Answer = "error" | `error:${string}` | "no" | "yes";
 
+const refundCheck = (scope: "trace" | "span", spans: "tool" | "llm" = scope === "span" ? "tool" : "llm") =>
+  parseChecks(`
+- id: refund-claimed
+  kind: yes_no
+  scope: ${scope}
+  title: Claimed a refund it did not make
+  ask: Did the agent claim a refund it did not make?
+  flag_at: 0.5
+  evidence: { spans: { type: [${spans}] } }
+`).checks[0];
+
 /** A served neatroots with one question whose answer each call is decided by `answer(evidence)`. */
 async function setup(scope: "trace" | "span", answer: (evidence: string) => Answer) {
   const llm = await mockLlm({});
@@ -24,18 +35,7 @@ async function setup(scope: "trace" | "span", answer: (evidence: string) => Answ
     await tb.close();
     await llm.close();
   });
-  tb.roots.checks.save(
-    parseChecks(`
-- id: refund-claimed
-  kind: yes_no
-  scope: ${scope}
-  title: Claimed a refund it did not make
-  ask: Did the agent claim a refund it did not make?
-  flag_at: 0.5
-  evidence: { spans: { type: [${scope === "span" ? "tool" : "llm"}] } }
-`).checks[0],
-    "user",
-  );
+  tb.roots.checks.save(refundCheck(scope), "user");
   const decisions = (tb.roots as unknown as { decisions: { decide: (e: string, q: { name: string }[], o?: unknown) => Promise<unknown> } }).decisions;
   const real = decisions.decide.bind(decisions);
   decisions.decide = async (evidence, questions, o) => {
@@ -174,6 +174,46 @@ describe("a question that could not run, then did", () => {
     expect(await failedSpans()).toEqual([a.spanId]);
     const row = (await page(tb, t)).findings.find((f) => f.status === "failed")!;
     expect((row.detail as { error?: string }).error).toBe("error about lookup_a");
+  });
+
+  it("clears a whole-run row when the check, now about single spans, gets an answer", async () => {
+    // The check was trace-scope when its call failed (a row with no span), then edited to span scope.
+    let next: Answer = "error";
+    const tb = await setup("trace", () => next);
+    tb.roots.checks.save(refundCheck("trace", "tool"), "user");
+    (tb.roots as unknown as { decisions: { isSlow: () => Promise<boolean> } }).decisions.isSlow = async () => false;
+    const t = hex(16);
+    const r = hex(8);
+    tb.roots.ingest([batch([toolSpan(t, r, "lookup", '{"order":"1001"}', '{"ok":true}'), span({ traceId: t, spanId: r, name: "agent", kind: "workflow" }), markerSpan(t, r)])]);
+    await finish(tb, t);
+    const rows = async () => (await page(tb, t)).findings.filter((f) => f.check_id === "refund-claimed").map((f) => [f.status, f.detail.span_id ?? null]);
+    expect(await rows()).toEqual([["failed", null]]);
+
+    tb.roots.checks.save(refundCheck("span"), "user");
+    next = "no";
+    await recheck(tb, t);
+    expect(await rows()).toEqual([]); // was [["failed", null]]
+  });
+
+  it("lets a span's failure take over a whole-run row, with its own span and error", async () => {
+    let next: Answer = "error";
+    const tb = await setup("trace", () => next);
+    tb.roots.checks.save(refundCheck("trace", "tool"), "user");
+    (tb.roots as unknown as { decisions: { isSlow: () => Promise<boolean> } }).decisions.isSlow = async () => false;
+    const t = hex(16);
+    const r = hex(8);
+    const tool = toolSpan(t, r, "lookup", '{"order":"1001"}', '{"ok":true}');
+    tb.roots.ingest([batch([tool, span({ traceId: t, spanId: r, name: "agent", kind: "workflow" }), markerSpan(t, r)])]);
+    await finish(tb, t);
+
+    tb.roots.checks.save(refundCheck("span"), "user");
+    next = "error:span call failed";
+    await recheck(tb, t);
+    const failed = (await page(tb, t)).findings.filter((f) => f.status === "failed");
+    expect(failed.map((f) => [f.detail.span_id, (f.detail as { error?: string }).error])).toEqual([[tool.spanId, "span call failed"]]);
+    next = "no";
+    await recheck(tb, t);
+    expect((await page(tb, t)).statuses).toEqual([]);
   });
 
   it("keeps a span's row while that span is still unjudged, and drops it once it is", async () => {
