@@ -491,6 +491,28 @@ describe("server", () => {
     expect(tb.roots.config.llm.external).toMatchObject({ model: "m", fallbackToLocal: true });
   });
 
+  it("refuses non-string LLM settings instead of saving a value that breaks GET /api/llm", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const save = (b: unknown) => fetch(`${tb.url}/api/settings`, { method: "POST", headers, body: JSON.stringify(b) });
+    const before = { llm: { ...tb.roots.config.llm }, classifierUrl: tb.roots.config.classifier.baseUrl };
+    expect((await fetch(`${tb.url}/api/llm`)).status).toBe(200);
+    for (const [field, message] of [
+      ["llm_model", "llm_model must be a string"],
+      ["llm_base_url", "llm_base_url must be a string"],
+      ["classifier_url", "classifier_url must be a string"],
+    ] as const) {
+      const r = await save({ [field]: 123 }); // was 200, and GET /api/llm then returned 500
+      expect(r.status, field).toBe(400);
+      expect(((await r.json()) as { error: string }).error).toBe(message);
+    }
+    expect(tb.roots.config.llm).toEqual(before.llm);
+    expect(tb.roots.config.classifier.baseUrl).toBe(before.classifierUrl);
+    expect((await fetch(`${tb.url}/api/llm`)).status).toBe(200);
+    expect((await save({ llm_model: "m", llm_base_url: "http://127.0.0.1:9/v1" })).status).toBe(200);
+    expect(tb.roots.config.llm).toMatchObject({ model: "m", baseUrl: "http://127.0.0.1:9/v1" });
+  });
+
   it("clamps the findings list limit instead of failing on a bad value", async () => {
     const tb = await served();
     const { t, root, batches } = sampleRun();

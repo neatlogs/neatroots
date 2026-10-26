@@ -282,6 +282,9 @@ export function mountApi(app: Hono, roots: Roots): void {
     for (const field of ["forward", "steering_enabled", "jev_cloud_enabled", "laya_enabled"] as const) {
       if (b[field] !== undefined && typeof b[field] !== "boolean") return err(c, 400, `${field} must be a boolean`);
     }
+    for (const field of ["llm_model", "llm_base_url", "classifier_url"] as const) {
+      if (b[field] !== undefined && typeof b[field] !== "string") return err(c, 400, `${field} must be a string`);
+    }
     if (b.project && b.steering !== undefined && !STEERING_MODES.includes(b.steering)) return err(c, 400, `steering must be one of ${STEERING_MODES.join(", ")}`);
     if (b.classifier_backend && !["auto", "laya", "jev", "jev-cloud", "llm"].includes(b.classifier_backend)) return err(c, 400, "classifier_backend must be auto, laya, jev, jev-cloud or llm");
     if (b.cloud_endpoint && !allowedEndpoint(b.cloud_endpoint)) return err(c, 400, "cloud endpoint must be an https://*.neatlogs.com URL (or localhost for testing)");
