@@ -8,7 +8,6 @@ import type { ChatMessage } from "../models/llm.js";
 import type { Plain } from "../otlp/types.js";
 import { attr } from "../otlp/types.js";
 import { isSystemRole, preview } from "../semantics/view.js";
-import { log } from "../util/log.js";
 
 // Replays. An LLM-call replay re-sends one LLM span's messages (as edited) to the configured LLM
 // and stores the answer as a new run; no agent needed. A run replay re-runs the whole agent with
@@ -288,7 +287,15 @@ export class Replays {
               : `couldn't start the rerun command: ${error.message}`,
           );
         }
-        if (code !== 0) log.info(`replay ${r.id}: the agent exited with ${code}`);
+        if (code !== 0) {
+          const detail = code === null ? "was terminated" : `exited with ${code}`;
+          const output = tail.trim();
+          return this.finish(r, {
+            state: "failed",
+            error: `the agent command ${detail}${output ? `: ${output.slice(-300)}` : ""}`,
+            log_tail: tail || null,
+          });
+        }
       }
       // Spans arrive on the SDK's flush interval; give the run a moment to land.
       for (let i = 0; i < 20 && !linked; i++) {
