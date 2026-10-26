@@ -156,6 +156,8 @@ function pickSpans<S extends { id: string }>(spans: S[], ids: string[], traceId:
 
 /** A run with no new spans for this long is treated as ended: its end never arrived (issue #213). */
 export const QUIET_RUN_MS = 30 * 60_000;
+/** Quiet runs ended per sweep, so a backlog (the first start after an update) is worked off a batch a minute. */
+export const QUIET_SWEEP_LIMIT = 50;
 
 export class Engine {
   private live = new Map<string, LiveRun>();
@@ -163,6 +165,8 @@ export class Engine {
   private jobs = new Map<string, number>();
   private idleWaiters = new Map<string, (() => void)[]>();
   private decisionDown = false;
+  /** The quiet-run sweep in progress; a sweep that starts meanwhile waits for it instead of running alongside. */
+  private quietSweep?: Promise<void>;
   readonly progress: CheckProgress;
 
   constructor(
@@ -1061,14 +1065,22 @@ ${library}`;
    * Ends runs that went quiet without an end: marks each one interrupted ("no end received")
    * and runs its end-of-run pass on the spans that did arrive, so it does not sit "running"
    * forever (issue #213). Runs at startup and on a timer; resumeUnfinished then treats these
-   * like any other ended run.
+   * like any other ended run. One sweep at a time, at most `limit` runs each, most recent first,
+   * so a large backlog doesn't stack up model calls.
    */
-  async endQuietRuns(quietMs = QUIET_RUN_MS): Promise<void> {
+  endQuietRuns(quietMs = QUIET_RUN_MS, limit = QUIET_SWEEP_LIMIT): Promise<void> {
+    this.quietSweep ??= this.sweepQuietRuns(quietMs, limit).finally(() => {
+      this.quietSweep = undefined;
+    });
+    return this.quietSweep;
+  }
+
+  private async sweepQuietRuns(quietMs: number, limit: number): Promise<void> {
     const now = Date.now();
     const cutoff = now - quietMs;
-    for (const run of this.roots.store.quietRuns(quietMs, now)) {
-      // Only recheck when this sweep actually marked the run - an overlapping sweep
-      // that already claimed it must not repeat the end-of-run model calls.
+    for (const run of this.roots.store.quietRuns(quietMs, now, limit)) {
+      // Only recheck when this sweep actually marked the run - one that reported since it
+      // was listed stays running, and one already claimed must not repeat the model calls.
       if (this.roots.store.markRunInterrupted(run.trace_id, "no end received", cutoff)) await this.recheck(run.trace_id, { resume: true });
     }
   }

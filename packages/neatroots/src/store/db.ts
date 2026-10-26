@@ -795,9 +795,9 @@ export class Store {
     return this.db.prepare("SELECT * FROM runs WHERE trace_id = ?").get(traceId) as RunRow | undefined;
   }
 
-  /** Runs still marked running, with no completion marker, that sent nothing for `quietMs` - their end never arrived (issue #213). */
-  quietRuns(quietMs: number, now = Date.now()): RunRow[] {
-    return this.db.prepare("SELECT * FROM runs WHERE status = 'running' AND doctor = 0 AND complete = 0 AND updated_ms < ?").all(now - quietMs) as RunRow[];
+  /** Runs still marked running, with no completion marker, that sent nothing for `quietMs` - their end never arrived (issue #213). The most recently active come first. */
+  quietRuns(quietMs: number, now = Date.now(), limit = -1): RunRow[] {
+    return this.db.prepare("SELECT * FROM runs WHERE status = 'running' AND doctor = 0 AND complete = 0 AND updated_ms < ? ORDER BY updated_ms DESC LIMIT ?").all(now - quietMs, limit) as RunRow[];
   }
 
   /**

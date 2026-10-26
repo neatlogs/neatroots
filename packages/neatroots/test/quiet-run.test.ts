@@ -128,4 +128,31 @@ describe("quiet runs (issue #213)", () => {
     expect(row.termination_reason).toBeNull();
     expect(row.status).not.toBe("interrupted");
   });
+
+  it("works off a backlog one sweep at a time, a batch per sweep, most recent first", async () => {
+    const llm = await mockLlm({ yesWhen: [] });
+    const tb = await makeRoots({ llmUrl: llm.url });
+    cleanup.push(async () => {
+      await tb.close();
+      await llm.close();
+    });
+    // five runs left "running" by an older version, the newest went quiet last
+    const runs = Array.from({ length: 5 }, (_, i) => {
+      const t = hex(16);
+      tb.roots.ingest([batch([llmSpan(t, hex(8), { user: `stuck ${i}` })])]);
+      tb.roots.store.db.prepare("UPDATE runs SET updated_ms = ? WHERE trace_id = ?").run(Date.now() - (60 - i) * 60_000, t);
+      return t;
+    });
+    const status = () => runs.map((t) => tb.roots.store.getRun(t)!.status);
+
+    // the timer fires again while the first sweep is still working: it joins that sweep
+    const first = tb.roots.engine!.endQuietRuns(30 * 60_000, 2);
+    expect(tb.roots.engine!.endQuietRuns(30 * 60_000, 2)).toBe(first);
+    await first;
+    expect(status()).toEqual(["running", "running", "running", "interrupted", "interrupted"]);
+
+    await tb.roots.engine!.endQuietRuns(30 * 60_000, 2);
+    await tb.roots.engine!.endQuietRuns(30 * 60_000, 2);
+    expect(status().every((s) => s === "interrupted")).toBe(true);
+  });
 });
