@@ -1259,7 +1259,12 @@ ${library}`;
     if (opts.spanIds?.length) {
       const spans = pickSpans(snap.spans, opts.spanIds, traceId);
       const g = runGoal(snap);
-      text = [g.user ? `User request: ${clip(g.user, 600)}` : "", "Spans:", ...spans.map((s) => describeSpan(s, ["input", "output", "status", "error"]))].filter(Boolean).join("\n");
+      text = [
+        g.system ? `System prompt: ${clip(g.system, 900)}` : "",
+        g.user ? `User request: ${clip(g.user, 600)}` : "",
+        "Spans:",
+        ...spans.map((s) => describeSpan(s, ["input", "output", "status", "error"])),
+      ].filter(Boolean).join("\n");
       spanIds = spans.map((s) => s.id);
     } else {
       const ev = buildEvidence(snap, { fields: ["input", "output", "status", "error"], last: 15, final_output: snap.run?.status !== "running" });
