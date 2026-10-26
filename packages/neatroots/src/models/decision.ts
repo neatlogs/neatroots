@@ -302,11 +302,10 @@ export class LlmDecisionBackend implements DecisionBackend {
       if (q.type === "score") {
         prompt += "Levels:\n" + (q.levels ?? []).map((l, i) => `${i}: ${l}`).join("\n") + "\nAnswer with the level number.";
       }
-      // Hosted models that give no logprobs state their confidence instead.
-      const askConfidence = !this.llm.logprobs;
-      if (askConfidence) prompt += `\nAlso give "confidence": how likely your answer is right, from 0 to 1.`;
-      const properties: Record<string, unknown> = { answer: { type: "string", enum: labels } };
-      if (askConfidence) properties.confidence = { type: "number" };
+      // Token logprobs are preferred, but stated confidence remains the fallback when a provider
+      // advertises logprobs and then rejects or omits them.
+      prompt += `\nAlso give "confidence": how likely your answer is right, from 0 to 1.`;
+      const properties: Record<string, unknown> = { answer: { type: "string", enum: labels }, confidence: { type: "number" } };
       try {
         const r = await this.llm.chat(
           [
@@ -314,8 +313,8 @@ export class LlmDecisionBackend implements DecisionBackend {
             { role: "user", content: prompt },
           ],
           {
-            schema: { name: "answer", schema: { type: "object", properties, required: askConfidence ? ["answer", "confidence"] : ["answer"] } },
-            maxTokens: askConfidence ? 48 : 24,
+            schema: { name: "answer", schema: { type: "object", properties, required: ["answer", "confidence"] } },
+            maxTokens: 48,
             logprobs: true,
             topLogprobs: 10,
             timeoutSec: 60,
@@ -328,14 +327,13 @@ export class LlmDecisionBackend implements DecisionBackend {
         const said = String(parsed.answer ?? "").trim().toLowerCase();
         const chosen = labels.find((l) => l.toLowerCase() === said) ?? "";
         const stated = typeof parsed.confidence === "number" && parsed.confidence >= 0 && parsed.confidence <= 1 ? parsed.confidence : undefined;
-        const conf = stated ?? 0.85;
         // No readable answer (prose instead of JSON): the check fails rather than reading as 50/50,
         // which would count as "yes".
-        if (!labels.includes(chosen)) throw new Error(`the model's answer couldn't be read (${JSON.stringify(String(r.text ?? "").slice(0, 80))})`);
+        if (!labels.includes(chosen)) throw new Error(`invalid answer: the model's answer couldn't be read (${JSON.stringify(String(r.text ?? "").slice(0, 80))})`);
+        const tokenDist = r.logprobs && distributionFromLogprobs(labels, r.logprobs, chosen);
+        if (!tokenDist && stated === undefined) throw new Error(`LLM returned no usable confidence for ${q.name}`);
         const dist =
-          (r.logprobs && distributionFromLogprobs(labels, r.logprobs, chosen)) ??
-          // No logprobs: the stated confidence, or a fixed one, becomes the probability of the chosen label.
-          Object.fromEntries(labels.map((l) => [l, l === chosen ? conf : labels.length > 1 ? (1 - conf) / (labels.length - 1) : 0]));
+          tokenDist ?? Object.fromEntries(labels.map((l) => [l, l === chosen ? stated! : labels.length > 1 ? (1 - stated!) / (labels.length - 1) : 0]));
         answers[q.name] = answerFromDistribution(q, q.type === "score" ? dist : shrinkDistribution(dist));
       } catch (err) {
         if (err instanceof LlmUnavailableError) throw new DecisionUnavailableError(err.message);
