@@ -10,6 +10,7 @@ import type { SteeringHub } from "../steering/hub.js";
 import {
   buildEvidence,
   describeSpan,
+  type BuiltEvidence,
   finalOutput,
   loadTrace,
   matchesSelector,
@@ -61,6 +62,11 @@ const RULE_GRACE_MS = 250;
 
 /** Triage at or above this expected level gets an LLM investigation. */
 const INVESTIGATE_AT = 2.5;
+
+/** A session question is judged over at most this many earlier runs of the session (the newest ones). */
+const SESSION_RUN_LOOKBACK = 25;
+const SESSION_EARLIER_SPANS = 6;
+const SESSION_EARLIER_BUDGET = 2000;
 
 interface LiveRun {
   traceId: string;
@@ -359,7 +365,8 @@ export class Engine {
 
   private scheduleQuestions(run: LiveRun, snap: TraceSnapshot, fresh: SpanInfo[]): void {
     for (const { check, params } of this.questionsFor(run)) {
-      if (check.when === "end") continue;
+      // Session questions judge across runs, so they only run at run end, never live.
+      if (check.when === "end" || check.scope === "session") continue;
       const sel = check.evidence?.spans;
       if (check.scope === "span") {
         const queue = run.spanQueue.get(check.id) ?? [];
@@ -545,6 +552,66 @@ export class Engine {
     if (run.traceEvidence.get(check.id) === key) return;
     run.traceEvidence.set(check.id, key);
     const outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null);
+    // Not asked after all, so the run-end pass asks again; unless an overlapping pass cached newer evidence.
+    if (outcome === "unavailable" && run.traceEvidence.get(check.id) === key) run.traceEvidence.delete(check.id);
+  }
+
+  /** The session's earlier runs' spans, oldest run first, read run by run (bounded to the newest
+   * SESSION_RUN_LOOKBACK finished runs). Span ids can repeat across traces, so they are never used to
+   * tell a run's spans from the current run's. */
+  private sessionEarlierSpans(traceId: string, snap: TraceSnapshot): SpanInfo[] {
+    const sessionId = snap.run?.session_id;
+    if (!sessionId) return [];
+    // Only turns that started before this run: rechecking an older run must not see the future.
+    const startedMs = snap.run?.started_ms;
+    // Running turns are excluded in the query, so they can't push finished ones out of the limit.
+    const earlier = this.roots.store
+      .listRuns({ sessionId, excludeStatus: "running", limit: SESSION_RUN_LOOKBACK + 1, ...(startedMs ? { untilMs: startedMs - 1 } : {}) })
+      .filter((r) => r.trace_id !== traceId)
+      .reverse();
+    const spans: SpanInfo[] = [];
+    for (const r of earlier) spans.push(...loadTrace(this.roots.store, r.trace_id).spans);
+    return spans;
+  }
+
+  /** Evidence for a session question: the run in hand under the usual limits, plus a bounded tail of
+   * the earlier turns' spans. `evidence.last` over a merged list would let a busy current run crowd
+   * the earlier turns out, and those turns are the point of a session question. */
+  private sessionEvidence(check: QuestionCheck, snap: TraceSnapshot): BuiltEvidence & { ownSpanIds: string[] } {
+    const earlierSpans = this.sessionEarlierSpans(snap.traceId, snap);
+    const own = buildEvidence(snap, { ...check.evidence, final_output: false });
+    const ev = { ...own, ownSpanIds: [...own.spanIds] };
+    if (earlierSpans.length) {
+      const earlier = buildEvidence(
+        { traceId: snap.traceId, run: snap.run, spans: earlierSpans },
+        { spans: check.evidence?.spans, fields: check.evidence?.fields, last: SESSION_EARLIER_SPANS, goal: false },
+        { budget: SESSION_EARLIER_BUDGET },
+      );
+      if (earlier.spanIds.length) {
+        ev.text = `Earlier turns in this session:\n${earlier.text}\n\nCurrent run:\n${ev.text}`;
+        ev.spanIds = [...earlier.spanIds, ...ev.spanIds];
+      }
+    }
+    return ev;
+  }
+
+  /** A session question is judged at each run's end over the session's spans so far, oldest first.
+   * The finding pins to the run in hand (findings are per trace), with evidence from that run. */
+  private async askSession(run: LiveRun, check: QuestionCheck, params: Record<string, string>, snap: TraceSnapshot): Promise<void> {
+    // The final answer must be this run's: the merged spans' first root is the session's oldest turn.
+    const ev = this.sessionEvidence(check, snap);
+    if (check.evidence?.final_output) {
+      const out = finalOutput(snap);
+      if (out) ev.text += `\n\nFinal answer (this run): ${clip(out, 1500)}`;
+    }
+    // Ask only when this run has something to judge: a finding pins to this run's spans, so earlier
+    // turns alone would raise one with empty evidence_span_ids.
+    if (!ev.ownSpanIds.length && !(check.evidence?.final_output && finalOutput(snap))) return;
+    const key = ev.spanIds.join(",") + (check.evidence?.final_output ? `|${finalOutput(snap) ?? ""}` : "");
+    if (run.traceEvidence.get(check.id) === key) return;
+    run.traceEvidence.set(check.id, key);
+    const pinIds = ev.ownSpanIds;
+    const outcome = await this.decideAndApply(run, check, params, ev.text, pinIds, snap, null);
     // Not asked after all, so the run-end pass asks again; unless an overlapping pass cached newer evidence.
     if (outcome === "unavailable" && run.traceEvidence.get(check.id) === key) run.traceEvidence.delete(check.id);
   }
@@ -1018,7 +1085,7 @@ ${library}`;
         id,
         kind: "yes_no",
         title: clip(q.ask, 80),
-        scope: q.scope === "span" ? "span" : "trace",
+        scope: q.scope === "span" ? "span" : q.scope === "session" ? "session" : "trace",
         ask: q.ask,
         evidence: { spans: { type: types }, fields: ["input", "output", "status", "error"], last: q.scope === "span" ? undefined : 12 },
         flag_at: 0.8,
@@ -1106,6 +1173,8 @@ ${library}`;
         run.spanQueue.set(check.id, queue);
         await this.drainSpanQueue(run, check, params);
         await this.retryFailedSpans(run, check, params);
+      } else if (check.scope === "session") {
+        await this.askSession(run, check, params, snap);
       } else {
         await this.askTrace(run, check, params, snap);
       }
@@ -1266,13 +1335,28 @@ ${library}`;
     truncated: boolean;
   }> {
     const limit = opts.limit ?? 50;
+    const sessionQ = !isRule(check) && check.scope === "session";
     // Only runs the check would watch: the engine skips runs outside its applies_to, so a preview
     // over them would report hits the check can never raise. Look further back to still fill `limit`.
-    const runs = this.roots.store
-      .listRuns({ workflow: opts.workflow, project: opts.project, limit: check.applies_to ? 500 : limit })
+    const eligible = this.roots.store
+      .listRuns({ workflow: opts.workflow, project: opts.project, limit: check.applies_to || sessionQ ? 500 : limit })
       .filter((r) => r.status !== "running")
-      .filter((r) => this.appliesTo(check, { project: r.project ?? "unknown", workflow: r.workflow ?? r.project ?? "unknown" }))
-      .slice(0, limit);
+      .filter((r) => this.appliesTo(check, { project: r.project ?? "unknown", workflow: r.workflow ?? r.project ?? "unknown" }));
+    // A session question is previewed once per session, on its newest run: pick distinct sessions
+    // before the limit, so one chatty session can't crowd the others out of the window.
+    const runs: typeof eligible = [];
+    if (sessionQ) {
+      const seen = new Set<string>();
+      for (const r of eligible) {
+        const sid = r.session_id ?? r.trace_id;
+        if (seen.has(sid)) continue;
+        seen.add(sid);
+        runs.push(r);
+        if (runs.length >= limit) break;
+      }
+    } else {
+      runs.push(...eligible.slice(0, limit));
+    }
     const deadline = Date.now() + (opts.timeBudgetMs ?? 90_000);
     const hits: { trace_id: string; probability: number | null; evidence_span_ids: string[]; root_name: string | null }[] = [];
     let checked = 0;
@@ -1288,14 +1372,20 @@ ${library}`;
       }
       const targets = check.scope === "span" ? selectSpans(snap.spans, check.evidence?.spans).slice(-5) : [undefined];
       for (const focus of targets) {
-        const ev = buildEvidence(snap, check.evidence, { focus });
-        if (!ev.spanIds.length && !check.evidence?.final_output) continue;
+        // The final answer must be this run's: the merged session spans' first root is the oldest turn.
+        const sess = !isRule(check) && check.scope === "session" ? this.sessionEvidence(check, snap) : undefined;
+        const ev = sess ?? buildEvidence(snap, check.evidence, { focus });
+        if (check.scope === "session" && check.evidence?.final_output) {
+          const out = finalOutput(snap);
+          if (out) ev.text += `\n\nFinal answer (this run): ${clip(out, 1500)}`;
+        }
+        if (sess ? !sess.ownSpanIds.length && !(check.evidence?.final_output && finalOutput(snap)) : !ev.spanIds.length && !check.evidence?.final_output) continue;
         try {
           if (opts.signal?.aborted) break;
           const res = await this.decisions.decide(ev.text, [toQuestion(check, check.params ?? {})], { priority: "interactive", signal: opts.signal });
           const v = flagged(check, res);
           if (v.flagged) {
-            hits.push({ trace_id: r.trace_id, probability: v.probability, evidence_span_ids: ev.spanIds, root_name: r.root_name });
+            hits.push({ trace_id: r.trace_id, probability: v.probability, evidence_span_ids: sess ? sess.ownSpanIds : ev.spanIds, root_name: r.root_name });
             break;
           }
         } catch (err) {
