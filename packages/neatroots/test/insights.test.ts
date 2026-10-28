@@ -40,6 +40,16 @@ const CHECKS = [
   { id: "secret-in-output", title: "Something that looks like a secret key in model output", kind: "rule", enabled: true },
 ];
 
+/** One run of a named project and workflow: `batch()` names both after the service, so split them. */
+function scopedRun(st: Store, project: string, workflow: string): string {
+  const t = hex(16);
+  const root = hex(8);
+  const b = batch([llmSpan(t, root, { user: "refund 1001" }), span({ traceId: t, spanId: root, name: "agent", kind: "workflow" })], project);
+  b.resource.attributes = b.resource.attributes.map((a) => (a.key === "neatlogs.workflow_name" ? { key: a.key, value: { stringValue: workflow } } : a));
+  st.ingest([b]);
+  return t;
+}
+
 describe("insights", () => {
   it("aggregates runs, problems, tools, models and passing checks from the data", () => {
     const st = store();
@@ -106,5 +116,34 @@ describe("insights", () => {
     const data = JSON.stringify(digestData(computeInsights(st.db, "24h", CHECKS)));
     expect(groundedNumbers("lookup_order failed on 1 of 1 calls (100 percent).", data)).toBe(true);
     expect(groundedNumbers("Problems rose 340% this week.", data)).toBe(false);
+  });
+
+  it("counts a rule only against the runs it watches (#260)", () => {
+    const st = store();
+    const billingOnly = [{ id: "billing-only", title: "billing only", kind: "rule", enabled: true, applies_to: { project: "billing-agent" } }];
+
+    // A search-agent run and no billing-agent run: the rule never ran, so it found nothing on
+    // nothing and must not appear. It used to be handed the window's whole run count.
+    scopedRun(st, "search-agent", "refund");
+    const none = computeInsights(st.db, "24h", billingOnly);
+    expect(none.totals.runs).toBe(1);
+    expect(none.passing.map((p) => p.check_id)).not.toContain("billing-only");
+
+    // With one billing run in the window it ran on that one, not on both.
+    scopedRun(st, "billing-agent", "refund");
+    const one = computeInsights(st.db, "24h", billingOnly);
+    expect(one.totals.runs).toBe(2);
+    expect(one.passing.find((p) => p.check_id === "billing-only")?.runs).toBe(1);
+
+    // Both selectors set: only the run that matches both counts.
+    const both = [{ id: "billing-refund", title: "billing refund", kind: "rule", enabled: true, applies_to: { project: "billing-agent", workflow: "refund" } }];
+    scopedRun(st, "billing-agent", "charge");
+    const scoped = computeInsights(st.db, "24h", both);
+    expect(scoped.totals.runs).toBe(3);
+    expect(scoped.passing.find((p) => p.check_id === "billing-refund")?.runs).toBe(1);
+
+    // A rule with no applies_to still counts every run, as it did.
+    const everywhere = [{ id: "everywhere", title: "everywhere", kind: "rule", enabled: true }];
+    expect(computeInsights(st.db, "24h", everywhere).passing.find((p) => p.check_id === "everywhere")?.runs).toBe(3);
   });
 });

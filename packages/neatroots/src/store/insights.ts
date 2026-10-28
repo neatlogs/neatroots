@@ -1,4 +1,6 @@
 import type Database from "better-sqlite3";
+import { checkAppliesTo } from "../checks/scope.js";
+import type { AppliesTo } from "../checks/types.js";
 
 /**
  * Aggregates over a time window, compared with the window before it. Everything here is
@@ -21,6 +23,8 @@ export interface CheckInfo {
   title: string;
   kind: string;
   enabled: boolean;
+  /** Which runs the check watches; without it a rule was counted against every run in the window. */
+  applies_to?: AppliesTo;
 }
 
 export interface Totals {
@@ -94,6 +98,9 @@ export interface Insights {
 interface RunRec {
   trace_id: string;
   project: string;
+  /** The run's own project and workflow, before the display fallback, for applies_to. */
+  p: string | null;
+  wf: string | null;
   status: string;
   t: number;
   dur: number | null;
@@ -126,7 +133,7 @@ function slice(db: Database.Database, from: number, to: number) {
   const p = { from, to };
   const runs = db
     .prepare(
-      `SELECT trace_id, COALESCE(project, workflow, 'unknown') AS project, status, COALESCE(started_ms, received_ms) AS t,
+      `SELECT trace_id, COALESCE(project, workflow, 'unknown') AS project, project AS p, workflow AS wf, status, COALESCE(started_ms, received_ms) AS t,
         CASE WHEN ended_ms IS NOT NULL AND started_ms IS NOT NULL THEN ended_ms - started_ms END AS dur,
         total_tokens, llm_calls, tool_calls
        FROM runs WHERE doctor = 0 AND COALESCE(started_ms, received_ms) >= @from AND COALESCE(started_ms, received_ms) < @to
@@ -306,7 +313,16 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
     )
     .all({ from, to: until }) as { check_id: string; runs: number }[];
   const ranOn = new Map(asked.map((a) => [a.check_id, a.runs]));
-  for (const c of checks) if (c.kind === "rule" && c.enabled && cur.totals.runs) ranOn.set(c.id, cur.totals.runs);
+  // A rule runs on every run in the window it watches, and only those: counting the window's whole
+  // run count showed a rule scoped to another project as having run and found nothing (#260). The
+  // fallbacks match how the engine reads the same two fields when it decides what to run.
+  const runsWatched = (c: CheckInfo) =>
+    c.applies_to ? cur.runs.filter((r) => checkAppliesTo(c, { project: r.p ?? "unknown", workflow: r.wf ?? r.p ?? "unknown" })).length : cur.totals.runs;
+  for (const c of checks) {
+    if (c.kind !== "rule" || !c.enabled) continue;
+    const runs = runsWatched(c);
+    if (runs) ranOn.set(c.id, runs);
+  }
   const passing = [...ranOn]
     .filter(([id]) => reportedNothing(id))
     .map(([id, runs]) => ({ check_id: id, title: titles.get(id)?.title ?? id, kind: titles.get(id)?.kind ?? "question", runs }))

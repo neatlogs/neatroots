@@ -5,6 +5,7 @@ import { LlmUnavailableError } from "../models/llm.js";
 import { DecisionUnavailableError, type DecisionModel, type DecisionQuestion, type DecisionResult } from "../models/decision.js";
 import type { CheckRegistry } from "../checks/registry.js";
 import { checkTitle, isQuestion, isRule, type Check, type LoadedCheck, type QuestionCheck, type RuleCheck } from "../checks/types.js";
+import { checkAppliesTo } from "../checks/scope.js";
 import { evaluateRule, fillTemplate, type RuleHit } from "../checks/rules.js";
 import type { SteeringHub } from "../steering/hub.js";
 import {
@@ -338,14 +339,7 @@ export class Engine {
   }
 
   private appliesTo(c: Check, run: { project: string; workflow: string }): boolean {
-    const a = c.applies_to;
-    if (!a) return true;
-    const list = (v: string | string[] | undefined) => (v === undefined ? undefined : Array.isArray(v) ? v : [v]);
-    const projects = list(a.project);
-    const workflows = list(a.workflow);
-    if (projects && !projects.includes(run.project)) return false;
-    if (workflows && !workflows.includes(run.workflow)) return false;
-    return true;
+    return checkAppliesTo(c, run);
   }
 
   private async handleSpans(run: LiveRun, spanIds: string[]): Promise<void> {
