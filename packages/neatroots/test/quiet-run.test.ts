@@ -130,6 +130,33 @@ describe("quiet runs (issue #213)", () => {
     expect(row.termination_reason).toBeNull();
     expect(row.status).not.toBe("interrupted");
   });
+
+  it("works off a backlog one sweep at a time, a batch per sweep, most recent first", async () => {
+    const llm = await mockLlm({ yesWhen: [] });
+    const tb = await makeRoots({ llmUrl: llm.url });
+    cleanup.push(async () => {
+      await tb.close();
+      await llm.close();
+    });
+    // five runs left "running" by an older version, the newest went quiet last
+    const runs = Array.from({ length: 5 }, (_, i) => {
+      const t = hex(16);
+      tb.roots.ingest([batch([llmSpan(t, hex(8), { user: `stuck ${i}` })])]);
+      tb.roots.store.db.prepare("UPDATE runs SET updated_ms = ? WHERE trace_id = ?").run(Date.now() - (60 - i) * 60_000, t);
+      return t;
+    });
+    const status = () => runs.map((t) => tb.roots.store.getRun(t)!.status);
+
+    // the timer fires again while the first sweep is still working: it joins that sweep
+    const first = tb.roots.engine!.endQuietRuns(30 * 60_000, 2);
+    expect(tb.roots.engine!.endQuietRuns(30 * 60_000, 2)).toBe(first);
+    await first;
+    expect(status()).toEqual(["running", "running", "running", "interrupted", "interrupted"]);
+
+    await tb.roots.engine!.endQuietRuns(30 * 60_000, 2);
+    await tb.roots.engine!.endQuietRuns(30 * 60_000, 2);
+    expect(status().every((s) => s === "interrupted")).toBe(true);
+  });
 });
 
 describe("quiet-run sweep at startup (issue #673)", () => {
@@ -141,7 +168,7 @@ describe("quiet-run sweep at startup (issue #673)", () => {
     // must mirror Store.quietRuns' statement, including ORDER BY and LIMIT, so an index
     // regression on the production query fails here
     const plan = tb.roots.store.db
-      .prepare("EXPLAIN QUERY PLAN SELECT * FROM runs WHERE status = 'running' AND doctor = 0 AND complete = 0 AND updated_ms < ? ORDER BY updated_ms ASC LIMIT ?")
+      .prepare("EXPLAIN QUERY PLAN SELECT * FROM runs WHERE status = 'running' AND doctor = 0 AND complete = 0 AND updated_ms < ? ORDER BY updated_ms DESC LIMIT ?")
       .all(0, -1) as { detail: string }[];
     expect(plan.map((r) => r.detail).join(" | ")).toContain("runs_quiet");
   });
@@ -351,7 +378,7 @@ describe("quiet-run sweep at startup (issue #673)", () => {
     engine.progress.checking(c);
     tb.roots.store.db
       .prepare("UPDATE runs SET updated_ms = ? WHERE trace_id = ?")
-      .run(Date.now() - 31 * 60_000, c);
+      .run(Date.now() - 32 * 60_000, c);
 
     await engine.endQuietRuns(30 * 60_000);
     // both got their end-of-run pass: the freshly claimed run and the abandoned one
@@ -420,9 +447,9 @@ describe("quiet-run sweep at startup (issue #673)", () => {
     const c = mk();
     engine.progress.checking(b);
     engine.progress.checking(c);
-    // b is the stalest, so the claim loop reaches it first
-    tb.roots.store.db.prepare("UPDATE runs SET updated_ms = ? WHERE trace_id = ?").run(Date.now() - 32 * 60_000, b);
-    tb.roots.store.db.prepare("UPDATE runs SET updated_ms = ? WHERE trace_id = ?").run(Date.now() - 31 * 60_000, c);
+    // main prioritizes the most recently active quiet run, so b is reached first
+    tb.roots.store.db.prepare("UPDATE runs SET updated_ms = ? WHERE trace_id = ?").run(Date.now() - 31 * 60_000, b);
+    tb.roots.store.db.prepare("UPDATE runs SET updated_ms = ? WHERE trace_id = ?").run(Date.now() - 32 * 60_000, c);
 
     const store = tb.roots.store as unknown as {
       markRunInterrupted: (id: string, reason: string, cutoff: number) => boolean;

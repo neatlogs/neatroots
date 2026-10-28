@@ -13,6 +13,7 @@
  */
 
 import { SteeredRequest } from "./request.js";
+import { boundedFlush } from "./flush.js";
 
 export const GUIDANCE_OPEN = "<neatroots-guidance>";
 export const GUIDANCE_CLOSE = "</neatroots-guidance>";
@@ -194,13 +195,11 @@ export async function currentTrace(): Promise<[string | undefined, string | unde
   return [undefined, undefined];
 }
 
+/** Pushes finished spans to neatroots now, so gate mode and self-checks see the latest step (at most FLUSH_TIMEOUT_MS). */
 async function flushSdk(): Promise<void> {
   const nl = await neatlogs();
-  try {
-    await nl?.flush?.();
-  } catch {
-    /* ignore */
-  }
+  const flush = nl?.flush;
+  if (nl && flush) await boundedFlush(nl, () => flush.call(nl));
 }
 
 async function record(note: Note): Promise<void> {

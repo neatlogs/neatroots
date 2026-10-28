@@ -44,6 +44,13 @@ export class Roots {
   private quietSweeper?: NodeJS.Timeout;
   /** The first quiet-run sweep's claim pass; resumeUnfinished waits on it so a run is not rechecked twice at startup. */
   private initialQuiet?: Promise<void>;
+  /** The retention sweep in progress, if any. */
+  private sweeping?: Promise<void>;
+  /** Retention starts a sweep; set by startRetention(). */
+  private retentionRun?: () => void;
+  /** A sweep is waiting for the search index's run ids, and the rebuild filling them in has finished. */
+  private retentionWaiting = false;
+  private searchSettled = false;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
   /** The run and span the app has in focus, for the MCP get_current_run tool. */
@@ -71,7 +78,11 @@ export class Roots {
     this.replays = new Replays(this);
     this.chats = new AgentChats(this);
     this.store.maintainSearch(
-      (n, ready) => (ready ? n && log.info(`search index ready for fast lookups (${n} rows)`) : log.warn("search index lookups couldn't be prepared; search works but is slower on a large store")),
+      (n, ready) => {
+        if (ready) n && log.info(`search index ready for fast lookups (${n} rows)`);
+        else log.warn("search index lookups couldn't be prepared; search works but is slower on a large store");
+        this.searchIdsSettled();
+      },
       (n, ok) => (ok ? n && log.info(`search now covers whole inputs and outputs (${n} spans re-indexed)`) : log.warn("couldn't finish re-indexing search; it starts over at the next start")),
     );
     if (!opts.noEngine) {
@@ -95,14 +106,34 @@ export class Roots {
 
   /** Applies retention now and every hour. */
   startRetention(): void {
+    // The sweep works a few runs at a time between turns of the event loop, so the server keeps
+    // answering during a large trim (#429). One sweep at a time: an hourly one waits for the last.
     const run = () => {
-      try {
-        const removed = this.store.sweep(this.config.retention.days, this.config.retention.maxGb * 1024 ** 3);
-        if (removed) log.info(`retention removed ${removed} old runs`);
-      } catch (err) {
-        log.warn(`retention failed: ${(err as Error).message}`);
+      // Until the search index's run ids are filled in (the first start after an update), a
+      // trim could only delete and size runs by scanning the whole index in one go. Wait for the
+      // rebuild, which takes seconds to minutes, and sweep as soon as it finishes or gives up.
+      if (!this.store.searchReady && !this.searchSettled) {
+        if (!this.retentionWaiting) log.info("retention waits until the search index is ready (the first start after an update)");
+        this.retentionWaiting = true;
+        return;
       }
+      if (this.sweeping) {
+        log.info("retention: the last sweep is still running, so this hour's is skipped");
+        return;
+      }
+      this.sweeping = this.store
+        .sweepAsync(this.config.retention.days, this.config.retention.maxGb * 1024 ** 3)
+        .then((removed) => {
+          if (removed) log.info(`retention removed ${removed} old runs`);
+        })
+        .catch((err: Error) => {
+          if (this.store.db.open) log.warn(`retention failed: ${err.message}`);
+        })
+        .finally(() => {
+          this.sweeping = undefined;
+        });
     };
+    this.retentionRun = run;
     // Files a crash during ingest left behind; only a crash makes them, so once at startup is enough.
     try {
       const orphans = this.store.reclaimOrphanBlobs();
@@ -136,6 +167,14 @@ export class Roots {
     });
     this.quietSweeper = setInterval(quiet, 60_000);
     this.quietSweeper.unref();
+  }
+
+  /** The search index's run ids are filled in, or couldn't be: run a sweep that was waiting for them. */
+  private searchIdsSettled(): void {
+    this.searchSettled = true;
+    if (!this.retentionWaiting) return;
+    this.retentionWaiting = false;
+    this.retentionRun?.();
   }
 
   /** Installs (first run) and starts Laya in the background; checks use the LLM until it is ready. */

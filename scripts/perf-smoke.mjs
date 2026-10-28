@@ -159,6 +159,29 @@ if (hasIds) {
   expect("the run ids are filled in", indexed());
   expect("search gives the same count after the rebuild", store().countMatchingRuns({ text: "refund" }) === before);
 }
+
+// Retention trims a store over its size cap a few runs at a time between turns of the event loop
+// (#429); it used to stop the server for the whole trim. Trim to half the store: once in one pass
+// on a copy, for comparison, then stepped, watching the event loop.
+const stepped = typeof store().sweepAsync === "function";
+expect("the store has a stepped retention sweep (sweepAsync)", stepped);
+if (stepped) {
+  store().db.pragma("wal_checkpoint(TRUNCATE)");
+  const cap = Math.floor(store().storedBytes() * 0.5);
+  const copyDir = path.join(home, "copy");
+  fs.cpSync(store().dir, copyDir, { recursive: true });
+  const copy = new (store().constructor)(copyDir);
+  const one = measure("retention trim to half the store, in one pass (for comparison)", 120_000, () => `${copy.sweep(999_999, cap)} runs`);
+  copy.close();
+  const loop = monitorEventLoopDelay({ resolution: 10 });
+  loop.enable();
+  const t0 = performance.now();
+  const removed = await store().sweepAsync(999_999, cap);
+  loop.disable();
+  results.push({ name: "retention trim to half the store, stepped", ms: performance.now() - t0, budget: 120_000 * FACTOR, info: `${removed} runs` });
+  results.push({ name: "longest event-loop stall during the stepped trim", ms: loop.max / 1e6, budget: 300 * FACTOR, info: "" });
+  expect(`the stepped trim removes as many runs as the one-pass trim (${removed} vs ${one})`, `${removed} runs` === one);
+}
 roots.close();
 fs.rmSync(home, { recursive: true, force: true });
 

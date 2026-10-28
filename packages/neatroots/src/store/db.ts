@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { BlobStore } from "./blobs.js";
+import { compactSearchIndex, oldestRunsCovering, reclaimPayloads, runSteps, runStepsAsync, type Steps } from "./retention.js";
 import { deleteUnattachedLogsBefore, trimUnattachedLogs } from "./unattached-logs.js";
 import { SearchIds } from "./search-ids.js";
 import { sha256, newId } from "../util/ids.js";
@@ -390,6 +391,8 @@ export const SEARCH_LIMIT = { head: 150_000, tail: 50_000 };
 const SEARCH_INDEX_VERSION = 2;
 /** A store over its size cap is trimmed to this share of the cap, so it isn't trimmed every hour. */
 export const RETENTION_LOW_WATER = 0.9;
+/** Runs a stepped retention sweep deletes per transaction, between turns of the event loop. */
+const RETENTION_DELETE_BATCH = 4;
 
 /** Free text as an FTS5 query: each word quoted, so operators and punctuation match literally. */
 function ftsQuery(text: string): string {
@@ -796,11 +799,10 @@ export class Store {
     return this.db.prepare("SELECT * FROM runs WHERE trace_id = ?").get(traceId) as RunRow | undefined;
   }
 
-  /** Runs still marked running, with no completion marker, that sent nothing for `quietMs` - their end never arrived (issue #213). Stalest first; `limit` caps how many a sweep claims at once (-1 = all). */
+  /** Runs still marked running, with no completion marker, that sent nothing for `quietMs` - their end never arrived (issue #213). The most recently active come first. */
   quietRuns(quietMs: number, now = Date.now(), limit = -1): RunRow[] {
-    return this.db
-      .prepare("SELECT * FROM runs WHERE status = 'running' AND doctor = 0 AND complete = 0 AND updated_ms < ? ORDER BY updated_ms ASC LIMIT ?")
-      .all(now - quietMs, limit) as RunRow[];
+    return this.db.prepare("SELECT * FROM runs WHERE status = 'running' AND doctor = 0 AND complete = 0 AND updated_ms < ? ORDER BY updated_ms DESC LIMIT ?").all(now - quietMs, limit) as RunRow[];
+
   }
 
   /**
@@ -1182,6 +1184,20 @@ export class Store {
     return this.updateFinding(id, { status });
   }
 
+  /** A check's "could not run" rows on a run, newest first. */
+  failedFindingsFor(traceId: string, checkId: string): Finding[] {
+    return (
+      this.db.prepare("SELECT * FROM findings WHERE trace_id = ? AND check_id = ? AND status = 'failed' ORDER BY created_ms DESC").all(traceId, checkId) as Record<string, unknown>[]
+    ).map((r) => this.findingFromRow(r));
+  }
+
+  deleteFinding(id: string): void {
+    const cur = this.getFinding(id);
+    if (!cur) return;
+    this.db.prepare("DELETE FROM findings WHERE id = ?").run(id);
+    this.refreshFindingCounts(cur.trace_id);
+  }
+
   // -------------------------------------------------------------- decisions
 
   insertDecision(d: Omit<DecisionRow, "id" | "created_ms">): DecisionRow {
@@ -1412,10 +1428,44 @@ export class Store {
 
   // --------------------------------------------------------------- retention
 
-  /** Deletes the oldest unpinned runs past the age or size limit. Returns how many runs were removed. */
+  /** Whether the search index's run ids are filled in, so runs can be found in it without a scan. */
+  get searchReady(): boolean {
+    return this.searchIds.ready;
+  }
+
+  /** Deletes the oldest unpinned runs past the age or size limit, in one go. Returns how many runs were removed. */
   sweep(maxAgeDays: number, maxBytes: number): number {
+    return runSteps(this.sweepSteps(maxAgeDays, maxBytes, Number.POSITIVE_INFINITY));
+  }
+
+  /**
+   * The same sweep a few runs at a time, giving the event loop a turn every `sliceMs`, so ingest,
+   * the app and MCP keep answering while a large trim works (#429). A run that takes new spans or
+   * is pinned while it works is kept. Resolves to 0 if the store is closed partway.
+   */
+  async sweepAsync(maxAgeDays: number, maxBytes: number, opts: { sliceMs?: number } = {}): Promise<number> {
+    return (await runStepsAsync(this.sweepSteps(maxAgeDays, maxBytes, RETENTION_DELETE_BATCH), () => this.db.open, opts.sliceMs)) ?? 0;
+  }
+
+  private *sweepSteps(maxAgeDays: number, maxBytes: number, batch: number): Steps<number> {
+    const startedMs = Date.now();
     let removed = 0;
     let logsRemoved = 0;
+    const shas = new Set<string>();
+    const self = this;
+    // Only a stepped sweep yields, so only it needs the guard against runs that changed meanwhile.
+    const notAfter = Number.isFinite(batch) ? startedMs : undefined;
+    function* remove(ids: string[]): Steps<void> {
+      // Until the search index's run ids are filled in, every delete scans the whole index, so
+      // delete in one go then rather than repeat that scan per batch.
+      const step = self.searchIds.ready ? batch : Number.POSITIVE_INFINITY;
+      for (let i = 0; i < ids.length; i += step) {
+        const r = self.deleteRunRows(ids.slice(i, i + step), notAfter);
+        removed += r.removed;
+        for (const sha of r.shas) shas.add(sha);
+        yield;
+      }
+    }
     // Skip the age sweep for a non-positive age: a cutoff of "now" (days = 0)
     // would delete every unpinned run. maxBytes pruning below still runs.
     if (Number.isFinite(maxAgeDays) && maxAgeDays >= 1) {
@@ -1423,9 +1473,12 @@ export class Store {
       const old = this.db
         .prepare("SELECT trace_id FROM runs WHERE pinned = 0 AND COALESCE(ended_ms, received_ms) < ?")
         .all(cutoff) as { trace_id: string }[];
-      this.deleteRuns(old.map((r) => r.trace_id));
-      removed += old.length;
+      yield* remove(old.map((r) => r.trace_id));
       logsRemoved += deleteUnattachedLogsBefore(this.db, cutoff);
+      // Free those runs' payloads now: the size check below counts the files on disk, and would
+      // otherwise trim more runs to make room that's already free.
+      yield* reclaimPayloads(this.db, this.blobs, shas, () => this.seq);
+      shas.clear();
     }
     // Measure what the database holds, not the file size: SQLite keeps the file (and WAL) at its
     // high-water mark after a delete and reuses the freed pages, so the file size never drops
@@ -1434,7 +1487,7 @@ export class Store {
     if (size > maxBytes) {
       // Deleting from the full-text index leaves "deleted" markers until it is compacted, so the
       // size can read high. Compact (once per sweep, and only when over the cap) before trusting it.
-      this.compactSearchIndex();
+      yield* compactSearchIndex(this.db);
       size = this.storedBytes();
     }
     if (size > maxBytes) {
@@ -1445,65 +1498,19 @@ export class Store {
         if (!n) break;
         logsRemoved += n;
         size = this.storedBytes();
+        yield;
       }
     }
     if (size > maxBytes) {
       // Trim the oldest unpinned runs down to a low-water mark below the cap, so a store sitting
       // at its cap isn't trimmed (and compacted) again on every hourly sweep.
-      const oldest = this.oldestRunsCovering(size - maxBytes * RETENTION_LOW_WATER, size);
-      this.deleteRuns(oldest);
-      removed += oldest.length;
+      const oldest = yield* oldestRunsCovering(this.db, this.blobs, this.searchIds.ready, size - maxBytes * RETENTION_LOW_WATER, size);
+      yield* remove(oldest);
     }
+    // The size trim's payloads, checked against every span then (new ones included).
+    yield* reclaimPayloads(this.db, this.blobs, shas, () => this.seq);
     if (removed || logsRemoved) this.db.pragma("wal_checkpoint(TRUNCATE)");
     return removed;
-  }
-
-  /**
-   * The oldest unpinned runs whose share of storedBytes() adds up to `excess`. A run's span rows
-   * are scaled to the database's share of `stored` (which also holds the search index and table
-   * overhead). Blobs are shared between runs, so a blob counts only toward the run whose deletion
-   * actually frees it: the newest run that references it, and never one a pinned run still uses.
-   * Returns at least one run while any unpinned run exists.
-   */
-  private oldestRunsCovering(excess: number, stored: number): string[] {
-    const rowBytes = `octet_length(s.attributes) + octet_length(s.events) + octet_length(s.links) + IFNULL(octet_length(s.extra), 0) + IFNULL(octet_length(s.input_preview), 0) + IFNULL(octet_length(s.output_preview), 0) + octet_length(s.name)`;
-    // A big value lives in a blob file but its text is also in the search index, so the
-    // indexed text counts toward the run too.
-    const indexed = new Map(
-      (this.db.prepare("SELECT trace_id AS t, SUM(octet_length(name) + octet_length(tool_name) + octet_length(body)) AS f FROM span_fts GROUP BY trace_id").all() as { t: string; f: number }[]).map((r) => [r.t, r.f]),
-    );
-    const rows = (
-      this.db
-        .prepare(
-          `SELECT r.trace_id AS t, r.pinned AS pinned, COALESCE(SUM(${rowBytes}), 0) AS w, group_concat(s.blobs, '') AS b
-           FROM runs r LEFT JOIN spans s ON s.trace_id = r.trace_id
-           GROUP BY r.trace_id ORDER BY COALESCE(r.ended_ms, r.received_ms) ASC`,
-        )
-        .all() as { t: string; pinned: number; w: number; b: string | null }[]
-    ).map((r) => ({ ...r, w: r.w + (indexed.get(r.t) ?? 0) }));
-    const shas = rows.map((r) => (r.b ? [...new Set(r.b.match(/[0-9a-f]{64}/g) ?? [])] : []));
-    const lastRef = new Map<string, number>();
-    shas.forEach((list, i) => list.forEach((sha) => lastRef.set(sha, rows[i].pinned ? Infinity : Math.max(lastRef.get(sha) ?? -1, i))));
-    const blobTotal = this.blobs.size();
-    const rowTotal = rows.reduce((n, r) => n + r.w, 0);
-    // Every table and index keeps at least its root page however many runs are deleted.
-    const fixed = (this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_schema WHERE rootpage > 0").get() as { n: number }).n * (this.db.pragma("page_size", { simple: true }) as number);
-    const rowScale = rowTotal > 0 ? Math.max(0, stored - blobTotal - fixed) / rowTotal : 0;
-    const pick: string[] = [];
-    let freed = 0;
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i].pinned) continue;
-      pick.push(rows[i].t);
-      freed += rows[i].w * rowScale;
-      for (const sha of shas[i]) if (lastRef.get(sha) === i) freed += this.blobs.sizeOf(sha);
-      if (freed >= excess) break;
-    }
-    return pick;
-  }
-
-  /** Merges the full-text index so space held by deleted spans is actually released. */
-  private compactSearchIndex(): void {
-    this.db.prepare("INSERT INTO span_fts(span_fts) VALUES('optimize')").run();
   }
 
   /** Bytes of data actually stored: database pages in use (not free pages) plus payload blobs. */
@@ -1536,19 +1543,32 @@ export class Store {
    * once per run, keeps a large retention trim fast.
    */
   deleteRuns(traceIds: string[]): void {
-    if (!traceIds.length) return;
-    const ids = JSON.stringify(traceIds);
+    this.reclaimUnreferencedBlobs(this.deleteRunRows(traceIds).shas);
+  }
+
+  /**
+   * Deletes the runs' rows in one transaction and returns the payloads they used, for the caller to
+   * reclaim. With `notAfter`, only runs still unpinned and not updated since then go: retention
+   * picks runs, then deletes them over several turns of the event loop.
+   */
+  private deleteRunRows(traceIds: string[], notAfter?: number): { removed: number; shas: string[] } {
+    if (!traceIds.length) return { removed: 0, shas: [] };
     const inIds = "trace_id IN (SELECT value FROM json_each(?))";
-    const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
-    const tx = this.db.transaction(() => {
+    return this.db.transaction(() => {
+      let list = traceIds;
+      if (notAfter !== undefined) {
+        list = (this.db.prepare(`SELECT trace_id FROM runs WHERE ${inIds} AND pinned = 0 AND updated_ms < ?`).all(JSON.stringify(traceIds), notAfter) as { trace_id: string }[]).map((r) => r.trace_id);
+        if (!list.length) return { removed: 0, shas: [] };
+      }
+      const ids = JSON.stringify(list);
+      const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
       this.searchIds.deleteRuns(ids);
       for (const t of ["spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
         this.db.prepare(`DELETE FROM ${t} WHERE ${inIds}`).run(ids);
       }
       this.db.prepare(`DELETE FROM runs WHERE ${inIds}`).run(ids);
-    });
-    tx();
-    this.reclaimUnreferencedBlobs(shas);
+      return { removed: list.length, shas };
+    })();
   }
 
   /**
