@@ -42,7 +42,7 @@ export class Roots {
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
   private quietSweeper?: NodeJS.Timeout;
-  /** The first quiet-run sweep; resumeUnfinished waits on it so a run is not rechecked twice at startup. */
+  /** The first quiet-run sweep's claim pass; resumeUnfinished waits on it so a run is not rechecked twice at startup. */
   private initialQuiet?: Promise<void>;
   /** The retention sweep in progress, if any. */
   private sweeping?: Promise<void>;
@@ -152,7 +152,19 @@ export class Roots {
         log.warn(`quiet-run sweep failed: ${(err as Error).message}`);
       }
     };
-    this.initialQuiet = quiet();
+    // Claim the first sweep's quiet runs up front - one fast database pass - so startup recovery
+    // (resumeUnfinished) isn't held behind one model recheck per old quiet run (issue #673). The
+    // claimed runs are rechecked in the background; recovery leaves them to that loop.
+    this.initialQuiet = Promise.resolve().then(() => {
+      if (!this.engine) return;
+      try {
+        const claimed = this.engine.claimQuietRuns();
+        if (claimed.length)
+          void this.engine.recheckClaimedQuietRuns(claimed).catch((err: Error) => log.warn(`quiet-run recheck failed: ${err.message}`));
+      } catch (err) {
+        log.warn(`quiet-run sweep failed: ${(err as Error).message}`);
+      }
+    });
     this.quietSweeper = setInterval(quiet, 60_000);
     this.quietSweeper.unref();
   }

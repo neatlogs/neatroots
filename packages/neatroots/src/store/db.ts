@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS runs (
   output_preview TEXT,
   interrupted INTEGER NOT NULL DEFAULT 0,
   termination_reason TEXT,
+  quiet_sweep_done INTEGER NOT NULL DEFAULT 0,
   finding_count INTEGER NOT NULL DEFAULT 0,
   open_finding_count INTEGER NOT NULL DEFAULT 0,
   pinned INTEGER NOT NULL DEFAULT 0,
@@ -72,6 +73,8 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS runs_started ON runs (started_ms DESC);
 -- The run list and Insights sort and filter by this expression; an index on started_ms alone can't serve them.
 CREATE INDEX IF NOT EXISTS runs_sort ON runs (COALESCE(started_ms, received_ms) DESC);
+-- The quiet-run sweep filters on exactly these columns every 60 s (issue #673).
+CREATE INDEX IF NOT EXISTS runs_quiet ON runs (status, doctor, complete, updated_ms);
 CREATE INDEX IF NOT EXISTS runs_session ON runs (session_id);
 CREATE INDEX IF NOT EXISTS runs_workflow ON runs (workflow);
 CREATE INDEX IF NOT EXISTS runs_project ON runs (project);
@@ -456,6 +459,7 @@ export class Store {
       if (!cols.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     };
     ensure("plans", "body", "TEXT");
+    ensure("runs", "quiet_sweep_done", "INTEGER NOT NULL DEFAULT 0");
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
     this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
@@ -798,6 +802,7 @@ export class Store {
   /** Runs still marked running, with no completion marker, that sent nothing for `quietMs` - their end never arrived (issue #213). The most recently active come first. */
   quietRuns(quietMs: number, now = Date.now(), limit = -1): RunRow[] {
     return this.db.prepare("SELECT * FROM runs WHERE status = 'running' AND doctor = 0 AND complete = 0 AND updated_ms < ? ORDER BY updated_ms DESC LIMIT ?").all(now - quietMs, limit) as RunRow[];
+
   }
 
   /**
@@ -808,10 +813,40 @@ export class Store {
   markRunInterrupted(traceId: string, reason: string, cutoff: number, now = Date.now()): boolean {
     const r = this.db
       .prepare(
-        "UPDATE runs SET status = 'interrupted', interrupted = 1, termination_reason = ?, ended_ms = COALESCE(ended_ms, last_span_ms, ?), updated_ms = ? WHERE trace_id = ? AND status = 'running' AND updated_ms < ?",
+        "UPDATE runs SET status = 'interrupted', interrupted = 1, quiet_sweep_done = 0, termination_reason = ?, ended_ms = COALESCE(ended_ms, last_span_ms, ?), updated_ms = ? WHERE trace_id = ? AND status = 'running' AND updated_ms < ?",
       )
       .run(reason, now, now, traceId, cutoff);
     return r.changes > 0;
+  }
+
+  /**
+   * Runs a quiet-run sweep interrupted ("no end received") that no live sweep owns: a crashed
+   * sweep's leftovers, or a claimed run whose post-failure restore itself failed. Rechecking
+   * them resumes persisted decisions. Completed sweeps are excluded before the batch limit.
+   */
+  abandonedQuietRuns(limit: number): RunRow[] {
+    return this.db
+      .prepare("SELECT * FROM runs WHERE status = 'interrupted' AND termination_reason = 'no end received' AND quiet_sweep_done = 0 ORDER BY updated_ms ASC LIMIT ?")
+      .all(limit) as RunRow[];
+  }
+
+  /** Persists successful sweep completion without changing the run's interrupted display state. */
+  completeQuietRun(traceId: string): void {
+    this.db.prepare("UPDATE runs SET quiet_sweep_done = 1 WHERE trace_id = ? AND status = 'interrupted' AND termination_reason = 'no end received'").run(traceId);
+  }
+
+  /**
+   * Puts a sweep-claimed quiet run back the way the sweep found it, so the next sweep retries
+   * it after its recheck failed. Only a row this sweep interrupted ("no end received") is
+   * restored - a run interrupted any other way is left alone. The mark bumped updated_ms, so
+   * it goes back to the run's last activity and the retry is not delayed by another quietMs.
+   */
+  restoreQuietRun(traceId: string): void {
+    this.db
+      .prepare(
+        "UPDATE runs SET status = 'running', interrupted = 0, termination_reason = NULL, ended_ms = NULL, updated_ms = COALESCE(last_span_ms, received_ms) WHERE trace_id = ? AND status = 'interrupted' AND termination_reason = 'no end received'",
+      )
+      .run(traceId);
   }
 
   /** The WHERE clauses and parameters for a run filter, shared by listing and counting. */
