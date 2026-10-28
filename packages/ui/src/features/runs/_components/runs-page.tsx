@@ -19,7 +19,10 @@ const ALL_PROJECTS = "__all__";
 
 /** Filters a link can set: #/runs?project=…, or ?check=…&label=… for runs with one problem. */
 function fromQuery(q: URLSearchParams): Partial<RunListParams> {
-  return { project: q.get("project") ?? "", check: q.get("check") ?? undefined, label: q.get("label") ?? undefined };
+  return {
+    project: q.get("project") ?? "", check: q.get("check") ?? undefined, label: q.get("label") ?? undefined,
+    hasFinding: q.get("has_open_finding") === "1" || q.get("has_open_finding") === "true",
+  };
 }
 
 /** "3 of 120 runs"; with filters, "12 matching of 120 runs" (and how many are shown, when not all). */
@@ -34,7 +37,7 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
   const qs = query.toString();
   useEffect(() => {
     const q = new URLSearchParams(qs);
-    if (q.has("project") || q.has("check")) setParams((p) => ({ ...p, ...fromQuery(q) }));
+    setParams((p) => ({ ...p, ...fromQuery(q) }));
   }, [qs]);
   const { data, isLoading, hasMore, loadMore, loadingMore } = useRuns(params);
   const { data: known } = useProjects();
@@ -42,6 +45,25 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
   const projects = [...new Set([...(known?.projects ?? []).map((p) => p.project), params.project].filter(Boolean))] as string[];
   const filtered = !!(params.q || params.status || params.hasFinding || params.project || params.check);
   const clear = () => setParams({ q: "", status: "", hasFinding: false, project: "" });
+  /** Remove the problem chip from the link too, retaining the tab and other filters on reload. */
+  const clearProblemFilter = () => {
+    setParams((p) => ({ ...p, check: undefined, label: undefined }));
+    const [path, search] = window.location.hash.split("?");
+    const q = new URLSearchParams(search);
+    q.delete("check");
+    q.delete("label");
+    window.history.replaceState(null, "", `${path}${q.size ? `?${q}` : ""}`);
+  };
+  /** Keep a Home link's open-finding filter consistent with the selected tab on reload. */
+  const selectTab = (value: string) => {
+    const hasFinding = value === "problems";
+    setParams({ ...params, status: value === "running" || value === "error" ? value : "", hasFinding });
+    const [path, search] = window.location.hash.split("?");
+    const q = new URLSearchParams(search);
+    if (hasFinding) q.set("has_open_finding", "1");
+    else q.delete("has_open_finding");
+    window.history.replaceState(null, "", `${path}${q.size ? `?${q}` : ""}`);
+  };
 
   if (data && data.total === 0) {
     return (
@@ -80,7 +102,7 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
           <SegmentedTabs
             variant="pill"
             value={params.hasFinding ? "problems" : params.status || "all"}
-            onValueChange={(v) => setParams({ ...params, status: v === "running" || v === "error" ? v : "", hasFinding: v === "problems" })}
+            onValueChange={selectTab}
             items={[
               { value: "all", label: "All" },
               { value: "problems", label: "With problems" },
@@ -108,7 +130,7 @@ export function RunsPage({ status, query }: { status?: Status; query: URLSearchP
               <span className="truncate" title={params.label ?? params.check}>
                 Problem: {params.label ?? params.check}
               </span>
-              <button type="button" aria-label="Clear the problem filter" onClick={() => setParams({ ...params, check: undefined, label: undefined })} className="flex size-5 cursor-pointer items-center justify-center rounded-full hover:bg-info-fg/10">
+              <button type="button" aria-label="Clear the problem filter" onClick={clearProblemFilter} className="flex size-5 cursor-pointer items-center justify-center rounded-full hover:bg-info-fg/10">
                 <Icon icon={Cancel01Icon} size="xs" />
               </button>
             </span>

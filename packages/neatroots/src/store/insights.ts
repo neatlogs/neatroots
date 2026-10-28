@@ -119,8 +119,8 @@ function percentile(values: number[], p: number): number | null {
 
 const RUNS_IN = `SELECT trace_id FROM runs WHERE doctor = 0 AND COALESCE(started_ms, received_ms) >= @from AND COALESCE(started_ms, received_ms) < @to`;
 
-/** A problem counts unless the user dismissed it, the check could not run, or it went quiet. */
-const IS_PROBLEM = (f: { status: string }) => f.status !== "dismissed" && f.status !== "failed" && f.status !== "quiet";
+/** A problem counts unless it was resolved or dismissed, the check could not run, or it went quiet. */
+const IS_PROBLEM = (f: { status: string }) => f.status !== "resolved" && f.status !== "dismissed" && f.status !== "failed" && f.status !== "quiet";
 
 function slice(db: Database.Database, from: number, to: number) {
   const p = { from, to };
@@ -193,6 +193,9 @@ function models(db: Database.Database, from: number, to: number): ModelAgg[] {
   return [...by].map(([name, m]) => ({ name, calls: m.calls, errors: m.errors, tokens: m.tokens, p50_ms: percentile(m.durs, 0.5) })).sort((a, b) => b.calls - a.calls);
 }
 
+/**
+ * Computes aggregate performance, problem, and project health metrics for a time window.
+ */
 export function computeInsights(db: Database.Database, key: WindowKey, checks: CheckInfo[], now = Date.now()): Insights {
   const w = WINDOWS[key];
   const to = now;
@@ -225,16 +228,17 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
     const e = byCheck.get(f.check_id) ?? { f: [], runs: new Set<string>(), dismissed: 0, quiet: 0 };
     if (f.status === "dismissed") e.dismissed++;
     else if (f.status === "quiet") e.quiet++;
-    else {
+    else if (IS_PROBLEM(f)) {
       e.f.push(f);
       e.runs.add(f.trace_id);
     }
     byCheck.set(f.check_id, e);
   }
-  // A check has nothing to report when every finding this window is dismissed, failed, or quiet.
+  const resolvedChecks = new Set(cur.findings.filter((f) => f.status === "resolved").map((f) => f.check_id));
+  /** Whether a check found nothing; quiet and resolved findings still count as having found an issue. */
   const reportedNothing = (id: string) => {
     const e = byCheck.get(id);
-    return !e?.runs.size && !e?.quiet;
+    return !e?.runs.size && !e?.quiet && !resolvedChecks.has(id);
   };
   const problems: ProblemAgg[] = [...byCheck]
     .filter(([, e]) => e.runs.size > 0)
@@ -314,7 +318,7 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
 
   const prevTitle = new Map(prev.findings.map((f) => [f.check_id, f.title]));
   const gone = [...prevRunsByCheck]
-    .filter(([id]) => reportedNothing(id))
+    .filter(([id]) => !byCheck.get(id)?.runs.size)
     .map(([id, runs]) => ({ check_id: id, title: titles.get(id)?.title ?? prevTitle.get(id) ?? id, prev_runs: runs.size }))
     .sort((a, b) => b.prev_runs - a.prev_runs);
 
