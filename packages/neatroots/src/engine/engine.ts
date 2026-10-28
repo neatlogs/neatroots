@@ -80,6 +80,8 @@ interface LiveRun {
   /** Per question: flags the second look turned down; after a few, the question stops raising. */
   rejected: Map<string, number>;
   traceEvidence: Map<string, string>;
+  /** Per trace question: its calls, numbered in order, so an older one never writes over a newer one. */
+  traceAsks: Map<string, { last: number; written: number; out: Set<number> }>;
   dirty: Set<string>;
   debounce?: NodeJS.Timeout;
   endTimer?: NodeJS.Timeout;
@@ -269,6 +271,7 @@ export class Engine {
       retrySpans: new Map(),
       rejected: new Map(),
       traceEvidence: new Map(),
+      traceAsks: new Map(),
       dirty: new Set(),
       ruleGrace: new Map(),
       ended: false,
@@ -544,11 +547,24 @@ export class Engine {
     const key = ev.spanIds.join(",") + (check.evidence?.final_output ? `|${finalOutput(snap) ?? ""}` : "");
     if (run.traceEvidence.get(check.id) === key) return;
     run.traceEvidence.set(check.id, key);
-    // Evidence can change while the model call is out and a newer call asks again: only the newest
-    // writes. A cleared key means the newer call found no model, so this answer still stands. Re-run
-    // checks replaces the live run, so a call from before it is stale too.
-    const current = () => this.live.get(run.traceId) === run && (run.traceEvidence.get(check.id) ?? key) === key;
-    const outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null, current);
+    // Evidence can change while the model call is out and a newer call asks again. This call writes
+    // only if no newer one has written or is still out; one that found no model writes nothing, so it
+    // leaves this answer standing. Re-run checks replaces the live run, so a call from before it is stale.
+    const asks = run.traceAsks.get(check.id) ?? { last: 0, written: 0, out: new Set<number>() };
+    run.traceAsks.set(check.id, asks);
+    const mine = ++asks.last;
+    asks.out.add(mine);
+    const current = () => {
+      if (this.live.get(run.traceId) !== run || asks.written > mine || [...asks.out].some((n) => n > mine)) return false;
+      asks.written = mine;
+      return true;
+    };
+    let outcome: "unavailable" | void;
+    try {
+      outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null, current);
+    } finally {
+      asks.out.delete(mine);
+    }
     // Not asked after all, so the run-end pass asks again; unless an overlapping pass cached newer evidence.
     if (outcome === "unavailable" && run.traceEvidence.get(check.id) === key) run.traceEvidence.delete(check.id);
   }
@@ -561,7 +577,7 @@ export class Engine {
     spanIds: string[],
     snap: TraceSnapshot,
     spanId: string | null,
-    /** False once a newer call about this question took over, so this one's result is stale and dropped. */
+    /** Asked right before each write: false when a newer call took over, so this result is dropped. */
     current: () => boolean = () => true,
   ): Promise<"unavailable" | void> {
     const dismissed = () => this.roots.store.latestFindingFor(run.traceId, check.id)?.status === "dismissed";
