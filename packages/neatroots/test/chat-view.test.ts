@@ -144,3 +144,37 @@ describe("an LLM root that wraps a child LLM span", () => {
     expect(chat.items.filter((i) => i.type === "assistant")).toHaveLength(1);
   });
 });
+
+
+describe("an LLM root with a nested agent", () => {
+  it("keeps the root exchange outside the nested agent's conversation", async () => {
+    t = await makeRoots({ noEngine: true });
+    const tid = hex(16), root = hex(8), agent = hex(8), child = hex(8);
+    t.roots.ingest([batch([
+      span({ traceId: tid, spanId: root, name: "root-llm", kind: "llm", attrs: [
+        ...msgAttrs("input_messages", [{ role: "system", content: "Be concise." }, { role: "user", content: "Delegate lookup" }]),
+        ...msgAttrs("output_messages", [{ role: "assistant", content: "Delegating now." }]),
+        s("neatlogs.llm.tool_calls.0.name", "delegate"),
+        s("neatlogs.llm.tool_calls.0.arguments", '{"task":"lookup"}'),
+      ] }),
+      span({ traceId: tid, spanId: agent, parent: root, name: "Lookup agent", kind: "agent" }),
+      span({ traceId: tid, spanId: child, parent: agent, name: "child-llm", kind: "llm", attrs: [
+        ...msgAttrs("input_messages", [{ role: "user", content: "Private lookup" }]),
+        ...msgAttrs("output_messages", [{ role: "assistant", content: "Found it." }]),
+      ] }),
+    ])]);
+    const snapshot = loadTrace(t.roots.store, tid);
+    const chat = buildChat(snapshot);
+    expect(buildChat(snapshot, root)).toEqual(chat);
+    expect(chat.items).toMatchObject([
+      { type: "system", text: "Be concise.", span_id: root },
+      { type: "user", text: "Delegate lookup", span_id: root },
+      { type: "assistant", text: "Delegating now.", span_id: root, tool_calls: [{ name: "delegate", arguments: { task: "lookup" } }] },
+      { type: "agent", span_id: agent, llm_calls: 1 },
+    ]);
+    expect(buildChat(snapshot, agent).items).toMatchObject([
+      { type: "user", text: "Private lookup", span_id: child },
+      { type: "assistant", text: "Found it.", span_id: child },
+    ]);
+  });
+});

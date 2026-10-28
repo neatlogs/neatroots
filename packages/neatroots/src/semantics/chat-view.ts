@@ -48,9 +48,10 @@ export function buildChat(t: TraceSnapshot, rootSpanId?: string): { root: string
   // can loop (A's parent is B, B's is A), so each span is visited once.
   // An LLM call can be the entire run, without a workflow wrapper. Read its
   // messages and tool calls through the same path as nested LLM calls - unless it
-  // wraps another LLM span, whose own messages already carry the exchange.
+  // wraps another in-scope LLM span, whose messages already carry the exchange.
+  // Nested agents own separate conversations, just as in walk below.
   const wrapsLlm = (s: SpanInfo, seen = new Set<string>([s.id])): boolean =>
-    (children.get(s.id) ?? []).some((c) => !seen.has(c.id) && (seen.add(c.id), c.kind === "LLM" || wrapsLlm(c, seen)));
+    (children.get(s.id) ?? []).some((c) => !seen.has(c.id) && (seen.add(c.id), c.kind === "LLM" || (c.kind !== "AGENT" && wrapsLlm(c, seen))));
   const inScope: SpanInfo[] = root.kind === "LLM" && !wrapsLlm(root) ? [root] : [];
   const visited = new Set<string>([root.id]);
   const walk = (s: SpanInfo) => {

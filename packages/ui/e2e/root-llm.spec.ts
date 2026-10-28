@@ -34,3 +34,41 @@ test("an LLM root keeps system and user roles and recorded tool calls", async ({
   await expect(chat.getByText("lookup_order", { exact: true })).toBeVisible();
   await expect(chat).not.toContainText("no reply recorded");
 });
+
+test("an LLM root retains its exchange beside a nested agent", async ({ page }) => {
+  const traceId = randomBytes(16).toString("hex");
+  const root = randomBytes(8).toString("hex"), agent = randomBytes(8).toString("hex"), child = randomBytes(8).toString("hex");
+  const start = BigInt(Date.now()) * 1_000_000n;
+  const makeSpan = (spanId: string, parentSpanId: string, name: string, kind: string, attrs: Record<string, string>) => ({
+    traceId, spanId, parentSpanId, name, kind: 1,
+    startTimeUnixNano: String(start), endTimeUnixNano: String(start + 1_000_000n),
+    attributes: Object.entries({ "neatlogs.span.kind": kind, ...attrs }).map(([key, value]) => ({ key, value: { stringValue: value } })), status: { code: 1 },
+  });
+  await api("/v1/traces", { method: "POST", body: JSON.stringify({ resourceSpans: [{
+    resource: { attributes: [] }, scopeSpans: [{ scope: { name: "test" }, spans: [
+      makeSpan(root, "", "root-llm", "llm", {
+        "neatlogs.llm.input_messages.0.role": "system", "neatlogs.llm.input_messages.0.content": "Keep the delegation concise.",
+        "neatlogs.llm.input_messages.1.role": "user", "neatlogs.llm.input_messages.1.content": "Delegate order lookup",
+        "neatlogs.llm.output_messages.0.role": "assistant", "neatlogs.llm.output_messages.0.content": "Delegating now.",
+        "neatlogs.llm.tool_calls.0.name": "delegate", "neatlogs.llm.tool_calls.0.arguments": '{"task":"lookup"}',
+      }),
+      makeSpan(agent, root, "Lookup agent", "agent", {}),
+      makeSpan(child, agent, "child-llm", "llm", {
+        "neatlogs.llm.input_messages.0.role": "user", "neatlogs.llm.input_messages.0.content": "Private lookup",
+        "neatlogs.llm.output_messages.0.role": "assistant", "neatlogs.llm.output_messages.0.content": "Found it.",
+      }),
+    ] }] }] }) });
+  await open(page, `runs/${traceId}`);
+  const chat = page.getByTestId("chat-view");
+  await expect(chat.getByText("Delegate order lookup", { exact: true })).toBeVisible();
+  await expect(chat.getByText("Delegating now.", { exact: true })).toBeVisible();
+  await expect(chat.getByText("delegate", { exact: true })).toBeVisible();
+  await expect(chat).not.toContainText("Private lookup");
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((value) => { localStorage.setItem("theme", value); document.documentElement.classList.toggle("dark", value === "dark"); }, theme);
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 960 });
+      await page.screenshot({ path: `/downloads/neatroots-fixes/274-${theme}-${width}.png`, fullPage: true });
+    }
+  }
+});
