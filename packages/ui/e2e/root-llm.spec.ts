@@ -35,7 +35,7 @@ test("an LLM root keeps system and user roles and recorded tool calls", async ({
   await expect(chat).not.toContainText("no reply recorded");
 });
 
-test("an LLM root retains its exchange beside a nested agent", async ({ page }) => {
+test("an LLM root retains its exchange beside a nested agent", async ({ page }, testInfo) => {
   const traceId = randomBytes(16).toString("hex");
   const root = randomBytes(8).toString("hex"), agent = randomBytes(8).toString("hex"), child = randomBytes(8).toString("hex");
   const start = BigInt(Date.now()) * 1_000_000n;
@@ -68,7 +68,7 @@ test("an LLM root retains its exchange beside a nested agent", async ({ page }) 
     await page.evaluate((value) => { localStorage.setItem("theme", value); document.documentElement.classList.toggle("dark", value === "dark"); }, theme);
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 960 });
-      await page.screenshot({ path: `/downloads/neatroots-fixes/274-${theme}-${width}.png`, fullPage: true });
+      await page.screenshot({ path: testInfo.outputPath(`274-${theme}-${width}.png`), fullPage: true });
     }
   }
 });
