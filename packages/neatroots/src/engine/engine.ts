@@ -1112,6 +1112,7 @@ ${library}`;
         const row = this.roots.store.getRun(id);
         if (this.live.get(id)?.ended || !row || row.status !== "interrupted") continue;
         await this.recheck(id, { resume: true });
+        this.roots.store.completeQuietRun(id);
       } catch (err) {
         // One failed recheck must not strand the rest of the batch: the remaining ids are
         // already marked interrupted and startup recovery leaves them to this sweep, so

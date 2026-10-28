@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { Store } from "../src/store/db.js";
 import { resumeUnfinished } from "../src/engine/engine.js";
 import { batch, hex, llmSpan, makeRoots, markerSpan, mockLlm, span, toolSpan, until } from "./helpers.js";
 
@@ -533,4 +534,63 @@ describe("quiet-run sweep at startup (issue #673)", () => {
     expect(engine.isQuietClaimed(c)).toBe(false);
     expect(engine.isQuietClaimed(d)).toBe(false);
   }, 30_000);
+});
+
+
+describe("completed quiet sweeps", () => {
+  it("does not recheck completed work after live release, including after reopening the store", async () => {
+    const llm = await mockLlm({ yesWhen: [] });
+    const tb = await makeRoots({ llmUrl: llm.url });
+    cleanup.push(async () => { await tb.close(); await llm.close(); });
+    const engine = tb.roots.engine!;
+    const id = hex(16);
+    tb.roots.ingest([batch([llmSpan(id, hex(8), { user: "quiet run" })])]);
+    tb.roots.store.db.prepare("UPDATE runs SET updated_ms = ? WHERE trace_id = ?").run(Date.now() - 31 * 60_000, id);
+    await engine.endQuietRuns(30 * 60_000);
+    expect(tb.roots.store.getSummary(id)).toBeTruthy();
+    // Simulate releaseLive after its grace period, without waiting a real minute.
+    (engine as unknown as { live: Map<string, unknown> }).live.delete(id);
+    const calls: string[] = [];
+    const original = engine.recheck.bind(engine);
+    engine.recheck = async (traceId, opts) => { calls.push(traceId); return original(traceId, opts); };
+    await engine.endQuietRuns(30 * 60_000);
+    await engine.endQuietRuns(30 * 60_000);
+    expect(calls).toEqual([]);
+    const reopened = new Store(tb.roots.store.dir);
+    try { expect(reopened.abandonedQuietRuns(200)).toEqual([]); } finally { reopened.close(); }
+  }, 30_000);
+});
+
+
+it("filters completed quiet sweeps before the abandoned batch limit", async () => {
+  const tb = await makeRoots({ noEngine: true });
+  cleanup.push(() => tb.close());
+  const completed = Array.from({ length: 201 }, () => hex(16));
+  const pending = hex(16);
+  for (const id of [...completed, pending]) {
+    tb.roots.ingest([batch([llmSpan(id, hex(8), { user: "quiet" })])]);
+    tb.roots.store.db.prepare("UPDATE runs SET updated_ms = 1 WHERE trace_id = ?").run(id);
+    expect(tb.roots.store.markRunInterrupted(id, "no end received", Date.now())).toBe(true);
+  }
+  for (const id of completed) tb.roots.store.completeQuietRun(id);
+  expect(tb.roots.store.abandonedQuietRuns(200).map((r) => r.trace_id)).toEqual([pending]);
+});
+
+
+it("adds the completion flag to an old store and keeps abandoned work recoverable", async () => {
+  const tb = await makeRoots({ noEngine: true });
+  cleanup.push(() => tb.close());
+  const id = hex(16);
+  tb.roots.ingest([batch([llmSpan(id, hex(8), { user: "legacy quiet" })])]);
+  tb.roots.store.db.prepare("UPDATE runs SET status = 'interrupted', termination_reason = 'no end received' WHERE trace_id = ?").run(id);
+  tb.roots.store.db.exec("ALTER TABLE runs DROP COLUMN quiet_sweep_done");
+  const reopened = new Store(tb.roots.store.dir);
+  try {
+    expect(reopened.abandonedQuietRuns(200).map((r) => r.trace_id)).toEqual([id]);
+    reopened.completeQuietRun(id);
+    expect(reopened.abandonedQuietRuns(200)).toEqual([]);
+    reopened.restoreQuietRun(id);
+    expect(reopened.markRunInterrupted(id, "no end received", Date.now() + 1)).toBe(true);
+    expect(reopened.abandonedQuietRuns(200).map((r) => r.trace_id)).toEqual([id]);
+  } finally { reopened.close(); }
 });

@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS runs (
   output_preview TEXT,
   interrupted INTEGER NOT NULL DEFAULT 0,
   termination_reason TEXT,
+  quiet_sweep_done INTEGER NOT NULL DEFAULT 0,
   finding_count INTEGER NOT NULL DEFAULT 0,
   open_finding_count INTEGER NOT NULL DEFAULT 0,
   pinned INTEGER NOT NULL DEFAULT 0,
@@ -455,6 +456,7 @@ export class Store {
       if (!cols.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     };
     ensure("plans", "body", "TEXT");
+    ensure("runs", "quiet_sweep_done", "INTEGER NOT NULL DEFAULT 0");
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
     this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
@@ -809,7 +811,7 @@ export class Store {
   markRunInterrupted(traceId: string, reason: string, cutoff: number, now = Date.now()): boolean {
     const r = this.db
       .prepare(
-        "UPDATE runs SET status = 'interrupted', interrupted = 1, termination_reason = ?, ended_ms = COALESCE(ended_ms, last_span_ms, ?), updated_ms = ? WHERE trace_id = ? AND status = 'running' AND updated_ms < ?",
+        "UPDATE runs SET status = 'interrupted', interrupted = 1, quiet_sweep_done = 0, termination_reason = ?, ended_ms = COALESCE(ended_ms, last_span_ms, ?), updated_ms = ? WHERE trace_id = ? AND status = 'running' AND updated_ms < ?",
       )
       .run(reason, now, now, traceId, cutoff);
     return r.changes > 0;
@@ -818,12 +820,17 @@ export class Store {
   /**
    * Runs a quiet-run sweep interrupted ("no end received") that no live sweep owns: a crashed
    * sweep's leftovers, or a claimed run whose post-failure restore itself failed. Rechecking
-   * them is safe to repeat - recheck with resume skips the decisions already persisted.
+   * them resumes persisted decisions. Completed sweeps are excluded before the batch limit.
    */
   abandonedQuietRuns(limit: number): RunRow[] {
     return this.db
-      .prepare("SELECT * FROM runs WHERE status = 'interrupted' AND termination_reason = 'no end received' ORDER BY updated_ms ASC LIMIT ?")
+      .prepare("SELECT * FROM runs WHERE status = 'interrupted' AND termination_reason = 'no end received' AND quiet_sweep_done = 0 ORDER BY updated_ms ASC LIMIT ?")
       .all(limit) as RunRow[];
+  }
+
+  /** Persists successful sweep completion without changing the run's interrupted display state. */
+  completeQuietRun(traceId: string): void {
+    this.db.prepare("UPDATE runs SET quiet_sweep_done = 1 WHERE trace_id = ? AND status = 'interrupted' AND termination_reason = 'no end received'").run(traceId);
   }
 
   /**
