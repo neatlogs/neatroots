@@ -11,6 +11,7 @@ import { body, clampInt, err, isTraceIds } from "./util.js";
 import { runSummary } from "./api.js";
 import { bodyLimit } from "hono/body-limit";
 import type { RunFilter } from "../store/db.js";
+import { compareRuns } from "./run-comparison.js";
 
 // Run views (chat, conversation), search, imports, cloud import, replays and the in-app coding
 // agent. Everything here is local; the cloud and import routes call out only when the user asks.
@@ -49,6 +50,14 @@ function sinceMs(v: string | undefined): number | undefined {
 }
 
 export function mountExploreApi(app: Hono, roots: Roots): void {
+  app.get("/api/compare", (c) => {
+    const a = c.req.query("a");
+    const b = c.req.query("b");
+    if (!a || !b) return err(c, 400, "select two runs (a and b)");
+    if (!roots.store.getRun(a) || !roots.store.getRun(b)) return err(c, 404, "run not found");
+    return c.json(compareRuns(roots, a, b));
+  });
+
   // ---------------------------------------------------------------- views
 
   app.get("/api/runs/:traceId/chat", (c) => {

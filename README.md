@@ -168,6 +168,7 @@ neatlogs.init(workflow_name="refund-agent", flush_interval=0.5, instrumentations
   how to start it: `neatroots rerun add <project> "uv run agent.py"`. During a replay the agent sees
   `NEATROOTS_REPLAY_INPUT`, `_MODEL` and `_SYSTEM_PROMPT`; `neatroots_steer.replay_input()` and
   `wrap()` apply them. Replays are new runs linked to the original.
+- **Compare runs** on a run opens a side-by-side view of an original and replay (or any two runs): changes in open findings, reported tokens, duration, output, and ordered tool calls. Select a linked replay or search for another run; swap them to reverse the comparison.
 - **Search** (⌘K) finds text in any span. Filters: `project:` `status:` `kind:` `tool:` `model:`
   `check:` `session:` `has:problems` `since:7d`.
 - **Checks** lists the rules and questions in force. **New check** turns a sentence into a check and
