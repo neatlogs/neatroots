@@ -3,6 +3,7 @@ import { Icon } from "@/components/ui/icon";
 import { Panel, PanelContent, PanelHeader } from "@/components/ui/panel";
 import type { Insights } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { ProblemRow } from "./problem-row";
 
 interface Item {
   key: string;
@@ -11,6 +12,9 @@ interface Item {
   trend?: { text: string; tone: "bad" | "good" | "neutral" };
   href?: string;
   mono?: boolean;
+  problem?: Insights["problems"][number];
+  project?: NonNullable<Insights["problems"][number]["dismissal_projects"]>[number];
+  threshold?: number;
 }
 
 interface Group {
@@ -44,13 +48,15 @@ function attention(d: Insights): Group[] {
   return [
     {
       label: "Problems",
-      items: d.problems.map((p) => ({
+      items: d.problems.flatMap((p): Item[] => p.dismissal_projects?.length ? p.dismissal_projects.map((project) => ({
+        key: JSON.stringify([p.check_id, project.project]), title: p.title, detail: "", problem: p, project, threshold: d.quiet_after,
+      })) : [{
         key: `p:${p.check_id}`,
         title: p.title,
         detail: `in ${p.runs} of ${d.totals.runs} runs${multi ? ` · ${p.projects.join(", ")}` : ""}${p.dismissed ? ` · ${p.dismissed} dismissed as wrong` : ""}`,
         trend: runsTrend(p.runs, p.prev_runs, hadBefore),
         href: `#/runs?check=${encodeURIComponent(p.check_id)}&label=${encodeURIComponent(p.title)}`,
-      })),
+      }]),
     },
     {
       label: "Tools",
@@ -110,6 +116,7 @@ const TREND = { bad: "text-warning-fg", good: "text-success-fg", neutral: "text-
 
 /** One line per item, all the same height: what it is, the numbers behind it, and the change. */
 function Row({ item, tone }: { item: Item; tone: "bad" | "good" }) {
+  if (item.problem && item.project) return <ProblemRow problem={item.problem} project={item.project} threshold={item.threshold} />;
   const body = (
     <>
       <Icon icon={tone === "bad" ? Alert02Icon : CheckmarkCircle02Icon} size="xs" className={cn("shrink-0", tone === "bad" ? "text-warning-fg" : "text-success-fg")} />
@@ -139,7 +146,7 @@ function Row({ item, tone }: { item: Item; tone: "bad" | "good" }) {
 function Column({ title, groups, tone, empty }: { title: string; groups: Group[]; tone: "bad" | "good"; empty: string }) {
   const total = groups.reduce((a, g) => a + g.items.length, 0);
   return (
-    <Panel className="h-[26rem] p-0">
+    <Panel className="h-[26rem] min-w-0 p-0">
       <PanelHeader
         className="mb-0 px-5 pt-4"
         title={title}
