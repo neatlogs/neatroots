@@ -58,6 +58,16 @@ export interface SpanView {
   toolCalls?: { id?: string; name: string; arguments: Plain }[];
   /** Tools offered to the LLM (LLM spans only). */
   tools?: string[];
+  /** The tools' recorded definitions, when the SDK sent their schemas (LLM spans only). */
+  toolDefinitions?: ToolDefinition[];
+}
+
+/** A tool offered to an LLM call, with the schema the SDK recorded for it. */
+export interface ToolDefinition {
+  name: string;
+  description?: string;
+  /** The JSON schema of the arguments, as recorded. */
+  parameters?: Plain;
 }
 
 type Attrs = Record<string, Plain>;
@@ -272,6 +282,40 @@ function finishReasonOf(attrs: Attrs): string | undefined {
   return undefined;
 }
 
+/**
+ * The tools an LLM call offered, with schemas when the SDK recorded them: the neatlogs SDK's
+ * `neatlogs.llm.tools.N.*` and OpenInference's `llm.tools.N.tool.*`.
+ */
+function llmToolDefinitions(attrs: Attrs): ToolDefinition[] {
+  const out: ToolDefinition[] = [];
+  for (const r of collectIndexed(attrs, "neatlogs.llm.tools")) {
+    const fn = (r.function ?? {}) as Record<string, Plain>;
+    // Some SDKs send the whole definition JSON in .definition; others send name/description/schema fields.
+    const definition = maybeJson(r.definition);
+    const full = definition && typeof definition === "object" && !Array.isArray(definition) ? (definition as Record<string, Plain>) : undefined;
+    const name = str(r.name) ?? str(fn.name) ?? (full ? str(full.name) : undefined);
+    if (!name) continue;
+    let parameters = maybeJson(r.input_schema ?? fn.parameters ?? r.parameters);
+    if (parameters === undefined && full) parameters = full.parameters !== undefined ? maybeJson(full.parameters) : str(full.name) ? undefined : full;
+    out.push({ name, description: str(r.description) ?? str(fn.description) ?? (full ? str(full.description) : undefined), parameters });
+  }
+  for (const r of collectIndexed(attrs, "llm.tools")) {
+    const tool = (r.tool ?? r) as Record<string, Plain>;
+    // json_schema is a JSON string, either the bare parameters schema or the OpenAI tool wrapper
+    // ({type: "function", function: {name, description, parameters}}). A wrapper's nested fields
+    // win over the flattened ones; only a bare schema is used whole as the parameters.
+    const schema = maybeJson(tool.json_schema ?? r.json_schema);
+    const full = schema && typeof schema === "object" && !Array.isArray(schema) ? (schema as Record<string, Plain>) : undefined;
+    const inner = full && full.function && typeof full.function === "object" && !Array.isArray(full.function) ? (full.function as Record<string, Plain>) : undefined;
+    const fn = inner ?? full ?? {};
+    const name = str(tool.name) ?? str(r.name) ?? str(fn.name);
+    if (!name) continue;
+    const parameters = maybeJson(fn.parameters ?? fn.input_schema ?? tool.input_schema) ?? (inner ? undefined : full);
+    out.push({ name, description: str(tool.description) ?? str(r.description) ?? str(fn.description), parameters });
+  }
+  return out;
+}
+
 function exceptionMessage(span: OtlpSpan): string | undefined {
   for (const e of span.events) {
     if (e.name !== "exception") continue;
@@ -328,8 +372,11 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
       } else if (view.toolCalls && view.output === undefined) {
         view.output = [{ role: "assistant", tool_calls: view.toolCalls.map((c) => ({ id: c.id ?? null, name: c.name, arguments: c.arguments })) }];
       }
-      const tools = collectIndexed(attrs, "neatlogs.llm.tools").map((t) => str(t.name)).filter((x): x is string => !!x);
-      if (tools.length) view.tools = tools;
+      const defs = llmToolDefinitions(attrs);
+      if (defs.length) {
+        view.tools = defs.map((d) => d.name);
+        view.toolDefinitions = defs;
+      }
       break;
     }
     case "TOOL":

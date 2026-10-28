@@ -102,6 +102,45 @@ describe("hosted OpenAI-compatible provider", () => {
     expect(calls[1].body.response_format.json_schema.strict).toBe(false);
   });
 
+  it("redacts tool definitions before they go to a hosted provider", async () => {
+    const srv = await mock((r) => (r.path.endsWith("/models") ? { json: { data: [{ id: "remote-model" }] } } : { json: chatReply("ok") }));
+    closers.push(srv.close);
+    const llm = new LlmClient(
+      cfgWith((c) => Object.assign(c.external, { enabled: true, provider: "custom", baseUrl: `${srv.url}/v1`, model: "remote-model" })),
+      { secret: async (n) => (n === "llm-api-key-custom" ? "test-key-123456" : undefined) },
+    );
+    const secret = "sk-abcdefghijklmnopqrstuvwx";
+    await llm.chat([{ role: "user", content: "hi" }], {
+      tools: [{ name: "lookup", description: `look up with ${secret}`, parameters: { type: "object", properties: { token: { type: "string", default: secret } } } }],
+    });
+    const call = srv.seen.filter((s) => s.path.endsWith("/chat/completions")).at(-1)!;
+    const def = call.body.tools[0].function;
+    expect(def.name).toBe("lookup");
+    expect(def.description).toContain("[redacted:api_key]");
+    expect(def.description).not.toContain(secret);
+    // A schema keeps its shape: only the strings inside it are replaced.
+    expect(def.parameters.type).toBe("object");
+    expect(def.parameters.properties.token.type).toBe("string");
+    expect(def.parameters.properties.token.default).toContain("[redacted:api_key]");
+    expect(def.parameters.properties.token.default).not.toContain(secret);
+  });
+
+  it("sends tool definitions as recorded when the LLM is on this machine", async () => {
+    const srv = await mock((r) => (r.path.endsWith("/models") ? { json: { data: [{ id: "local-model" }] } } : { json: chatReply("ok") }));
+    closers.push(srv.close);
+    const llm = new LlmClient(
+      cfgWith((c) => {
+        c.baseUrl = `${srv.url}/v1`;
+        c.model = "local-model";
+      }),
+      { secret: async () => undefined },
+    );
+    const secret = "sk-abcdefghijklmnopqrstuvwx";
+    await llm.chat([{ role: "user", content: "hi" }], { tools: [{ name: "lookup", description: `look up with ${secret}` }] });
+    const call = srv.seen.filter((s) => s.path.endsWith("/chat/completions")).at(-1)!;
+    expect(call.body.tools[0].function.description).toBe(`look up with ${secret}`);
+  });
+
   it("falls back to the local LLM when the provider rejects the key", async () => {
     const remote = await mock(() => ({ status: 401, json: { error: "bad key" } }));
     const local = await mock((r) => (r.path.endsWith("/models") ? { json: { data: [{ id: "local-model" }] } } : { json: { ...chatReply("local answer"), model: "local-model" } }));
@@ -245,5 +284,108 @@ describe("the LLM queue", () => {
     await Promise.all([...background, interactive]);
     expect(order.indexOf("person waiting")).toBeLessThan(order.indexOf("bg2"));
     expect(order).not.toContain("cancelled");
+  });
+});
+
+describe("tool-call replays", () => {
+  const tools = [{ name: "lookup_order", description: "Look up an order", parameters: { type: "object", properties: { order_id: { type: "string" } } } }];
+  const turns: Parameters<LlmClient["chat"]>[0] = [
+    { role: "user", content: "Please refund order 4512" },
+    { role: "assistant", content: "", tool_calls: [{ id: "call_9", name: "lookup_order", arguments: '{"order_id":"4512"}' }] },
+    { role: "tool", name: "lookup_order", tool_call_id: "call_9", content: '{"status":"delivered"}' },
+  ];
+
+  it("sends tools and structured tool turns on the OpenAI path, and reads a tool-call answer", async () => {
+    const srv = await mock((r) =>
+      r.path.endsWith("/models")
+        ? { json: { data: [{ id: "local-model" }] } }
+        : {
+            json: {
+              choices: [{ message: { content: null, tool_calls: [{ id: "call_1", function: { name: "issue_refund", arguments: '{"order_id":"4512"}' } }] }, finish_reason: "tool_calls" }],
+              model: "local-model",
+              usage: { prompt_tokens: 3, completion_tokens: 2 },
+            },
+          },
+    );
+    closers.push(srv.close);
+    const llm = new LlmClient(cfgWith((c) => Object.assign(c, { baseUrl: `${srv.url}/v1`, enabled: true })), { secret: async () => undefined });
+    const r = await llm.chat(turns, { tools });
+    expect(r.text).toBe("");
+    expect(r.toolCalls).toEqual([{ id: "call_1", name: "issue_refund", arguments: '{"order_id":"4512"}' }]);
+    const req = srv.seen.find((s) => s.path.endsWith("/chat/completions"))!;
+    expect(req.body.tools).toEqual([{ type: "function", function: { name: "lookup_order", description: "Look up an order", parameters: { type: "object", properties: { order_id: { type: "string" } } } } }]);
+    expect(req.body.messages).toEqual([
+      { role: "user", content: "Please refund order 4512" },
+      { role: "assistant", content: "", tool_calls: [{ id: "call_9", type: "function", function: { name: "lookup_order", arguments: '{"order_id":"4512"}' } }] },
+      { role: "tool", content: '{"status":"delivered"}', tool_call_id: "call_9", name: "lookup_order" },
+    ]);
+  });
+
+  it("normalizes an empty provider arguments string to {}", async () => {
+    const srv = await mock((r) =>
+      r.path.endsWith("/models")
+        ? { json: { data: [{ id: "local-model" }] } }
+        : { json: { choices: [{ message: { content: null, tool_calls: [{ id: "call_1", function: { name: "issue_refund", arguments: "" } }] } }], model: "local-model" } },
+    );
+    closers.push(srv.close);
+    const llm = new LlmClient(cfgWith((c) => Object.assign(c, { baseUrl: `${srv.url}/v1`, enabled: true })), { secret: async () => undefined });
+    const r = await llm.chat(turns, { tools });
+    expect(r.toolCalls).toEqual([{ id: "call_1", name: "issue_refund", arguments: "{}" }]);
+  });
+
+  it("sends tools and structured tool turns on the Anthropic path, and reads a tool-call answer", async () => {
+    const srv = await mock(() => ({ json: claudeReply("", { content: [{ type: "tool_use", id: "toolu_1", name: "issue_refund", input: { order_id: "4512" } }], stop_reason: "tool_use" }) }));
+    closers.push(srv.close);
+    const llm = new LlmClient(cfgWith((c) => Object.assign(c.external, { enabled: true, provider: "anthropic", baseUrl: srv.url, model: "claude-opus-5-5" })), {
+      secret: async () => "sk-ant-test-key-0000000000000000",
+    });
+    const r = await llm.chat(turns, { tools });
+    expect(r.toolCalls).toEqual([{ id: "toolu_1", name: "issue_refund", arguments: '{"order_id":"4512"}' }]);
+    const req = srv.seen[0];
+    expect(req.body.tools).toEqual([{ name: "lookup_order", description: "Look up an order", input_schema: { type: "object", properties: { order_id: { type: "string" } } } }]);
+    expect(req.body.messages).toEqual([
+      { role: "user", content: "Please refund order 4512" },
+      { role: "assistant", content: [{ type: "tool_use", id: "call_9", name: "lookup_order", input: { order_id: "4512" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call_9", content: '{"status":"delivered"}' }] },
+    ]);
+  });
+
+  it("merges parallel tool results into one Anthropic user turn", async () => {
+    const srv = await mock(() => ({ json: claudeReply("both checked") }));
+    closers.push(srv.close);
+    const llm = new LlmClient(cfgWith((c) => Object.assign(c.external, { enabled: true, provider: "anthropic", baseUrl: srv.url, model: "claude-opus-5-5" })), {
+      secret: async () => "sk-ant-test-key-0000000000000000",
+    });
+    const r = await llm.chat([
+      { role: "user", content: "Check both orders" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "call_a", name: "lookup_order", arguments: '{"order_id":"1"}' },
+          { id: "call_b", name: "lookup_order", arguments: '{"order_id":"2"}' },
+        ],
+      },
+      { role: "tool", name: "lookup_order", tool_call_id: "call_a", content: '{"status":"delivered"}' },
+      { role: "tool", name: "lookup_order", tool_call_id: "call_b", content: '{"status":"pending"}' },
+    ]);
+    expect(r.text).toBe("both checked");
+    expect(srv.seen[0].body.messages).toEqual([
+      { role: "user", content: "Check both orders" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "call_a", name: "lookup_order", input: { order_id: "1" } },
+          { type: "tool_use", id: "call_b", name: "lookup_order", input: { order_id: "2" } },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "call_a", content: '{"status":"delivered"}' },
+          { type: "tool_result", tool_use_id: "call_b", content: '{"status":"pending"}' },
+        ],
+      },
+    ]);
   });
 });

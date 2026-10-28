@@ -116,17 +116,41 @@ export function batch(spans: OtlpSpan[], service = "test-agent", scope = "neatlo
   };
 }
 
-export function llmSpan(traceId: string, parent: string, opts: { system?: string; user: string; out?: string; toolCalls?: { name: string; args: string }[]; tools?: string[] }): OtlpSpan {
+export function llmSpan(
+  traceId: string,
+  parent: string,
+  opts: {
+    system?: string;
+    user?: string;
+    out?: string;
+    toolCalls?: { name: string; args: string }[];
+    tools?: (string | { name: string; description?: string; input_schema?: unknown })[];
+    /** Recorded input messages, whole, for conversations with tool turns (replaces system/user). */
+    messages?: Record<string, unknown>[];
+  },
+): OtlpSpan {
   const attrs: KeyValue[] = [s("neatlogs.llm.model_name", "mock"), s("neatlogs.llm.token_count.prompt", "10"), s("neatlogs.llm.token_count.completion", "5"), s("neatlogs.llm.token_count.total", "15")];
   let i = 0;
-  if (opts.system) {
-    attrs.push(s(`neatlogs.llm.input_messages.${i}.role`, "system"), s(`neatlogs.llm.input_messages.${i}.content`, opts.system));
-    i++;
+  if (opts.messages?.length) {
+    opts.messages.forEach((m, j) => attrs.push(s(`neatlogs.llm.input_messages.${j}`, JSON.stringify(m))));
+  } else {
+    if (opts.system) {
+      attrs.push(s(`neatlogs.llm.input_messages.${i}.role`, "system"), s(`neatlogs.llm.input_messages.${i}.content`, opts.system));
+      i++;
+    }
+    attrs.push(s(`neatlogs.llm.input_messages.${i}.role`, "user"), s(`neatlogs.llm.input_messages.${i}.content`, opts.user ?? ""));
   }
-  attrs.push(s(`neatlogs.llm.input_messages.${i}.role`, "user"), s(`neatlogs.llm.input_messages.${i}.content`, opts.user));
   if (opts.out !== undefined) attrs.push(s("neatlogs.llm.output_messages.0.role", "assistant"), s("neatlogs.llm.output_messages.0.content", opts.out));
   (opts.toolCalls ?? []).forEach((c, j) => attrs.push(s(`neatlogs.llm.tool_calls.${j}.name`, c.name), s(`neatlogs.llm.tool_calls.${j}.arguments`, c.args)));
-  (opts.tools ?? []).forEach((t, j) => attrs.push(s(`neatlogs.llm.tools.${j}.name`, t)));
+  (opts.tools ?? []).forEach((t, j) => {
+    if (typeof t === "string") {
+      attrs.push(s(`neatlogs.llm.tools.${j}.name`, t));
+      return;
+    }
+    attrs.push(s(`neatlogs.llm.tools.${j}.name`, t.name));
+    if (t.description) attrs.push(s(`neatlogs.llm.tools.${j}.description`, t.description));
+    if (t.input_schema !== undefined) attrs.push(s(`neatlogs.llm.tools.${j}.input_schema`, JSON.stringify(t.input_schema)));
+  });
   return span({ traceId, parent, name: "openai.chat.completions.create", kind: "llm", attrs });
 }
 
@@ -147,7 +171,7 @@ export function markerSpan(traceId: string, root: string): OtlpSpan {
  * "yes" when the question contains one of `yesWhen`, else "no", with logprobs.
  */
 export async function mockLlm(
-  opts: { yesWhen?: string[]; delayMs?: number; rejectWhen?: string[]; plan?: { id: string; params?: Record<string, string> }[] } = {},
+  opts: { yesWhen?: string[]; delayMs?: number; rejectWhen?: string[]; plan?: { id: string; params?: Record<string, string> }[]; toolCall?: { name: string; args?: Record<string, unknown> } } = {},
 ): Promise<{ url: string; requests: any[]; close: () => Promise<void> }> {
   const requests: any[] = [];
   const server = http.createServer((req, res) => {
@@ -166,6 +190,11 @@ export async function mockLlm(
       const user = String(b.messages?.[b.messages.length - 1]?.content ?? "");
       let content = "{}";
       let logprobs: any;
+      // Answer a tool-call replay (no response_format) with the scripted call instead of prose.
+      const toolCall =
+        opts.toolCall && !schema && Array.isArray(b.tools) && b.tools.length
+          ? { id: "call_1", type: "function", function: { name: opts.toolCall.name, arguments: JSON.stringify(opts.toolCall.args ?? {}) } }
+          : undefined;
       const isDecision = schema === "answer" && !!b.response_format?.json_schema?.schema?.properties?.answer?.enum;
       if (schema === "answer" && !isDecision) {
         content = JSON.stringify({ answer: "The lookup_order tool returned 404 for order 4512.", evidence: [] });
@@ -207,7 +236,8 @@ export async function mockLlm(
         content = JSON.stringify({ id: "refund-without-ownership", title: "Refund without ownership check", ask: "Did the agent issue a refund without confirming the customer owns the order?", scope: "trace", span_type: "any", guidance: "Confirm ownership before refunding." });
       }
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ id: "x", model: "mock-model", choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop", logprobs }], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
+      const message = toolCall ? { role: "assistant", content: null, tool_calls: [toolCall] } : { role: "assistant", content };
+      res.end(JSON.stringify({ id: "x", model: "mock-model", choices: [{ index: 0, message, finish_reason: toolCall ? "tool_calls" : "stop", logprobs }], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
     });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
