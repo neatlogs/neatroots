@@ -308,6 +308,11 @@ export class Engine {
     }
     const fresh = u.spans.filter((s) => s.isNew && !s.view.isMarker);
     if (fresh.length) this.track(u.traceId, this.handleSpans(run, fresh.map((s) => s.row.span_id)));
+    else if (u.spans.some((s) => !s.view.isMarker)) {
+      // Re-exported spans can correct cache counts without introducing any new span IDs.
+      // Reconcile only cache rules; other rules and questions keep their fresh-span semantics.
+      this.applyRules(run, loadTrace(this.roots.store, u.traceId), false, undefined, { cacheOnly: true });
+    }
     if (!reopened && (u.rootEnded || u.completed)) {
       run.ended = true;
       // Trailing spans can arrive in the next batch; give them a moment.
@@ -442,9 +447,10 @@ export class Engine {
 
   // ----------------------------------------------------------------- rules
 
-  private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>): void {
+  private applyRules(run: LiveRun, snap: TraceSnapshot, atEnd: boolean, fresh?: ReadonlySet<string>, options: { cacheOnly?: boolean } = {}): void {
     for (const lc of this.registry.rules()) {
       const rule = lc.check as RuleCheck;
+      if (options.cacheOnly && rule.rule.type !== "cache_reuse") continue;
       if (!this.appliesTo(rule, run)) continue;
       if (this.roots.store.latestFindingFor(run.traceId, rule.id)?.status === "dismissed") continue;
       if (rule.rule.type === "run_end" && !atEnd) continue;
@@ -460,7 +466,8 @@ export class Engine {
       else if (!open && !atEnd && rule.rule.type === "requires_before" && this.waitForLateSpans(run, rule.id)) continue;
       if (hit?.firing) {
         if (open) {
-          const changed = JSON.stringify(open.evidence_span_ids) !== JSON.stringify(hit.evidenceSpanIds);
+          const changed = JSON.stringify(open.evidence_span_ids) !== JSON.stringify(hit.evidenceSpanIds)
+            || JSON.stringify(open.detail.params) !== JSON.stringify(hit.params);
           if (changed) {
             const f = this.roots.store.updateFinding(open.id, { evidence_span_ids: hit.evidenceSpanIds, detail: { ...open.detail, params: hit.params } });
             if (f) this.roots.bus.emit("finding", f);
@@ -483,10 +490,15 @@ export class Engine {
           this.roots.bus.emit("finding", f);
           if (status === "raised") this.onFindingRaised(run, f, lc, hit.params, snap);
         }
-      } else if (open && hit && !hit.firing) {
+      } else if (open && (hit || rule.rule.type === "cache_reuse")) {
+        // Corrections can erase this finding's cache evidence while another group still has
+        // genuine history. Only history overlapping the open finding can retain its halt.
         // A streak that ended still happened, so its halt stands. A requires_before whose earlier
         // call arrived late never happened at all, so its halt is withdrawn too.
-        this.resolve(open, { keepHalts: rule.rule.type !== "requires_before" });
+        const historicalEvidence = new Set(hit?.evidenceSpanIds ?? []);
+        const erasedCache = rule.rule.type === "cache_reuse"
+          && !open.evidence_span_ids.some((id) => historicalEvidence.has(id));
+        this.resolve(open, { keepHalts: rule.rule.type !== "requires_before" && !erasedCache });
       }
     }
   }
