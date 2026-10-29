@@ -75,6 +75,23 @@ describe("file import source and Neatlogs export span fields", () => {
     });
     const uCloud = t.roots.ingest(parseTraceFile(cloudDump, "cloud-dump.json"));
     expect(importSource(t.roots, uCloud[0].traceId)).toBe("neatlogs-cloud");
+
+    const httpDumpTid = hex(16);
+    const httpDump = JSON.stringify({
+      resourceSpans: [
+        {
+          resource: { attributes: [{ key: "neatroots.import.source", value: { stringValue: "http" } }] },
+          scopeSpans: [
+            {
+              scope: { name: "test" },
+              spans: [{ traceId: httpDumpTid, spanId: hex(8), name: "http-dump-root", kind: 1, startTimeUnixNano: "1000000", endTimeUnixNano: "2000000", status: {} }],
+            },
+          ],
+        },
+      ],
+    });
+    const uHttpDump = t.roots.ingest(parseTraceFile(httpDump, "http-dump.json"));
+    expect(importSource(t.roots, uHttpDump[0].traceId)).toBe("file");
   });
 
   it("preserves span error messages and toolName in Neatlogs trace exports", () => {

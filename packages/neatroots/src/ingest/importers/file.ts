@@ -86,8 +86,19 @@ export function parseTraceFile(text: string, name: string, project?: string): Re
   return batches;
 }
 
+function hasImportProvenance(a: { key: string; value: Record<string, unknown> }): boolean {
+  return (
+    a.key === "neatroots.import.source" &&
+    "stringValue" in a.value &&
+    typeof a.value.stringValue === "string" &&
+    a.value.stringValue.length > 0 &&
+    a.value.stringValue !== "http" &&
+    a.value.stringValue !== "replay"
+  );
+}
+
 function setImportSource(b: ResourceSpansBatch, source: string): void {
-  if (b.resource.attributes.some((a) => a.key === "neatroots.import.source" && hasNonEmptyStringValue(a))) return;
+  if (b.resource.attributes.some(hasImportProvenance)) return;
   const rest = b.resource.attributes.filter((a) => a.key !== "neatroots.import.source");
   b.resource.attributes = [...rest, { key: "neatroots.import.source", value: { stringValue: source } }];
 }
