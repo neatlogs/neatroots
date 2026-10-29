@@ -38,10 +38,29 @@ const random = (n: number, seed: number) => {
   return o;
 };
 
+const NEW_TOOL_KEYS = [
+  "sk_live_abcdefghijklmnopqrst",
+  "rk_test_abcdefghijklmnopqrst",
+  "gho_abcdefghijklmnopqrstuvwxyz0123456789",
+  "github_pat_abcdefghijklmnopqrstuvwxyz0",
+  "AIzaabcdefghijklmnopqrstuvwxyz012345678",
+  "hf_abcdefghijklmnopqrstuvwxyzabcd",
+  "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+  "SG.abcdefghijklmnopqrst.abcdefghijklmnopqrst",
+  "dckr_pat_abcdefghijklmnopqrstu",
+  "dop_v1_abcdefghijklmnopqrstuvwxyz012345",
+];
+
 describe("secret-in-tool-output", () => {
   it("loads and fires on a key in a tool result", () => {
     expect(rule).toBeDefined();
     expect(run('{"key":"sk-live-4f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c"}')?.firing).toBe(true);
+  });
+
+  it("fires on the newly supported key formats in tool results", () => {
+    for (const key of NEW_TOOL_KEYS) {
+      expect(run(`tool output: ${key}`)?.firing, key).toBe(true);
+    }
   });
 
   it("never puts the secret in the finding", () => {
