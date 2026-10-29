@@ -257,6 +257,8 @@ export interface OtlpLogRecord {
   severityNumber?: number;
   body: AnyValue;
   attributes: KeyValue[];
+  /** The event this record reports (OTel event_name), when it is one. */
+  eventName?: string;
   traceId: string;
   spanId: string;
   resource: OtlpResource;
@@ -276,6 +278,7 @@ function normLogs(obj: any): OtlpLogRecord[] {
           severityNumber: num(g(lr, "severityNumber", "severity_number")),
           body: normValue(lr.body),
           attributes: normKvs(lr.attributes),
+          eventName: ((n) => (typeof n === "string" && n ? n : undefined))(g(lr, "eventName", "event_name")),
           traceId: bytesToHex(g(lr, "traceId", "trace_id"), 16),
           spanId: bytesToHex(g(lr, "spanId", "span_id"), 8),
           resource,

@@ -95,7 +95,7 @@ export function mountCollector(app: Hono, roots: Roots): void {
     try {
       const body = await readBody(c);
       const records = isJson(c) ? decodeLogsJson(JSON.parse(body.toString("utf8"))) : decodeLogsProtobuf(body);
-      roots.store.ingestLogs(records);
+      roots.ingestLogs(records);
     } catch (err) {
       return c.json({ code: 3, message: `invalid OTLP logs payload: ${(err as Error).message}` }, 400);
     }

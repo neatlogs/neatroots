@@ -306,14 +306,33 @@ export class Engine {
       run.ended = false;
       clearTimeout(run.endTimer);
     }
-    const fresh = u.spans.filter((s) => s.isNew && !s.view.isMarker);
-    if (fresh.length) this.track(u.traceId, this.handleSpans(run, fresh.map((s) => s.row.span_id)));
+    // Message content logged after its span changes what the span shows, so its checks look at it again.
+    if (u.lateLogs) this.forgetAnswers(run, u.spans.map((x) => x.row.span_id));
+    const fresh = u.spans.filter((s) => (s.isNew || u.lateLogs) && !s.view.isMarker);
+    if (fresh.length) this.track(u.traceId, this.handleSpans(run, fresh.map((s) => s.row.span_id), !!u.lateLogs));
     if (!reopened && (u.rootEnded || u.completed)) {
       run.ended = true;
       // Trailing spans can arrive in the next batch; give them a moment.
       clearTimeout(run.endTimer);
       run.endTimer = setTimeout(() => void this.track(u.traceId, this.handleEnd(run)), 400);
     }
+  }
+
+  /**
+   * Makes the questions asked about these spans before their message content arrived count as not asked yet.
+   * A span question is remembered per span and a trace question by the spans it saw, neither of which late
+   * content changes. A span still waiting in a queue is left alone: it is read when its turn comes.
+   */
+  private forgetAnswers(run: LiveRun, spanIds: string[]): void {
+    for (const id of spanIds) {
+      const suffix = `:${id}`;
+      for (const key of [...run.spanDone]) {
+        if (!key.endsWith(suffix)) continue;
+        if (run.spanQueue.get(key.slice(0, -suffix.length))?.includes(id)) continue;
+        run.spanDone.delete(key);
+      }
+    }
+    run.traceEvidence.clear();
   }
 
   /** Checks in force for a run: its plan plus every user, project and MCP question that applies. */
@@ -348,12 +367,13 @@ export class Engine {
     return true;
   }
 
-  private async handleSpans(run: LiveRun, spanIds: string[]): Promise<void> {
+  private async handleSpans(run: LiveRun, spanIds: string[], late = false): Promise<void> {
     const snap = loadTrace(this.roots.store, run.traceId);
     const fresh = snap.spans.filter((s) => spanIds.includes(s.id));
     this.applyRules(run, snap, false, new Set(spanIds));
     this.ensurePlan(run, snap);
-    for (const s of fresh) if ((s.kind === "TOOL" || s.kind === "MCP_TOOL") && !run.answered?.toolSpans.has(s.id)) void this.track(run.traceId, this.labelTool(run, s, snap));
+    // A tool span is labelled once, when it arrives; a late log would store a second label for it.
+    if (!late) for (const s of fresh) if ((s.kind === "TOOL" || s.kind === "MCP_TOOL") && !run.answered?.toolSpans.has(s.id)) void this.track(run.traceId, this.labelTool(run, s, snap));
     if (run.plan) this.scheduleQuestions(run, snap, fresh);
   }
 

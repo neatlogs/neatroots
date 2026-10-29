@@ -47,7 +47,7 @@ export function startGrpc(roots: Roots): Promise<grpc.Server | null> {
   );
   server.addService(
     unary("/opentelemetry.proto.collector.logs.v1.LogsService/Export", () => {}),
-    { Export: handler((b) => roots.store.ingestLogs(decodeLogsProtobuf(b))) },
+    { Export: handler((b) => roots.ingestLogs(decodeLogsProtobuf(b))) },
   );
   server.addService(unary("/opentelemetry.proto.collector.metrics.v1.MetricsService/Export", () => {}), { Export: handler(() => {}) });
   return new Promise((resolve) => {

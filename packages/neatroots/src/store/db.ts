@@ -7,6 +7,9 @@ import { deleteUnattachedLogsBefore, trimUnattachedLogs } from "./unattached-log
 import { SearchIds } from "./search-ids.js";
 import { sha256, newId } from "../util/ids.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
+import { isGenAiEvent } from "../semantics/genai-events.js";
+import { genAiLogEvents } from "./genai-logs.js";
+import { RefreshQueue } from "./refresh-queue.js";
 import { hasRemoteParent, kvToPlain, type KeyValue, type OtlpResource, type OtlpScope, type OtlpSpan, type Plain, type ResourceSpansBatch } from "../otlp/types.js";
 import type {
   Annotation,
@@ -132,6 +135,7 @@ CREATE TABLE IF NOT EXISTS logs (
   severity TEXT,
   body TEXT,
   attributes TEXT,
+  event_name TEXT,
   resource_id TEXT,
   received_ms INTEGER NOT NULL
 );
@@ -283,6 +287,8 @@ export interface TraceUpdate {
   /** A parentless span took the root back from one that only qualified through its remote parent (#157). */
   rootHandedBack: boolean;
   completed: boolean;
+  /** The spans were stored earlier; message content logged after them changed what they show (spans holds those). */
+  lateLogs?: boolean;
 }
 
 export interface RunFilter {
@@ -446,6 +452,8 @@ export class Store {
   }
 
   close(): void {
+    this.lateLogListener = undefined;
+    this.lateLogRefreshes.flush();
     this.db.close();
   }
 
@@ -456,6 +464,9 @@ export class Store {
       if (!cols.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     };
     ensure("plans", "body", "TEXT");
+    ensure("logs", "event_name", "TEXT");
+    // A span's GenAI events are a range on event_name, so its other logs are never read.
+    this.db.exec("DROP INDEX IF EXISTS logs_span; CREATE INDEX IF NOT EXISTS logs_span_event ON logs (trace_id, span_id, event_name)");
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
     this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
@@ -504,7 +515,7 @@ export class Store {
         const scopeId = this.upsertScope(b.scope);
         const resAttrs = kvToPlain(b.resource.attributes);
         for (const span of b.spans) {
-          const view = buildView(span, b.resource.attributes);
+          const view = buildView(span, b.resource.attributes, () => genAiLogEvents(this.db, span.traceId, span.spanId));
           const previous = this.db
             .prepare(
               `SELECT is_marker, span_kind, status_code, prompt_tokens, completion_tokens, total_tokens, blobs
@@ -765,13 +776,15 @@ export class Store {
 
   ingestLogs(records: OtlpLogRecord[]): number {
     const now = Date.now();
+    const touched = new Map<string, { traceId: string; spanId: string }>();
     const tx = this.db.transaction(() => {
       for (const r of records) {
         const resourceId = this.upsertResource(r.resource);
         const body = kvToPlain([{ key: "b", value: r.body }]).b;
+        const eventName = r.eventName ?? (typeof kvToPlain(r.attributes)["event.name"] === "string" ? (kvToPlain(r.attributes)["event.name"] as string) : undefined);
         this.db
           .prepare(
-            "INSERT INTO logs (trace_id, span_id, time_ns, severity, body, attributes, resource_id, received_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO logs (trace_id, span_id, time_ns, severity, body, attributes, event_name, resource_id, received_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
           )
           .run(
             r.traceId || null,
@@ -780,13 +793,83 @@ export class Store {
             r.severityText ?? (r.severityNumber !== undefined ? String(r.severityNumber) : null),
             typeof body === "string" ? body : JSON.stringify(body),
             JSON.stringify(r.attributes),
+            eventName ?? null,
             resourceId,
             now,
           );
+        if (r.traceId && r.spanId && isGenAiEvent(eventName)) touched.set(`${r.traceId}/${r.spanId}`, { traceId: r.traceId, spanId: r.spanId });
       }
     });
     tx();
+    // Message content can arrive after its span: refresh what was derived from the span alone.
+    // Once the logs are stored, so a failed refresh can neither lose them nor fail the request.
+    this.lateLogRefreshes.queue(touched.values());
     return records.length;
+  }
+
+  /** Refreshes spans after late logs, a bounded slice at a time. */
+  private lateLogRefreshes = new RefreshQueue(
+    (t) => this.refreshSpanView(t.traceId, t.spanId),
+    (work) => this.db.transaction(work)(),
+    undefined,
+    (spans) => this.announceRefreshed(spans),
+  );
+
+  private lateLogListener?: (updates: TraceUpdate[]) => void;
+
+  /** Called, per run, with the spans whose views changed because message content was logged after them. */
+  onLateLogs(fn: (updates: TraceUpdate[]) => void): void {
+    this.lateLogListener = fn;
+  }
+
+  private announceRefreshed(spans: { traceId: string; spanId: string }[]): void {
+    if (!this.lateLogListener) return;
+    const byTrace = new Map<string, Set<string>>();
+    for (const s of spans) byTrace.set(s.traceId, (byTrace.get(s.traceId) ?? new Set()).add(s.spanId));
+    const updates: TraceUpdate[] = [];
+    for (const [traceId, ids] of byTrace) {
+      const rows = this.getSpans(traceId, false).filter((r) => ids.has(r.span_id));
+      const refreshed: IngestedSpan[] = [];
+      for (const row of rows) {
+        const full = this.getOtlpSpan(traceId, row.span_id);
+        if (full) refreshed.push({ row, view: this.viewOf(full), isNew: false });
+      }
+      if (refreshed.length) updates.push({ traceId, spans: refreshed, runCreated: false, rootEnded: false, rootHandedBack: false, completed: false, lateLogs: true });
+    }
+    if (updates.length) this.lateLogListener(updates);
+  }
+
+  /** Applies every pending refresh of spans whose logs arrived late. */
+  flushPendingRefreshes(): void {
+    this.lateLogRefreshes.flush();
+  }
+
+  private viewRevs = new Map<string, number>();
+
+  /** Changes whenever message content logged against a span re-derives its view, so caches of the view can tell. */
+  viewRevision(traceId: string, spanId: string): number {
+    return this.viewRevs.get(`${traceId}/${spanId}`) ?? 0;
+  }
+
+  /** The view of a stored span, including GenAI message content logged against it. */
+  viewOf(full: { span: OtlpSpan; resource: OtlpResource }): SpanView {
+    return buildView(full.span, full.resource.attributes, () => genAiLogEvents(this.db, full.span.traceId, full.span.spanId));
+  }
+
+  /** Re-derives a stored span's previews and search text after message content arrived for it. */
+  private refreshSpanView(traceId: string, spanId: string): void {
+    const full = this.getOtlpSpan(traceId, spanId);
+    if (!full) return;
+    const view = this.viewOf(full);
+    if (view.isMarker) return;
+    this.viewRevs.set(`${traceId}/${spanId}`, this.viewRevision(traceId, spanId) + 1);
+    const inp = view.input !== undefined ? preview(view.input, 600) : null;
+    const out = view.output !== undefined ? preview(view.output, 600) : null;
+    this.db.prepare("UPDATE spans SET input_preview = ?, output_preview = ? WHERE trace_id = ? AND span_id = ?").run(inp, out, traceId, spanId);
+    this.db
+      .prepare("UPDATE runs SET input_preview = ?, output_preview = ? WHERE trace_id = ? AND root_span_id = ?")
+      .run(view.input !== undefined ? (currentRequest(view.input) ?? preview(view.input, 300)) : null, view.output !== undefined ? preview(view.output, 300) : null, traceId, spanId);
+    this.indexSpan(traceId, spanId, full.span.name, view);
   }
 
   // ------------------------------------------------------------------- reads
@@ -1528,6 +1611,8 @@ export class Store {
       const ids = JSON.stringify(list);
       const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
       this.searchIds.deleteRuns(ids);
+      const gone = new Set(traceIds);
+      for (const k of this.viewRevs.keys()) if (gone.has(k.slice(0, k.indexOf("/")))) this.viewRevs.delete(k);
       for (const t of ["spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
         this.db.prepare(`DELETE FROM ${t} WHERE ${inIds}`).run(ids);
       }
@@ -1648,7 +1733,7 @@ export class Store {
       for (const r of rows) {
         const full = this.getOtlpSpan(r.trace_id, r.span_id);
         if (!full) continue;
-        const view = buildView(full.span, full.resource.attributes);
+        const view = this.viewOf(full);
         if (view.isMarker) continue;
         this.indexSpan(r.trace_id, r.span_id, full.span.name, view);
         n++;

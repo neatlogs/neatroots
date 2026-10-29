@@ -1,5 +1,5 @@
 import type { Store } from "../store/db.js";
-import { buildView, isSystemRole, preview, type SpanKind } from "../semantics/view.js";
+import { isSystemRole, preview, type SpanKind } from "../semantics/view.js";
 import { hasRemoteParent, type Plain } from "../otlp/types.js";
 import type { Evidence, EvidenceField, SpanSelector } from "../checks/types.js";
 import type { RunRow, SpanRow } from "../types.js";
@@ -27,6 +27,8 @@ export interface SpanInfo {
   toolCalls?: { id?: string; name: string; arguments: Plain }[];
   tools?: string[];
   seq: number;
+  /** Store.viewRevision when parsed: message content logged later invalidates the entry. */
+  rev: number;
 }
 
 export interface TraceSnapshot {
@@ -72,13 +74,14 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
     if (row.name === "neatroots.guidance" || row.name === "roots.guidance") continue;
     live.add(row.span_id);
     const hit = cache.get(row.span_id);
-    if (hit && hit.seq === row.seq) {
+    const rev = store.viewRevision(traceId, row.span_id);
+    if (hit && hit.seq === row.seq && hit.rev === rev) {
       spans.push(hit);
       continue;
     }
     const full = store.getOtlpSpan(traceId, row.span_id);
     if (!full) continue;
-    const v = buildView(full.span, full.resource.attributes);
+    const v = store.viewOf(full);
     const info: SpanInfo = {
       id: row.span_id,
       ref: row.span_id.slice(0, 6),
@@ -100,6 +103,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
       toolCalls: v.toolCalls,
       tools: v.tools,
       seq: row.seq,
+      rev,
     };
     cache.set(row.span_id, info);
     spans.push(info);
