@@ -1,3 +1,4 @@
+import { SpanStatus } from "./span-status";
 import { useState } from "react";
 import { toast } from "sonner";
 import { NeatBadge } from "@/components/neat-ui/neat-badge";
@@ -31,6 +32,7 @@ function KeyValues({ entries }: { entries: [string, unknown][] }) {
 }
 
 /** One span in a side sheet: why it matters, what went in and what came out. The body scrolls. */
+/** Show the selected span details, including failures and abandoned streams. */
 export function SpanSheet({
   traceId,
   spanId,
@@ -71,11 +73,7 @@ export function SpanSheet({
               </NeatBadge>
             )}
             <span className="truncate">{v?.toolName ?? d?.name ?? "Span"}</span>
-            {d?.status.code === 2 && (
-              <StatusPill size="sm" tone="danger">
-                Failed
-              </StatusPill>
-            )}
+            {d && <SpanStatus span={{ status_code: d.status.code, error: v?.error ?? null, span_kind: d.kind, stream_cancelled: d.attributes["neatlogs.stream.cancelled"] === true }} />}
           </SheetTitle>
           <SheetDescription className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs tabular-nums">
             {d && (

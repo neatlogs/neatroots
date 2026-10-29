@@ -1,3 +1,4 @@
+import { SpanStatus, spanState } from "../span-status";
 import { CircleIcon, FlashIcon } from "@hugeicons/core-free-icons";
 import { useMemo, useState } from "react";
 import { Icon } from "@/components/ui/icon";
@@ -27,6 +28,7 @@ function ticks(total: number): number[] {
  * The run on a time axis, one row per span in tree order: where time went, what ran in
  * parallel, and what waited. Zoom stretches the axis; the box scrolls both ways.
  */
+/** Plot span durations with shared status labels and selection controls. */
 export function TimelineView({ spans, flagged, selected, onSelect }: { spans: Span[]; flagged: Set<string>; selected?: string; onSelect: (id: string) => void }) {
   const rows = useMemo(() => treeOrder(spans), [spans]);
   const [zoom, setZoom] = useState(1);
@@ -56,7 +58,7 @@ export function TimelineView({ spans, flagged, selected, onSelect }: { spans: Sp
             </div>
           </div>
           {rows.map(({ span: s, depth }) => {
-            const failed = s.status_code === 2;
+            const failed = spanState(s) === "Failed";
             const guidance = isGuidance(s);
             const isSel = selected === s.span_id;
             const left = ((s.start_ms - start) / total) * 100;
@@ -67,6 +69,7 @@ export function TimelineView({ spans, flagged, selected, onSelect }: { spans: Sp
                 <div className={cn(rowCls, "sticky left-0 z-10 flex min-w-0 items-center gap-1.5 border-r border-border bg-background pr-2")} style={{ paddingLeft: 12 + depth * 12 }} title={s.tool_name ?? s.name}>
                   <Icon icon={guidance ? FlashIcon : (KIND_ICON[s.span_kind] ?? CircleIcon)} size="xs" className={cn("shrink-0", failed ? "text-danger-fg" : "text-muted-foreground")} />
                   <span className={cn("truncate text-xs", failed ? "text-danger-fg" : "text-foreground")}>{guidance ? "Note to the agent" : (s.tool_name ?? s.name)}</span>
+                  <SpanStatus span={s} />
                   {flagged.has(s.span_id) && <span aria-label="Evidence for an open problem" className="size-1.5 shrink-0 rounded-full bg-warning-fg" />}
                 </div>
                 <div className={cn(rowCls, "relative")}>

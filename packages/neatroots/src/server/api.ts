@@ -30,6 +30,7 @@ export { checkFromInput } from "./api-checks.js";
 
 const STEERING_MODES: SteeringMode[] = ["off", "advisory", "gate", "self-check"];
 
+/** Summarize stored run metrics and current finding/steering state. */
 export function runSummary(roots: Roots, r: RunRow) {
   const summary = roots.store.getSummary(r.trace_id);
   return {
@@ -41,7 +42,9 @@ export function runSummary(roots: Roots, r: RunRow) {
   };
 }
 
-export function runDetail(roots: Roots, traceId: string) {
+/** Read run details after any legacy cancellation projection has been backfilled. */
+export async function runDetail(roots: Roots, traceId: string) {
+  const cancelled = await roots.store.cancelledSpanIds(traceId);
   const run = roots.store.getRun(traceId);
   if (!run) return undefined;
   const spans = roots.store.getSpans(traceId, false);
@@ -58,7 +61,12 @@ export function runDetail(roots: Roots, traceId: string) {
   const plan = run.plan_id ? roots.store.getPlan(run.plan_id) ?? null : null;
   return {
     run: runSummary(roots, run),
-    spans: spans.map((s) => ({ ...s, tool_result: toolLabels[s.span_id] ?? null })),
+    spans: spans.map((s) => ({
+      ...s,
+      // Presentation only: retain the stored status and expose the explicit SDK marker.
+      stream_cancelled: cancelled.has(s.span_id),
+      tool_result: toolLabels[s.span_id] ?? null,
+    })),
     findings,
     notes: roots.store.notesForTrace(traceId),
     explanation: roots.store.explanationFor("run", traceId) ?? null,
@@ -109,6 +117,7 @@ function projects(roots: Roots) {
 }
 
 
+/** Register the local application routes, including asynchronous run-detail reads. */
 export function mountApi(app: Hono, roots: Roots): void {
   const engine = roots.engine;
   mountModelsApi(app, roots);
@@ -174,7 +183,7 @@ export function mountApi(app: Hono, roots: Roots): void {
   });
 
   app.get("/api/runs/:traceId", async (c) => {
-    const d = runDetail(roots, c.req.param("traceId"));
+    const d = await runDetail(roots, c.req.param("traceId"));
     return d ? c.json({ ...d, coverage: await checkCoverage(roots, c.req.param("traceId")) }) : err(c, 404, "run not found");
   });
 
