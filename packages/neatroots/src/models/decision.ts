@@ -328,7 +328,11 @@ export class LlmDecisionBackend implements DecisionBackend {
         const said = String(parsed.answer ?? "").trim().toLowerCase();
         const chosen = labels.find((l) => l.toLowerCase() === said) ?? "";
         const stated = typeof parsed.confidence === "number" && parsed.confidence >= 0 && parsed.confidence <= 1 ? parsed.confidence : undefined;
-        const conf = stated ?? 0.85;
+        // When logprobs were expected (local LLM, askConfidence=false) but the response
+        // carried none, use 1.0 before shrinking so a confident answer can still cross
+        // flag_at: 0.8 (0.8 * 1.0 + 0.1 = 0.9). When confidence was asked for but not
+        // stated (hosted LLM without logprobs), keep the conservative 0.85 fallback.
+        const conf = stated ?? (askConfidence ? 0.85 : 1.0);
         // No readable answer (prose instead of JSON): the check fails rather than reading as 50/50,
         // which would count as "yes".
         if (!labels.includes(chosen)) throw new Error(`the model's answer couldn't be read (${JSON.stringify(String(r.text ?? "").slice(0, 80))})`);
