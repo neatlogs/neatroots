@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ToggleChip } from "@/components/ui/toggle-chip";
-import { api, type SearchRun } from "@/lib/api";
+import { api, ApiError, type SearchRun } from "@/lib/api";
 import { dur, stamp } from "@/lib/format";
 import { go } from "@/lib/router";
 import { runGoal } from "../../runs/_libs/labels";
@@ -65,7 +65,7 @@ export function SearchPage({ query }: { query: URLSearchParams }) {
     const next = dq ? `search?q=${encodeURIComponent(dq)}` : "search";
     if (window.location.hash !== `#/${next}`) window.history.replaceState(null, "", `#/${next}`);
   }, [dq]);
-  const { data, isFetching } = useQuery({
+  const { data, isFetching, error } = useQuery({
     queryKey: ["search", dq],
     queryFn: () => api<{ total: number; runs: SearchRun[]; query: { text: string; filters: Record<string, string> } }>(`/api/search/runs?q=${encodeURIComponent(dq)}&limit=60`),
     enabled: dq.length > 0,
@@ -110,6 +110,9 @@ export function SearchPage({ query }: { query: URLSearchParams }) {
             title="Search your runs"
             description="Type a word from a prompt, an answer, an error or a tool name, or use a filter. Everything is searched on this machine."
           />
+        ) : error instanceof ApiError && error.status === 400 ? (
+          // A query the server can't read (since:30x): say why instead of keeping the last results.
+          <EmptyState variant="inline" state="no-results" title="Can't read that search" description={error.message} />
         ) : isFetching && !data ? (
           Array.from({ length: 4 }, (_, i) => <Skeleton key={i} className="h-24 w-full" />)
         ) : !data?.runs.length ? (
