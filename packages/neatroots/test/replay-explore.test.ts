@@ -97,6 +97,29 @@ describe("replay", () => {
     expect(t.roots.replays.get(r.id)?.state).toBe("failed");
   });
 
+  it("reports a failing agent command instead of blaming trace delivery", async () => {
+    t = await makeRoots({ noEngine: true });
+    const x = seed(t);
+    t.roots.config.rerun["support-agent"] = { command: `node -e "console.error('setup exploded'); process.exit(7)"` };
+    const { done } = t.roots.replays.startRun(x.traceId);
+    const r = await done;
+    expect(r).toMatchObject({ state: "failed", new_trace_id: null });
+    expect(r.error).toMatch(/agent command exited with 7.*setup exploded/);
+    expect(r.log_tail).toContain("setup exploded");
+  }, 15_000);
+
+  it("links a run even when the agent exits non-zero afterward", async () => {
+    t = await makeRoots({ noEngine: true, serve: true });
+    const x = seed(t);
+    t.roots.config.rerun["support-agent"] = {
+      command: `node -e "fetch(process.env.NEATLOGS_ENDPOINT + '/v1/trace', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({name:'support', project:'support-agent', input:'sent-before-failure'})}).then(() => process.exit(1))"`,
+    };
+    const { done } = t.roots.replays.startRun(x.traceId);
+    const r = await done;
+    expect(r).toMatchObject({ state: "succeeded", via: "command", new_trace_id: expect.any(String) });
+    expect(t.roots.store.getRun(r.new_trace_id!)?.input_preview).toContain("sent-before-failure");
+  }, 15_000);
+
   it("refuses to register a rerun command in a folder that doesn't exist", async () => {
     t = await makeRoots({ noEngine: true, serve: true });
     const post = (cwd: string) =>
