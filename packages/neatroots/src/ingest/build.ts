@@ -34,12 +34,13 @@ export interface SpanNode {
   logs?: { level?: string; message: string; timestamp?: TimeLike }[];
 }
 
-export type TimeLike = string | number | Date;
+export type TimeLike = string | number | bigint | Date;
 
 /** Nanoseconds since the epoch, as OTLP wants them. Numbers are ms, s or ns by magnitude. */
 export function toNs(t: TimeLike | null | undefined): bigint | undefined {
   if (t === undefined || t === null || t === "") return undefined;
   if (t instanceof Date) return BigInt(t.getTime()) * 1_000_000n;
+  if (typeof t === "bigint") return t;
   if (typeof t === "number") {
     if (!Number.isFinite(t)) return undefined;
     if (t > 1e17) return BigInt(Math.round(t)); // ns

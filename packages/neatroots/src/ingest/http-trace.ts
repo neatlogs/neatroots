@@ -135,7 +135,7 @@ export function httpTraceToBatches(body: unknown, fallbackProject = "http", opts
     let earliestChild: bigint | undefined;
     let firstChildFromTrace = false;
     const index = nodes.length;
-    nodes.push({ traceId, spanId, parentSpanId: parent, name: n.name, start: Number(start) } as SpanNode);
+    nodes.push({ traceId, spanId, parentSpanId: parent, name: n.name, start } as SpanNode);
     for (const c of n.children ?? []) {
       const child = walk(c, spanId, cursor, cursorFromTrace);
       // A parent without its own start begins with its earliest child, not at ingest time.
@@ -168,8 +168,8 @@ export function httpTraceToBatches(body: unknown, fallbackProject = "http", opts
       parentSpanId: parent,
       name: n.name,
       kind,
-      start: Number(start),
-      end: Number(end),
+      start,
+      end,
       // A guardrail that didn't pass (passed: false) is an error span, as the HTTP trace docs say.
       status: n.status?.toUpperCase() ?? (n.error || n.passed === false ? "ERROR" : "OK"),
       error: n.error ?? null,
