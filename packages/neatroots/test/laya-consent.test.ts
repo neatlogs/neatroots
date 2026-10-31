@@ -61,6 +61,32 @@ describe("asking before downloading Laya", () => {
     }
   });
 
+  it("does not hang when the running server reports a terminal non-running state", async () => {
+    const home = tmpHome();
+    const cfg = defaultConfig();
+    cfg.port = await freePort();
+    saveConfig(cfg, path.join(home, "config.yaml"));
+    const server = http.createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/health") return res.end('{"ok":true}');
+      if (req.url === "/api/classifier/laya" && req.method === "POST") return res.end('{"ok":true}');
+      if (req.url === "/api/status") return res.end(JSON.stringify({ classifier: { laya: { state: "stopped", message: "stopped", progress: null, url: null } } }));
+      res.statusCode = 404;
+      res.end('{}');
+    });
+    await new Promise<void>((resolve) => server.listen(cfg.port, "127.0.0.1", resolve));
+    try {
+      const packageDir = fileURLToPath(new URL("..", import.meta.url));
+      const tsx = fileURLToPath(import.meta.resolve("tsx"));
+      const child = spawn(process.execPath, ["--import", tsx, path.join(packageDir, "src", "cli.ts"), "laya", "install"], { cwd: packageDir, env: { ...process.env, NEATROOTS_HOME: home }, stdio: "pipe" });
+      const [code] = (await once(child, "close")) as [number];
+      expect(code).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it("asks only while Laya is on, not installed and not yet answered", () => {
     const cfg = defaultConfig();
     expect(shouldAskForLaya(cfg, false)).toBe(true);
