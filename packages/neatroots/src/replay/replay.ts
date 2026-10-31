@@ -240,6 +240,7 @@ export class Replays {
     });
     try {
       let tail = "";
+      let commandError: string | null = null;
       if (target.url) {
         const res = await fetch(target.url, {
           method: "POST",
@@ -290,11 +291,7 @@ export class Replays {
         if (code !== 0) {
           const detail = code === null ? "was terminated" : `exited with ${code}`;
           const output = tail.trim();
-          return this.finish(r, {
-            state: "failed",
-            error: `the agent command ${detail}${output ? `: ${output.slice(-300)}` : ""}`,
-            log_tail: tail || null,
-          });
+          commandError = `the agent command ${detail}${output ? `: ${output.slice(-300)}` : ""}`;
         }
       }
       // Spans arrive on the SDK's flush interval; give the run a moment to land.
@@ -305,7 +302,7 @@ export class Replays {
           if (fresh.length && i >= 4) linked = fresh[fresh.length - 1].trace_id;
         }
       }
-      if (!linked) return this.finish(r, { state: "failed", error: "the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?", log_tail: tail || null });
+      if (!linked) return this.finish(r, { state: "failed", error: commandError ?? "the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?", log_tail: tail || null });
       const run = this.roots.store.getRun(linked);
       return this.finish(r, { state: "succeeded", new_trace_id: linked, output_preview: run?.output_preview ?? null, log_tail: tail || null });
     } finally {
