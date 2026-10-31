@@ -85,7 +85,8 @@ function longToString(v: unknown): string {
 
 function timeToString(v: unknown): string {
   const text = longToString(v);
-  if (!/^\d+$/.test(text) || BigInt(text) > 18_446_744_073_709_551_615n) throw new Error(`invalid OTLP timestamp: ${text}`);
+  const shown = text.length > 64 ? `${text.slice(0, 61)}…` : text;
+  if (!/^\d+$/.test(text) || text.length > 20 || BigInt(text) > 18_446_744_073_709_551_615n) throw new Error(`invalid OTLP timestamp: ${shown}`);
   return text;
 }
 

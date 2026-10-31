@@ -114,6 +114,7 @@ describe("OTLP codec", () => {
     expect(() => decodeTraceJson(make("not-a-time"))).toThrow(/invalid OTLP timestamp/);
     expect(() => decodeTraceJson(make("-1"))).toThrow(/invalid OTLP timestamp/);
     expect(() => decodeTraceJson(make("18446744073709551616"))).toThrow(/invalid OTLP timestamp/);
+    expect(() => decodeTraceJson(make("9".repeat(100)))).toThrow(/invalid OTLP timestamp: 9{61}…/);
   });
 
   it("normalizes non-string status.message to string without dropping or throwing", () => {
