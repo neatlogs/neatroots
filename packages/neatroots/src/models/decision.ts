@@ -306,7 +306,7 @@ export class LlmDecisionBackend implements DecisionBackend {
       prompt += `\nAlso give "confidence": how likely your answer is right, from 0 to 1.`;
       const properties: Record<string, unknown> = { answer: { type: "string", enum: labels }, confidence: { type: "number" } };
       try {
-        const r = await this.llm.chat(
+        let r = await this.llm.chat(
           [
             { role: "system", content: SYSTEM },
             { role: "user", content: prompt },
@@ -322,10 +322,27 @@ export class LlmDecisionBackend implements DecisionBackend {
           },
         );
         model = r.model;
-        const parsed = (r.json as { answer?: string; confidence?: number } | undefined) ?? {};
+        let parsed = (r.json as { answer?: string; confidence?: number } | undefined) ?? {};
         const said = String(parsed.answer ?? "").trim().toLowerCase();
         const chosen = labels.find((l) => l.toLowerCase() === said) ?? "";
-        const stated = typeof parsed.confidence === "number" && parsed.confidence >= 0 && parsed.confidence <= 1 ? parsed.confidence : undefined;
+        let stated = typeof parsed.confidence === "number" && parsed.confidence >= 0 && parsed.confidence <= 1 ? parsed.confidence : undefined;
+        if (!r.logprobs && stated === undefined) {
+          r = await this.llm.chat(
+            [
+              { role: "system", content: SYSTEM },
+              { role: "user", content: `${prompt}\nYour previous answer omitted a usable confidence. Include confidence as a number from 0 to 1.` },
+            ],
+            {
+              schema: { name: "answer", schema: { type: "object", properties, required: ["answer", "confidence"] } },
+              maxTokens: 48,
+              timeoutSec: 60,
+              priority: opts.priority ?? "high",
+              signal: opts.signal,
+            },
+          );
+          parsed = (r.json as { answer?: string; confidence?: number } | undefined) ?? {};
+          stated = typeof parsed.confidence === "number" && parsed.confidence >= 0 && parsed.confidence <= 1 ? parsed.confidence : undefined;
+        }
         // No readable answer (prose instead of JSON): the check fails rather than reading as 50/50,
         // which would count as "yes".
         if (!labels.includes(chosen)) throw new Error(`invalid answer: the model's answer couldn't be read (${JSON.stringify(String(r.text ?? "").slice(0, 80))})`);
