@@ -278,6 +278,8 @@ describe("imports", () => {
   it("parses ms, s, ns and ISO times", () => {
     expect(toNs(1_700_000_000_000)).toBe(1_700_000_000_000_000_000n);
     expect(toNs(1_700_000_000)).toBe(1_700_000_000_000_000_000n);
+    expect(toNs("1700000000123456789")).toBe(1_700_000_000_123_456_789n);
+    expect(toNs("1700000000123456")).toBe(1_700_000_000_123_456_000n);
     expect(toNs("2026-10-09T10:00:00.123456789Z")).toBe(BigInt(Date.parse("2026-10-09T10:00:00.123Z")) * 1_000_000n + 456789n);
     expect(buildSpan({ traceId: "x", spanId: "y", name: "n", start: 1 }).traceId).toHaveLength(32);
   });
@@ -287,6 +289,8 @@ describe("imports", () => {
     expect(toNs("1700000000.5")).toBe(toNs(1700000000.5));
     expect(BigInt(toNs("1700000000.5")!) / 1_000_000n).toBe(1_700_000_000_500n);
     expect(toNs("1700000000123.5")).toBe(toNs(1700000000123.5));
+    const exact = "1700000000123456789";
+    expect(httpTraceToBatches({ name: "exact", start: exact, end: exact }).batches[0].spans[0].startTimeUnixNano).toBe(exact);
     const { batches } = httpTraceToBatches({ name: "run", start: "1700000000.25", end: "1700000001.75" });
     const sp = batches[0].spans[0];
     // Same as sending the numbers (which keep ns only to ~1 µs), not the arrival time.
