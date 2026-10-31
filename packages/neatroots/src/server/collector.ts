@@ -12,6 +12,7 @@ import { traceReadback } from "./readback.js";
 import { HttpTraceError, httpTraceToBatches } from "../ingest/http-trace.js";
 import type { Roots } from "../core.js";
 import { log } from "../util/log.js";
+import { bodyLimit } from "hono/body-limit";
 
 const MAX_BODY = 64 * 1024 * 1024;
 
@@ -26,13 +27,24 @@ function gunzipCapped(raw: Buffer): Buffer {
   }
 }
 
+function decompressCapped(raw: Buffer, decode: (input: Buffer, options: { maxOutputLength: number }) => Buffer): Buffer {
+  try {
+    return decode(raw, { maxOutputLength: MAX_BODY });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ERR_BUFFER_TOO_LARGE") {
+      throw Object.assign(new Error("payload too large after decompression"), { status: 413 });
+    }
+    throw err;
+  }
+}
+
 async function readBody(c: Context): Promise<Buffer> {
   const raw = Buffer.from(await c.req.arrayBuffer());
   if (raw.length > MAX_BODY) throw Object.assign(new Error("payload too large"), { status: 413 });
   const enc = (c.req.header("content-encoding") ?? "").toLowerCase();
   if (enc === "gzip" || enc === "x-gzip") return gunzipCapped(raw);
-  if (enc === "deflate") return zlib.inflateSync(raw, { maxOutputLength: MAX_BODY * 4 });
-  if (enc === "br") return zlib.brotliDecompressSync(raw, { maxOutputLength: MAX_BODY * 4 });
+  if (enc === "deflate") return decompressCapped(raw, zlib.inflateSync);
+  if (enc === "br") return decompressCapped(raw, zlib.brotliDecompressSync);
   // Some exporters gzip without the header; sniff the magic bytes.
   if (raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b) return gunzipCapped(raw);
   return raw;
@@ -104,16 +116,14 @@ export function mountCollector(app: Hono, roots: Roots): void {
   });
 
   // Metrics are accepted so exporters do not retry, but neatroots does not use them.
-  app.post("/v1/metrics", async (c) => {
-    try {
-      await readBody(c);
-    } catch (err) {
-      const status = (err as { status?: number }).status ?? 400;
-      return c.json({ code: 3, message: `invalid OTLP metrics payload: ${(err as Error).message}` }, status as 400);
-    }
-    if (isJson(c)) return c.json({ partialSuccess: {} });
-    return new Response(new Uint8Array(), { status: 200, headers: { "content-type": "application/x-protobuf" } });
-  });
+  app.post(
+    "/v1/metrics",
+    bodyLimit({ maxSize: MAX_BODY, onError: (c) => c.json({ code: 3, message: "payload too large" }, 413) }),
+    async (c) => {
+      if (isJson(c)) return c.json({ partialSuccess: {} });
+      return new Response(new Uint8Array(), { status: 200, headers: { "content-type": "application/x-protobuf" } });
+    },
+  );
 
   // The SDKs' optional large-payload upload flow (uploads_enabled, default off) needs an
   // HTTPS object store. neatroots runs on plain localhost, so it answers with a clear,
