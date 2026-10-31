@@ -95,14 +95,15 @@ describe("OpenAI parse helpers", () => {
     expect(transform).not.toHaveBeenCalled();
   });
 
-  it("keeps parse and stream helpers working when an inner wrapper returns a plain Promise", async () => {
+  it("reports missing response helpers when an inner wrapper returns a plain Promise", async () => {
     const data = { ok: true };
     const request = new SteeredRequest(Promise.resolve({ value: Promise.resolve(data) }));
     const parsed = request._thenUnwrap((value) => ({ parsed: value }));
 
     expect(await parsed).toEqual({ parsed: data });
-    await expect(parsed.withResponse()).resolves.toMatchObject({ data: { parsed: data }, response: expect.any(Response) });
-    await expect(request.withResponse()).resolves.toMatchObject({ data, response: expect.any(Response) });
+    await expect(parsed.withResponse()).rejects.toThrow("response helpers are unavailable");
+    await expect(request.withResponse()).rejects.toThrow("response helpers are unavailable");
+    await expect(parsed.asResponse()).rejects.toThrow("response helpers are unavailable");
   });
 
   it.each(["request", "transform"])("preserves %s failures", async (stage) => {
