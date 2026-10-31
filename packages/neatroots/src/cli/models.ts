@@ -3,7 +3,7 @@ import type { Command } from "commander";
 import { rootsHome, loadConfig, saveConfig } from "../config.js";
 import { hardwareTier, LlmClient } from "../models/llm.js";
 import { DecisionModel } from "../models/decision.js";
-import { LAYA_DOWNLOAD_MB, LayaManager } from "../models/laya.js";
+import { LAYA_DOWNLOAD_MB, LayaManager, type LayaStatus } from "../models/laya.js";
 import { askForLaya, layaAllowed, layaNextSteps, shouldAskForLaya, type LayaConsent } from "../models/laya-consent.js";
 import { getSecret, setSecret, deleteSecret } from "../relay/keychain.js";
 import { api, ask, port, running } from "./util.js";
@@ -39,6 +39,30 @@ export function registerModelCommands(program: Command): void {
       cfg.classifier.laya.enabled = true;
       cfg.classifier.laya.consent = "yes";
       saveConfig(cfg);
+      const p = port();
+      if (await running(p)) {
+        console.log(`Installing Laya ${"(about " + (LAYA_DOWNLOAD_MB / 1000).toFixed(1) + " GB)"} through the running neatroots…`);
+        await api(p, "/api/classifier/laya", { method: "POST", body: JSON.stringify({ action: "install" }) });
+        let s: LayaStatus;
+        const deadline = Date.now() + 15 * 60_000;
+        for (;;) {
+          try {
+            s = (await api<{ classifier: { laya: LayaStatus } }>(p, "/api/status")).classifier.laya;
+          } catch (err) {
+            s = { state: "failed", message: `couldn't read Laya status: ${(err as Error).message}`, progress: null, url: null };
+          }
+          if (s.message) process.stdout.write(`\r  ${s.message}${s.progress !== null ? ` (${Math.round(s.progress * 100)}%)` : ""}`.padEnd(90));
+          if (s.state === "running" || s.state === "external" || s.state === "failed" || s.state === "stopped" || s.state === "disabled" || s.state === "not_installed") break;
+          if (Date.now() >= deadline) {
+            s = { state: "failed", message: "timed out waiting for Laya installation", progress: null, url: null };
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        console.log(`\n${s.state === "running" || s.state === "external" ? "✓" : "✗"} Laya ${s.state}${s.message ? `: ${s.message}` : ""}`);
+        process.exitCode = s.state === "running" || s.state === "external" ? 0 : 1;
+        return;
+      }
       const m = new LayaManager(rootsHome(), cfg.classifier);
       console.log(`Installing Laya ${"(about " + (LAYA_DOWNLOAD_MB / 1000).toFixed(1) + " GB)"} into ${m.dir}…`);
       const t = setInterval(() => {
