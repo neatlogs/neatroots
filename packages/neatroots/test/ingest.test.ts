@@ -308,6 +308,7 @@ describe("imports", () => {
     const malformed = (span: Record<string, unknown>) => JSON.stringify({ data: { trace: { traceId: tid }, spans: [span] } });
     expect(() => parseTraceFile(malformed({ startedAt: 1 }), "missing-id.json")).toThrow(/spans\[0\]\.spanId is required/);
     expect(() => parseTraceFile(malformed({ spanId: "s" }), "missing-time.json")).toThrow(/spans\[0\]\.startedAt/);
+    expect(() => parseTraceFile(JSON.stringify({ data: { trace: { traceId: tid }, spans: [null] } }), "null-span.json")).toThrow(/spans\[0\] must be an object/);
     expect(() => parseTraceFile(JSON.stringify({ data: { trace: { traceId: tid }, spans: [{ spanId: "s", startedAt: 1 }, { spanId: "s", startedAt: 2 }] } }), "duplicate.json")).toThrow(/spanId is duplicated/);
     const lines = `${JSON.stringify({ name: "a" })}\n${JSON.stringify({ name: "b", children: [{ name: "c" }] })}\n`;
     expect(parseTraceFile(lines, "traces.jsonl").map((b) => b.spans.length)).toEqual([1, 2]);

@@ -25,6 +25,7 @@ function fromNeatlogsExport(exp: Record<string, unknown>, project: string): Reso
   if (typeof trace.traceId !== "string" || !trace.traceId) throw new Error("trace.traceId is required");
   const seen = new Set<string>();
   for (const [i, span] of spans.entries()) {
+    if (!span || typeof span !== "object" || Array.isArray(span)) throw new Error(`spans[${i}] must be an object`);
     if (typeof span.spanId !== "string" || !span.spanId) throw new Error(`spans[${i}].spanId is required`);
     if (seen.has(span.spanId)) throw new Error(`spans[${i}].spanId is duplicated`);
     seen.add(span.spanId);
