@@ -6,7 +6,7 @@ import { computeInsights, WINDOWS, type WindowKey } from "../store/insights.js";
 import { body, err } from "./util.js";
 
 function windowKey(v: unknown): WindowKey | undefined {
-  return typeof v === "string" && v in WINDOWS ? (v as WindowKey) : undefined;
+  return typeof v === "string" && Object.hasOwn(WINDOWS, v) ? (v as WindowKey) : undefined;
 }
 
 function insights(roots: Roots, key: WindowKey) {

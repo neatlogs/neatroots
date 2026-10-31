@@ -257,9 +257,14 @@ describe("server", () => {
     const get = await fetch(`${tb.url}/api/insights?window=30days`, { headers: origin });
     expect(get.status).toBe(400);
     expect(await get.json()).toEqual({ error: "window must be 24h, 7d or 30d" });
+    const inherited = await fetch(`${tb.url}/api/insights?window=toString`, { headers: origin });
+    expect(inherited.status).toBe(400);
     const post = await fetch(`${tb.url}/api/insights/digest`, { method: "POST", headers: origin, body: JSON.stringify({ window: 30 }) });
     expect(post.status).toBe(400);
     expect(await post.json()).toEqual({ error: "window must be 24h, 7d or 30d" });
+    const postDefault = await fetch(`${tb.url}/api/insights/digest`, { method: "POST", headers: origin, body: "{}" });
+    expect(postDefault.status).toBe(400);
+    expect(await postDefault.json()).toEqual({ error: "no runs in this period" });
     expect((await fetch(`${tb.url}/api/insights`, { headers: origin })).status).toBe(200);
   });
 
