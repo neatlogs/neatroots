@@ -6,6 +6,7 @@ import {
   decodeTraceJson,
   decodeTraceProtobuf,
   encodeTraceResponse,
+  type OtlpLogRecord,
 } from "../otlp/codec.js";
 import type { ResourceSpansBatch } from "../otlp/types.js";
 import { traceReadback } from "./readback.js";
@@ -47,6 +48,15 @@ function isJson(c: Context): boolean {
  * to ingest.neatlogs.com (protobuf or JSON, gzip, x-api-key), so pointing
  * NEATLOGS_ENDPOINT at neatroots needs no SDK change. The api key is accepted and ignored.
  */
+/**
+ * A batch that decoded but could not be stored (the database is locked or the disk is full) is
+ * answered 503 UNAVAILABLE: the one an OTLP exporter retries. 400 or 500 would make it drop the batch.
+ */
+function storeFailed(c: Context, err: unknown): Response {
+  log.error("ingest failed", err);
+  return c.json({ code: 14, message: "neatroots could not store this batch; retry" }, 503);
+}
+
 export function mountCollector(app: Hono, roots: Roots): void {
   app.post("/v1/traces", async (c) => {
     let batches: ResourceSpansBatch[];
@@ -62,8 +72,7 @@ export function mountCollector(app: Hono, roots: Roots): void {
     try {
       roots.ingest(batches);
     } catch (err) {
-      log.error("ingest failed", err);
-      return c.json({ code: 13, message: "neatroots could not store this batch" }, 500);
+      return storeFailed(c, err);
     }
     if (json) return c.json({ partialSuccess: {} });
     return new Response(Buffer.from(encodeTraceResponse()), {
@@ -92,12 +101,17 @@ export function mountCollector(app: Hono, roots: Roots): void {
   });
 
   app.post("/v1/logs", async (c) => {
+    let records: OtlpLogRecord[];
     try {
       const body = await readBody(c);
-      const records = isJson(c) ? decodeLogsJson(JSON.parse(body.toString("utf8"))) : decodeLogsProtobuf(body);
-      roots.store.ingestLogs(records);
+      records = isJson(c) ? decodeLogsJson(JSON.parse(body.toString("utf8"))) : decodeLogsProtobuf(body);
     } catch (err) {
       return c.json({ code: 3, message: `invalid OTLP logs payload: ${(err as Error).message}` }, 400);
+    }
+    try {
+      roots.store.ingestLogs(records);
+    } catch (err) {
+      return storeFailed(c, err);
     }
     if (isJson(c)) return c.json({ partialSuccess: {} });
     return new Response(new Uint8Array(), { status: 200, headers: { "content-type": "application/x-protobuf" } });
