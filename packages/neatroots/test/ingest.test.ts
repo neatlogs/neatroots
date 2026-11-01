@@ -363,6 +363,9 @@ describe("imports", () => {
       const s1 = t.roots.store.getOtlpSpan(tid, sid)!;
       expect(buildView(s1.span, s1.resource.attributes)).toMatchObject({ model: "gpt-4o", input: [{ role: "user", content: "hi" }], output: "hello" });
 
+      const limited = await t.roots.imports.start("neatlogs-cloud", { traceIds: `${tid},${hex(16)}` }, { limit: 1 }).done;
+      expect(limited).toMatchObject({ state: "succeeded", traces: 1, failed: 0 });
+
       process.env.NEATLOGS_SERVICE_TOKEN = "nlsa_wrong";
       const refused = await t.roots.imports.start("neatlogs-cloud", { traceIds: hex(16) }, { limit: 1 }).done;
       expect(refused.last_error).toMatch(/didn't accept the service-account token \(401\)/);
