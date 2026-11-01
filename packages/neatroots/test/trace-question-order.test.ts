@@ -199,6 +199,47 @@ describe("a trace question asked again while its first call is out", () => {
     expect(tb.roots.store.findingsForTrace(t).filter((f) => f.check_id === "refund-claimed").map((f) => f.status)).toEqual([]);
   });
 
+  it("keeps an older answer that finished first when the newer call then finds no model", async () => {
+    // The older answer waits for the newer call instead of being thrown away: no model there means
+    // the older answer is the only one the run has.
+    const llm = await mockLlm({});
+    const tb = await makeRoots({ serve: true, llmUrl: llm.url });
+    cleanup.push(async () => {
+      await tb.close();
+      await llm.close();
+    });
+    tb.roots.checks.save(refundCheck(), "user");
+    const decisions = (tb.roots as unknown as { decisions: { decide: (e: string, q: { name: string }[], o?: unknown) => Promise<unknown> } }).decisions;
+    const real = decisions.decide.bind(decisions);
+    const order: string[] = [];
+    const a = gate();
+    const b = gate();
+    let started = 0;
+    decisions.decide = async (evidence, questions, o) => {
+      if (!questions.some((q) => q.name === "refund-claimed")) return real(evidence, questions, o);
+      started++;
+      const isNewer = evidence.includes("Refund issued: ref 77");
+      await (isNewer ? b.held : a.held);
+      order.push(isNewer ? "newer" : "older");
+      if (isNewer) throw new DecisionUnavailableError("no decision model available");
+      return { answers: { "refund-claimed": { probability: 0.95 } }, backend: "llm", model: "mock", latencyMs: 1 };
+    };
+    const t = hex(16);
+    const r = hex(8);
+    tb.roots.ingest([batch([llmSpan(t, r, { user: "refund order 1001", out: "I've refunded it." })])]);
+    await until(() => started >= 1);
+    tb.roots.ingest([batch([llmSpan(t, r, { user: "confirm", out: "Refund issued: ref 77" })])]);
+    await until(() => started >= 2, 10_000);
+    a.release();
+    await until(() => order.includes("older"), 10_000);
+    b.release();
+    await until(() => order.includes("newer"), 10_000);
+    await tb.roots.engine!.waitIdle(t, 10_000);
+    expect(order).toEqual(["older", "newer"]);
+    expect(tb.roots.store.decisionsForTrace(t).filter((d) => d.check_id === "refund-claimed").map((d) => d.probability)).toEqual([0.95]); // was []
+    expect(tb.roots.store.findingsForTrace(t).filter((f) => f.check_id === "refund-claimed").map((f) => f.status)).toEqual(["raised"]);
+  });
+
   it("keeps the older answer when the newer call found no model", async () => {
     const r = await race("yes", "unavailable");
     expect(r.statuses).toEqual(["raised"]);
