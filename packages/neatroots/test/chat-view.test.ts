@@ -72,3 +72,109 @@ describe("an agent step whose tool call the SDK didn't record", () => {
     expect(assistant).toMatchObject({ inferred: true, tool_calls: [{ name: "issue_refund" }] });
   });
 });
+
+describe("a run whose root span is the LLM call", () => {
+  it.each(["", "0123456789abcdef"])("keeps message roles and tool calls with parent %j", async (parent) => {
+    t = await makeRoots({ noEngine: true });
+    const tid = hex(16);
+    const root = hex(8);
+    t.roots.ingest([batch([span({ traceId: tid, spanId: root, parent, name: "openai.chat.completions.create", kind: "llm", attrs: [
+      s("neatlogs.llm.model_name", "mock"),
+      ...msgAttrs("input_messages", [{ role: "system", content: "Be concise." }, { role: "user", content: "Look up order 1001" }]),
+      ...msgAttrs("output_messages", [{ role: "assistant" }]),
+      s("neatlogs.llm.tool_calls.0.name", "lookup_order"),
+      s("neatlogs.llm.tool_calls.0.arguments", '{"order_id":"1001"}'),
+    ] })])]);
+    const snapshot = loadTrace(t.roots.store, tid);
+    const chat = buildChat(snapshot);
+    expect(buildChat(snapshot, root)).toEqual(chat);
+    expect(chat.root).toBe(root);
+    expect(chat.items).toHaveLength(3);
+    expect(chat.items).toMatchObject([
+      { type: "system", text: "Be concise.", span_id: root },
+      { type: "user", text: "Look up order 1001", span_id: root },
+      { type: "assistant", text: "", span_id: root, model: "mock", tool_calls: [{ name: "lookup_order", arguments: { order_id: "1001" } }] },
+    ]);
+  });
+});
+
+describe("an LLM root with a recorded tool result", () => {
+  it("keeps the root request and reply before its tool result", async () => {
+    t = await makeRoots({ serve: true, noEngine: true });
+    const tid = hex(16);
+    const root = hex(8);
+    t.roots.ingest([batch([
+      span({ traceId: tid, spanId: root, name: "root-llm", kind: "llm", attrs: [
+        s("neatlogs.llm.model_name", "mock"),
+        ...msgAttrs("input_messages", [{ role: "user", content: "Find my order" }]),
+        ...msgAttrs("output_messages", [{ role: "assistant", content: "Checking it now." }]),
+      ] }),
+      toolSpan(tid, root, "lookup_order", '{"id":1001}', '{"status":"delivered"}'),
+    ])]);
+    const response = await fetch(`${t.url}/api/runs/${tid}/chat`);
+    expect(response.status).toBe(200);
+    const { items } = await response.json();
+    expect(items).toHaveLength(3);
+    expect(items).toMatchObject([
+      { type: "user", text: "Find my order", span_id: root },
+      { type: "assistant", text: "Checking it now.", span_id: root },
+      { type: "tool", name: "lookup_order", output: { status: "delivered" } },
+    ]);
+  });
+});
+
+describe("an LLM root that wraps a child LLM span", () => {
+  it("reads the exchange once, from the child", async () => {
+    t = await makeRoots({ noEngine: true });
+    const tid = hex(16);
+    const root = hex(8);
+    const exchange = [
+      ...msgAttrs("input_messages", [{ role: "user", content: "Find my order" }]),
+      ...msgAttrs("output_messages", [{ role: "assistant", content: "Checking it now." }]),
+    ];
+    t.roots.ingest([batch([
+      span({ traceId: tid, spanId: root, name: "ChatOpenAI", kind: "llm", attrs: [s("neatlogs.llm.model_name", "mock"), ...exchange] }),
+      span({ traceId: tid, parent: root, name: "openai.chat.completions.create", kind: "llm", attrs: [s("neatlogs.llm.model_name", "mock"), ...exchange] }),
+    ])]);
+    const chat = buildChat(loadTrace(t.roots.store, tid));
+    expect(chat.items).toMatchObject([
+      { type: "user", text: "Find my order" },
+      { type: "assistant", text: "Checking it now." },
+    ]);
+    expect(chat.items.filter((i) => i.type === "assistant")).toHaveLength(1);
+  });
+});
+
+
+describe("an LLM root with a nested agent", () => {
+  it("keeps the root exchange outside the nested agent's conversation", async () => {
+    t = await makeRoots({ noEngine: true });
+    const tid = hex(16), root = hex(8), agent = hex(8), child = hex(8);
+    t.roots.ingest([batch([
+      span({ traceId: tid, spanId: root, name: "root-llm", kind: "llm", attrs: [
+        ...msgAttrs("input_messages", [{ role: "system", content: "Be concise." }, { role: "user", content: "Delegate lookup" }]),
+        ...msgAttrs("output_messages", [{ role: "assistant", content: "Delegating now." }]),
+        s("neatlogs.llm.tool_calls.0.name", "delegate"),
+        s("neatlogs.llm.tool_calls.0.arguments", '{"task":"lookup"}'),
+      ] }),
+      span({ traceId: tid, spanId: agent, parent: root, name: "Lookup agent", kind: "agent" }),
+      span({ traceId: tid, spanId: child, parent: agent, name: "child-llm", kind: "llm", attrs: [
+        ...msgAttrs("input_messages", [{ role: "user", content: "Private lookup" }]),
+        ...msgAttrs("output_messages", [{ role: "assistant", content: "Found it." }]),
+      ] }),
+    ])]);
+    const snapshot = loadTrace(t.roots.store, tid);
+    const chat = buildChat(snapshot);
+    expect(buildChat(snapshot, root)).toEqual(chat);
+    expect(chat.items).toMatchObject([
+      { type: "system", text: "Be concise.", span_id: root },
+      { type: "user", text: "Delegate lookup", span_id: root },
+      { type: "assistant", text: "Delegating now.", span_id: root, tool_calls: [{ name: "delegate", arguments: { task: "lookup" } }] },
+      { type: "agent", span_id: agent, llm_calls: 1 },
+    ]);
+    expect(buildChat(snapshot, agent).items).toMatchObject([
+      { type: "user", text: "Private lookup", span_id: child },
+      { type: "assistant", text: "Found it.", span_id: child },
+    ]);
+  });
+});
