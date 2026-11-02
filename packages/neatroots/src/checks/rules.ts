@@ -1,5 +1,5 @@
 import type { RuleCheck } from "./types.js";
-import { finalOutput, runRoot, selectSpans, type SpanInfo, type TraceSnapshot } from "../engine/trace.js";
+import { finalOutput, isEmptyOutput, runRoot, selectSpans, type SpanInfo, type TraceSnapshot } from "../engine/trace.js";
 import { preview } from "../semantics/view.js";
 import { log } from "../util/log.js";
 import { testWithin } from "../util/regex.js";
@@ -283,7 +283,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       // A run that failed or was cut short is already reported by run-failed.
       if (t.run.status === "error" || t.run.interrupted) return null;
       const out = finalOutput(t);
-      if (!out || /^("?\s*"?|null|\{\}|\[\])$/.test(out.trim())) return null;
+      if (!out || isEmptyOutput(out)) return null;
       // An answer that says something failed is the agent being honest, not a problem.
       if (ADMITS_FAILURE.test(out.replace(APOSTROPHES, "'").replace(DENIES_FAILURE, " "))) return null;
       const spans = selectSpans(t.spans, r.span ?? { type: ["tool", "mcp_tool"] }).sort((a, b) => a.endMs - b.endMs || a.seq - b.seq);
@@ -362,7 +362,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       }
       if (r.when === "no_output" && root) {
         const out = finalOutput(t);
-        const empty = !out || /^("?\s*"?|null|\{\}|\[\])$/.test(out.trim());
+        const empty = isEmptyOutput(out);
         if (empty && t.run.status !== "error") return { firing: true, evidenceSpanIds: [root.id], params: {} };
       }
       return null;
