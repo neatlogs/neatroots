@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { projectDismissal, type ProjectDismissal } from "./home-dismissals.js";
 
 /**
  * Aggregates over a time window, compared with the window before it. Everything here is
@@ -44,6 +45,7 @@ export interface ProblemAgg {
   last_ms: number;
   example_trace_id: string;
   projects: string[];
+  dismissal_projects: ProjectDismissal[];
 }
 
 export interface ToolAgg {
@@ -94,6 +96,7 @@ export interface Insights {
 interface RunRec {
   trace_id: string;
   project: string;
+  actual_project: string | null;
   status: string;
   t: number;
   dur: number | null;
@@ -126,7 +129,7 @@ function slice(db: Database.Database, from: number, to: number) {
   const p = { from, to };
   const runs = db
     .prepare(
-      `SELECT trace_id, COALESCE(project, workflow, 'unknown') AS project, status, COALESCE(started_ms, received_ms) AS t,
+      `SELECT trace_id, project AS actual_project, COALESCE(project, workflow, 'unknown') AS project, status, COALESCE(started_ms, received_ms) AS t,
         CASE WHEN ended_ms IS NOT NULL AND started_ms IS NOT NULL THEN ended_ms - started_ms END AS dur,
         total_tokens, llm_calls, tool_calls
        FROM runs WHERE doctor = 0 AND COALESCE(started_ms, received_ms) >= @from AND COALESCE(started_ms, received_ms) < @to
@@ -240,6 +243,13 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
     .filter(([, e]) => e.runs.size > 0)
     .map(([id, e]) => {
       const latest = e.f.reduce((a, b) => (b.created_ms > a.created_ms ? b : a));
+      const projectRuns = new Map<string | null, { name: string; runs: number }>();
+      for (const run of cur.runs) {
+        if (!e.runs.has(run.trace_id)) continue;
+        const p = projectRuns.get(run.actual_project) ?? { name: run.project, runs: 0 };
+        p.runs++;
+        projectRuns.set(run.actual_project, p);
+      }
       return {
         check_id: id,
         title: titles.get(id)?.title ?? latest.title,
@@ -250,6 +260,7 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
         last_ms: latest.created_ms,
         example_trace_id: latest.trace_id,
         projects: [...new Set([...e.runs].map((t) => projectOf.get(t) ?? "unknown"))],
+        dismissal_projects: [...projectRuns].map(([project, p]) => projectDismissal(db, id, project, p.name, p.runs)),
       };
     })
     .sort((a, b) => b.runs - a.runs || b.last_ms - a.last_ms);
