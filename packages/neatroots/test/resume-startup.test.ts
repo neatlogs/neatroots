@@ -159,7 +159,7 @@ describe("startup recovery", () => {
     expect(rechecked).toEqual([quick.t, busy.t]);
   }, 15_000);
 
-  it("leaves a leftover run alone when its checks outlast the wait", async () => {
+  it("resumes a leftover run only once checks that outlast the wait finish", async () => {
     const llm = await mockLlm({});
     const { roots, runs } = await leftover(llm, (t, r) => [llmSpan(t, r, { user: "refund order 1001", out: "Done." }), span({ traceId: t, spanId: r, name: "agent", kind: "workflow" })]);
     const { t, r } = runs[0];
@@ -167,10 +167,44 @@ describe("startup recovery", () => {
     roots.ingest([batch([llmSpan(t, r, { user: "confirm", out: "Refund issued: ref 77" })])]);
     await until(() => held.asked > 0, 5000);
     const rechecked = spyRecheck(roots);
-    expect(await resumeUnfinished(roots.engine!, roots, 200)).toBe(0); // was 1: rechecked mid-check
-    expect(rechecked).toEqual([]);
+    const done = resumeUnfinished(roots.engine!, roots, 200);
+    await sleep(600); // three wait rounds
+    expect(rechecked).toEqual([]); // was: rechecked mid-check once the wait ran out
     held.release();
-    await roots.engine!.waitIdle(t, 5000);
+    expect(await done).toBe(1);
+    expect(rechecked).toEqual([t]);
+  }, 15_000);
+
+  it("waits again for a leftover run whose checks restart while it waits its turn", async () => {
+    const llm = await mockLlm({});
+    const root = (t: string, r: string) => [llmSpan(t, r, { user: "refund order 1001", out: "Done." }), span({ traceId: t, spanId: r, name: "agent", kind: "workflow" })];
+    const { roots, runs } = await leftover(llm, root, 2);
+    const [first, second] = runs;
+    const engine = roots.engine!;
+    const recheck = engine.recheck.bind(engine);
+    let letFirst!: () => void;
+    const firstGate = new Promise<void>((r) => (letFirst = r));
+    const rechecked: string[] = [];
+    let firstDone = false;
+    engine.recheck = async (id, opts) => {
+      rechecked.push(id);
+      if (id !== first.t) return recheck(id, opts);
+      await firstGate;
+      await recheck(id, opts);
+      firstDone = true;
+    };
+    const done = resumeUnfinished(engine, roots);
+    await until(() => rechecked.includes(first.t), 5000); // second is settled and queued behind it
+    const held = holdRefund(roots);
+    roots.ingest([batch([llmSpan(second.t, second.r, { user: "confirm", out: "Refund issued: ref 77" })])]);
+    await until(() => held.asked > 0, 5000);
+    letFirst();
+    await until(() => firstDone, 5000);
+    await new Promise((r) => setImmediate(r)); // second's turn in the queue has run
+    expect(rechecked).toEqual([first.t]); // was [first, second]: rechecked mid-check
+    held.release();
+    await done;
+    expect(rechecked).toEqual([first.t, second.t]);
   }, 15_000);
 
   it("stops waiting on an end pass that a reopened run cancelled", async () => {

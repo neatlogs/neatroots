@@ -198,10 +198,15 @@ export class Engine {
     return this.inherited.splice(0);
   }
 
+  /** True when a run has no checks running and no end pass scheduled. */
+  isSettled(traceId: string): boolean {
+    return !this.pending(traceId) && !this.live.get(traceId)?.endTimer;
+  }
+
   /** Waits for a run's checks and any end pass still scheduled for it; false on timeout. */
   async waitSettled(traceId: string, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
-    while (this.pending(traceId) || this.live.get(traceId)?.endTimer) {
+    while (!this.isSettled(traceId)) {
       const left = deadline - Date.now();
       if (left <= 0 || !(await this.waitIdle(traceId, left, true))) return false;
     }
@@ -1461,7 +1466,7 @@ ${library}`;
 /** How many interrupted runs a restart finishes; older ones are marked interrupted for Re-run checks. */
 const RESUME_LIMIT = 200;
 
-/** How long recovery waits for a run's in-flight checks in this process before leaving it alone. */
+/** How long each round of recovery's wait for a run's in-flight checks lasts before it warns and waits on. */
 const RESUME_WAIT_MS = 120_000;
 
 export async function resumeUnfinished(engine: Engine, roots: Roots, waitMs = RESUME_WAIT_MS): Promise<number> {
@@ -1482,21 +1487,31 @@ export async function resumeUnfinished(engine: Engine, roots: Roots, waitMs = RE
   let queue = Promise.resolve();
   await Promise.all(
     todo.map(async (id) => {
-      // Rechecking mid-check drops a newer answer; local work covers only new spans, so recheck after it.
-      if (!(await engine.waitSettled(id, waitMs))) {
-        log.warn(`left checks for ${id.slice(0, 8)} to this process: they were still running after ${waitMs / 1000} s`);
-        return;
+      let warned = false;
+      for (;;) {
+        if (!roots.store.db.open || !roots.store.getRun(id)) return;
+        // Rechecking mid-check drops a newer answer; local work covers only new spans, so recheck after it.
+        if (!(await engine.waitSettled(id, waitMs))) {
+          if (!warned) log.warn(`checks for ${id.slice(0, 8)} still running after ${waitMs / 1000} s; resuming it once they finish`);
+          warned = true;
+          continue;
+        }
+        let again = false;
+        // Each run resumes once it is settled, one recheck at a time.
+        queue = queue
+          .then(async () => {
+            // New spans can start local checks while this run waits its turn: wait for those first.
+            if (!engine.isSettled(id)) return void (again = true);
+            const row = roots.store.getRun(id);
+            if (!row || row.status === "running" || engine.isQuietClaimed(id)) return;
+            if (!inherited.has(id) && engine.progress.state(id) !== "checking") return;
+            await engine.recheck(id, { resume: true });
+            resumed++;
+          })
+          .catch((e: Error) => log.warn(`couldn't resume checks for ${id.slice(0, 8)}: ${e.message}`));
+        await queue;
+        if (!again) return;
       }
-      // Each run resumes once it is settled, one recheck at a time.
-      queue = queue
-        .then(async () => {
-          if (!roots.store.getRun(id) || engine.isQuietClaimed(id)) return;
-          if (!inherited.has(id) && engine.progress.state(id) !== "checking") return;
-          await engine.recheck(id, { resume: true });
-          resumed++;
-        })
-        .catch((e: Error) => log.warn(`couldn't resume checks for ${id.slice(0, 8)}: ${e.message}`));
-      await queue;
     }),
   );
   return resumed;
