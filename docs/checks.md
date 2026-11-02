@@ -16,7 +16,7 @@ id: repeated-tool-call
 kind: rule
 title: Same tool called repeatedly with identical arguments
 rule:
-  type: repeat            # repeat | errors | count | slow | threshold | match | requires_before | unrecovered_error | run_end
+  type: repeat            # repeat | errors | count | slow | threshold | match | requires_before | unrecovered_error | run_end | cache_reuse
   span: { type: [tool, mcp_tool] }
   same: [tool, input]
   at_least: 3
@@ -36,6 +36,7 @@ action: flag              # or halt (your own rules only; needs steering on for 
 | `requires_before` | a `span` call has no earlier successful `requires` call in the same run, for example a refund with no order lookup. Spans can arrive out of order, so during a run it waits 250 ms for a late `requires` span before it raises (or halts), and a finding resolves if the earlier call turns up later |
 | `unrecovered_error` | at run end, the last call of a tool failed (no later success of that tool) and the run still produced a final answer that does not say anything failed (a words check, so it is a hint, not proof) |
 | `run_end` | the run ended with `error`, `no_output` or `interrupted` |
+| `cache_reuse` | after warmup, LLM calls of one provider and model keep writing the prompt cache and writes outweigh reads (`min_calls`, default 3); see [Prompt-cache reuse](#prompt-cache-reuse) |
 
 ## Questions
 
@@ -127,3 +128,38 @@ seconds). With no local LLM, Laya answers everything. Settings → Models shows 
 When the local LLM stands in for the decision model, span-level questions are asked only about the
 newest waiting span (at most four per check per run), identical questions are answered from a cache,
 and note-writing jumps the LLM queue. With Laya or Jev every span is asked.
+
+### Prompt-cache reuse
+
+The library's `cache-not-reused` rule uses `type: cache_reuse` with `min_calls: 3`
+(default, minimum 3). Within each provider/model group, at least `min_calls` LLM calls
+must report both valid cache counts. The first chronological call is warmup and excluded
+from the comparison. Later measured writes must exceed reads, and evidence includes only
+later calls with positive writes and explicitly zero reads after an earlier measured positive
+write in the same group (the warmup can supply that earlier creation). A first creation after
+uncached calls is not a repeated write. Missing counts are unknown,
+not zero; read-only OpenAI telemetry and runs without caching stay quiet.
+
+Counts come from `neatlogs.llm.token_count.cache_read` / `cache_write` and GenAI
+`gen_ai.usage.cache_read.input_tokens` / `cache_write.input_tokens` (also the legacy
+`cache_creation.input_tokens` and the
+underscore `cache_read_input_tokens`, `cache_creation_input_tokens`, and
+`cache_write_input_tokens` variants). Counts must be nonnegative safe integers.
+These normalized fields do not alter prompt or total tokens or stored attributes.
+
+Ordering uses call start time, then span ID for ties, independent of ingestion order.
+Separate providers/models get separate warmups so one model's reads cannot hide another's
+writes. Calls missing a nonblank provider or model are excluded from this comparison.
+If later reads clear a previously firing chronological prefix, the rule returns historical
+evidence with `firing: false`, resolving the live finding and withdrawing pending non-halt
+guidance. A recovered trace ingested in one batch creates no actionable cache finding.
+Late arrivals or same-span corrections can also erase every qualifying prefix. An open cache
+finding then resolves even when evaluation returns `null`: corrected telemetry no longer supports
+the provisional warning. This also applies when corrected counters or identity become unknown;
+resolution withdraws the warning rather than claiming that cache reuse was measured as healthy.
+When no firing prefix remains for the open finding's evidence, its pending halts are withdrawn too.
+A historical recovery retains a user-requested halt only while it includes some of that finding's
+evidence. Unrelated history from another provider/model group cannot retain a corrected-away halt.
+This is a diagnostic heuristic: calls to independent cache routes or different
+prompts within the same provider/model may intentionally write fresh caches. Inspect the
+evidence before changing the agent; the rule cannot infer cache identity from token counts.
