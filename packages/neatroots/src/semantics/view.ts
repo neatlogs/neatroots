@@ -1,3 +1,4 @@
+import { isGenAiEvent, messagesFromEvents, type GenAiEvent } from "./genai-events.js";
 import { kvToPlain, setOwn, type KeyValue, type OtlpSpan, type Plain } from "../otlp/types.js";
 
 /**
@@ -283,7 +284,17 @@ function exceptionMessage(span: OtlpSpan): string | undefined {
   return undefined;
 }
 
-export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
+/** Message content the span's own events carry and log records correlated to it, in the order they happened. */
+function genAiEvents(span: OtlpSpan, logEvents: GenAiEvent[]): GenAiEvent[] {
+  const own = span.events.filter((e) => isGenAiEvent(e.name)).map((e) => ({ name: e.name, timeNs: e.timeUnixNano, attributes: kvToPlain(e.attributes) }));
+  const all = [...own, ...logEvents];
+  // Put the two sources in the order things happened; without a time on every event, keep span events first.
+  const times = all.map((e) => (e.timeNs && /^\d+$/.test(e.timeNs) && e.timeNs !== "0" ? BigInt(e.timeNs) : undefined));
+  if (times.some((t) => t === undefined)) return all;
+  return all.map((e, i) => ({ e, t: times[i] as bigint })).sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0)).map((x) => x.e);
+}
+
+export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[], logEvents: GenAiEvent[] | (() => GenAiEvent[]) = []): SpanView {
   const attrs = kvToPlain(span.attributes);
   const res = kvToPlain(resourceAttrs);
   const kind = deriveKind(span, attrs);
@@ -320,6 +331,13 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
       const out = llmMessages(attrs, "output");
       view.toolCalls = llmToolCalls(attrs);
       view.output = out ?? maybeJson(first(attrs, ["neatlogs.llm.output", ...genericOut]));
+      // Attributes win; events only fill what they left empty, so attribute dialects read as before.
+      if (view.input === undefined || view.output === undefined || !view.finishReason) {
+        const ev = messagesFromEvents(genAiEvents(span, typeof logEvents === "function" ? logEvents() : logEvents));
+        if (view.input === undefined && ev.input !== undefined) view.input = normalizeParts(ev.input);
+        if (view.output === undefined && ev.output !== undefined) view.output = normalizeParts(ev.output);
+        if (ev.finishReason && !view.finishReason) view.finishReason = ev.finishReason;
+      }
       if (view.toolCalls && Array.isArray(view.output) && view.output.length) {
         const m = view.output[0] as Record<string, Plain>;
         if (m && typeof m === "object" && !m.tool_calls) {
