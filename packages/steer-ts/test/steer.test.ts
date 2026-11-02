@@ -154,4 +154,55 @@ describe("neatroots-steer (ts)", () => {
     expect(await applyMessages(msgs)).toBe(msgs);
     expect((await checkMyWork("q")).answer).toBe("unknown");
   });
+
+  it("records exactly one span when steer wraps a neatlogs-style proxy (double-wrap check)", async () => {
+    // Simulate neatlogs.wrapOpenAI: a Proxy with a GET trap that wraps every method with a
+    // tracing layer, but no SET trap so assignments go straight to the underlying target.
+    notes.push(note());
+    let callCount = 0;
+    function makeTracingProxy<T extends object>(target: T): T {
+      return new Proxy(target, {
+        get(t, prop, receiver) {
+          const val = Reflect.get(t, prop, receiver);
+          if (typeof val === "function") {
+            return function (this: unknown, ...args: unknown[]) {
+              callCount++;
+              return (val as Function).apply(this, args);
+            };
+          }
+          if (val !== null && typeof val === "object") return makeTracingProxy(val as object) as unknown;
+          return val;
+        },
+        // No set trap: proxy.foo = bar goes directly to the target.
+      });
+    }
+
+    let seen: unknown;
+    const rawClient = { chat: { completions: { create: async (p: unknown) => ((seen = p), "ok") } } };
+    const neatlogsProxy = makeTracingProxy(rawClient);
+
+    // Document the steer call order: wrapOpenAI(neatlogs.wrapOpenAI(client))
+    const client = wrapOpenAI(neatlogsProxy);
+
+    callCount = 0;
+    const result = await client.chat.completions.create({ model: "m", messages: [{ role: "user", content: "q" }] });
+    expect(result).toBe("ok");
+    // Without the fix, callCount would be 2 (outer traced + inner traced after steer's write).
+    expect(callCount).toBe(1);
+    expect((seen as any).messages[0].content).toContain("<neatroots-guidance>");
+
+    // Prototype-backed method: create is inherited from a prototype, not own.
+    // Object.getOwnPropertyDescriptor(proxy, "create") returns undefined in this case,
+    // so the fix must walk the prototype chain to find and capture the raw function.
+    notes.push(note());
+    let seenProto: unknown;
+    const completionsProto = { create: async (p: unknown) => ((seenProto = p), "proto-ok") };
+    const completionsInstance = Object.create(completionsProto);
+    const protoClient = wrapOpenAI(makeTracingProxy({ chat: { completions: completionsInstance } }));
+    callCount = 0;
+    const protoResult = await protoClient.chat.completions.create({ model: "m", messages: [{ role: "user", content: "q" }] });
+    expect(protoResult).toBe("proto-ok");
+    expect(callCount).toBe(1);
+    expect((seenProto as any).messages[0].content).toContain("<neatroots-guidance>");
+  });
 });
