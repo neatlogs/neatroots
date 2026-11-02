@@ -71,6 +71,14 @@ describe("server", () => {
     expect(tooBig.status).toBe(413);
   });
 
+  it("caps OTLP metrics bodies even though metrics are discarded", async () => {
+    const tb = await served();
+    const valid = await fetch(`${tb.url}/v1/metrics`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(valid.status).toBe(200);
+    const tooBig = await fetch(`${tb.url}/v1/metrics`, { method: "POST", body: Buffer.alloc(64 * 1024 * 1024 + 1) });
+    expect(tooBig.status).toBe(413);
+  });
+
   it("refuses foreign Host headers and cross-origin API calls, but allows OTLP from local pages", async () => {
     const tb = await served();
     const evilStatus = await new Promise<number>((resolve) => {
