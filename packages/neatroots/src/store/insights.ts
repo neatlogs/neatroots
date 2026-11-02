@@ -91,26 +91,6 @@ export interface Insights {
   gone: { check_id: string; title: string; prev_runs: number }[];
 }
 
-interface RunRec {
-  trace_id: string;
-  project: string;
-  status: string;
-  t: number;
-  dur: number | null;
-  total_tokens: number;
-  llm_calls: number;
-  tool_calls: number;
-}
-
-interface FindingRec {
-  trace_id: string;
-  check_id: string;
-  check_kind: string;
-  title: string;
-  status: string;
-  created_ms: number;
-}
-
 function percentile(values: number[], p: number): number | null {
   if (!values.length) return null;
   const s = [...values].sort((a, b) => a - b);
@@ -119,40 +99,124 @@ function percentile(values: number[], p: number): number | null {
 
 const RUNS_IN = `SELECT trace_id FROM runs WHERE doctor = 0 AND COALESCE(started_ms, received_ms) >= @from AND COALESCE(started_ms, received_ms) < @to`;
 
+// Everything below is counted in SQL, so only aggregate rows reach JS, however large the window:
+// reading every run and finding of a big window into memory could exhaust the server's heap.
+// Unqualified, so it matches the runs_sort index expression; findings has neither column.
+const T = "COALESCE(started_ms, received_ms)";
+const IN_WINDOW = `doctor = 0 AND ${T} >= @from AND ${T} < @to`;
+const PROJECT = "COALESCE(project, workflow, 'unknown')";
+const FAILED = "runs.status IN ('error', 'interrupted')";
 /** A problem counts unless the user dismissed it, the check could not run, or it went quiet. */
-const IS_PROBLEM = (f: { status: string }) => f.status !== "dismissed" && f.status !== "failed" && f.status !== "quiet";
+const PROBLEM = "f.status NOT IN ('dismissed', 'failed', 'quiet')";
+// runs.finding_count counts a run's findings under exactly the rule above (refreshFindingCounts).
+const HAS_PROBLEM = "runs.finding_count > 0";
+const DONE_DUR = `runs.status != 'running' AND runs.ended_ms IS NOT NULL AND runs.started_ms IS NOT NULL`;
+
+interface RunGroup {
+  bucket: number;
+  project: string;
+  runs: number;
+  failed: number;
+  with_problems: number;
+  tokens: number;
+  llm_calls: number;
+  tool_calls: number;
+  durs: number;
+  last_ms: number;
+}
+
+/** A window's runs grouped by bucket and project (one row per pair that has runs). */
+function runGroups(db: Database.Database, from: number, to: number, bucketStart: number, bucketMs: number, nBuckets: number): RunGroup[] {
+  return db
+    .prepare(
+      `SELECT MIN(@n - 1, MAX(0, CAST((${T} - @start) / @size AS INTEGER))) AS bucket, ${PROJECT} AS project,
+        COUNT(*) AS runs, SUM(${FAILED}) AS failed, SUM(${HAS_PROBLEM}) AS with_problems,
+        SUM(runs.total_tokens) AS tokens, SUM(runs.llm_calls) AS llm_calls, SUM(runs.tool_calls) AS tool_calls,
+        SUM(${DONE_DUR}) AS durs, MAX(${T}) AS last_ms
+       FROM runs WHERE ${IN_WINDOW} GROUP BY 1, 2`,
+    )
+    .all({ from, to, n: nBuckets, start: bucketStart, size: bucketMs }) as RunGroup[];
+}
+
+/** The durations at p50 and p95 of a window's finished runs, picked the way percentile() picks them. */
+function durationPercentiles(db: Database.Database, from: number, to: number, n: number): { p50_ms: number | null; p95_ms: number | null } {
+  if (!n) return { p50_ms: null, p95_ms: null };
+  const rank = (p: number) => Math.min(n - 1, Math.floor(p * n)) + 1;
+  const rows = db
+    .prepare(
+      `SELECT k, d FROM (SELECT runs.ended_ms - runs.started_ms AS d, ROW_NUMBER() OVER (ORDER BY runs.ended_ms - runs.started_ms) AS k
+        FROM runs WHERE ${IN_WINDOW} AND ${DONE_DUR}) WHERE k IN (@a, @b)`,
+    )
+    .all({ from, to, a: rank(0.5), b: rank(0.95) }) as { k: number; d: number }[];
+  const at = (k: number) => rows.find((r) => r.k === k)?.d ?? null;
+  return { p50_ms: at(rank(0.5)), p95_ms: at(rank(0.95)) };
+}
+
+function totalsOf(db: Database.Database, from: number, to: number, groups: RunGroup[]): Totals {
+  const sum = (k: keyof RunGroup) => groups.reduce((a, g) => a + ((g[k] as number) || 0), 0);
+  return {
+    runs: sum("runs"),
+    failed: sum("failed"),
+    with_problems: sum("with_problems"),
+    tokens: sum("tokens"),
+    llm_calls: sum("llm_calls"),
+    tool_calls: sum("tool_calls"),
+    ...durationPercentiles(db, from, to, sum("durs")),
+  };
+}
+
+interface CheckProject {
+  check_id: string;
+  project: string;
+  runs: number;
+  dismissed: number;
+  quiet: number;
+  last_ms: number | null;
+  title: string;
+  check_kind: string;
+  trace_id: string;
+}
 
 /**
- * A window's runs and findings, all of them: every total, bucket, project and problem below is
- * counted from these, so a cap on either would make them disagree with each other.
+ * A window's findings grouped by check and project. A run belongs to one project, so a check's runs
+ * add up across projects. With a single max(), SQLite takes title, kind and trace from the latest problem.
  */
-function slice(db: Database.Database, from: number, to: number) {
-  const p = { from, to };
-  const runs = db
+function checkProjects(db: Database.Database, from: number, to: number): CheckProject[] {
+  return db
     .prepare(
-      `SELECT trace_id, COALESCE(project, workflow, 'unknown') AS project, status, COALESCE(started_ms, received_ms) AS t,
-        CASE WHEN ended_ms IS NOT NULL AND started_ms IS NOT NULL THEN ended_ms - started_ms END AS dur,
-        total_tokens, llm_calls, tool_calls
-       FROM runs WHERE doctor = 0 AND COALESCE(started_ms, received_ms) >= @from AND COALESCE(started_ms, received_ms) < @to
-       ORDER BY t DESC`,
+      `SELECT f.check_id, ${PROJECT} AS project,
+        COUNT(DISTINCT CASE WHEN ${PROBLEM} THEN f.trace_id END) AS runs,
+        SUM(f.status = 'dismissed') AS dismissed, SUM(f.status = 'quiet') AS quiet,
+        MAX(CASE WHEN ${PROBLEM} THEN f.created_ms END) AS last_ms, f.title, f.check_kind, f.trace_id
+       FROM runs JOIN findings f ON f.trace_id = runs.trace_id WHERE ${IN_WINDOW} AND f.status != 'failed' GROUP BY 1, 2`,
     )
-    .all(p) as RunRec[];
-  const findings = db
-    .prepare(`SELECT trace_id, check_id, check_kind, title, status, created_ms FROM findings WHERE trace_id IN (${RUNS_IN})`)
-    .all(p) as FindingRec[];
-  const problemRuns = new Set(findings.filter(IS_PROBLEM).map((f) => f.trace_id));
-  const done = runs.filter((r) => r.status !== "running");
-  const totals: Totals = {
-    runs: runs.length,
-    failed: runs.filter((r) => r.status === "error" || r.status === "interrupted").length,
-    with_problems: runs.filter((r) => problemRuns.has(r.trace_id)).length,
-    tokens: runs.reduce((a, r) => a + (r.total_tokens || 0), 0),
-    llm_calls: runs.reduce((a, r) => a + (r.llm_calls || 0), 0),
-    tool_calls: runs.reduce((a, r) => a + (r.tool_calls || 0), 0),
-    p50_ms: percentile(done.flatMap((r) => (r.dur !== null ? [r.dur] : [])), 0.5),
-    p95_ms: percentile(done.flatMap((r) => (r.dur !== null ? [r.dur] : [])), 0.95),
-  };
-  return { runs, findings, problemRuns, totals };
+    .all({ from, to }) as CheckProject[];
+}
+
+interface CheckAgg {
+  runs: number;
+  dismissed: number;
+  quiet: number;
+  last_ms: number;
+  title: string;
+  check_kind: string;
+  trace_id: string;
+  projects: string[];
+}
+
+function byCheck(rows: CheckProject[]): Map<string, CheckAgg> {
+  const out = new Map<string, CheckAgg>();
+  for (const r of rows) {
+    const e = out.get(r.check_id) ?? { runs: 0, dismissed: 0, quiet: 0, last_ms: -Infinity, title: r.title, check_kind: r.check_kind, trace_id: r.trace_id, projects: [] };
+    e.runs += r.runs;
+    e.dismissed += r.dismissed;
+    e.quiet += r.quiet;
+    if (r.runs) e.projects.push(r.project);
+    if (r.last_ms !== null && r.last_ms > e.last_ms) Object.assign(e, { last_ms: r.last_ms, title: r.title, check_kind: r.check_kind, trace_id: r.trace_id });
+    out.set(r.check_id, e);
+  }
+  for (const e of out.values()) e.projects.sort();
+  return out;
 }
 
 function tools(db: Database.Database, from: number, to: number) {
@@ -204,58 +268,43 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
   const prevFrom = from - w.ms;
   // Span times come from the agent's clock; allow a little skew past "now".
   const until = to + SKEW_MS;
-  const cur = slice(db, from, until);
-  const prev = slice(db, prevFrom, from);
   const titles = new Map(checks.map((c) => [c.id, c]));
 
-  // Activity over time.
+  // Activity over time, and the totals and projects from the same grouped runs.
   const bucketStart = Math.floor(from / w.bucketMs) * w.bucketMs;
   const nBuckets = Math.ceil((to - bucketStart) / w.bucketMs);
   const buckets = Array.from({ length: nBuckets }, (_, i) => ({ start_ms: bucketStart + i * w.bucketMs, runs: 0, failed: 0, with_problems: 0 }));
-  for (const r of cur.runs) {
-    const b = buckets[Math.min(nBuckets - 1, Math.max(0, Math.floor((r.t - bucketStart) / w.bucketMs)))];
-    b.runs++;
-    if (r.status === "error" || r.status === "interrupted") b.failed++;
-    if (cur.problemRuns.has(r.trace_id)) b.with_problems++;
+  const groups = runGroups(db, from, until, bucketStart, w.bucketMs, nBuckets);
+  for (const g of groups) {
+    const b = buckets[g.bucket];
+    b.runs += g.runs;
+    b.failed += g.failed;
+    b.with_problems += g.with_problems;
   }
+  const prevGroups = runGroups(db, prevFrom, from, prevFrom, w.ms, 1);
+  const totals = totalsOf(db, from, until, groups);
 
   // Problems: one row per check that found something, by how many runs it touched.
-  const projectOf = new Map(cur.runs.map((r) => [r.trace_id, r.project]));
-  const prevRunsByCheck = new Map<string, Set<string>>();
-  for (const f of prev.findings.filter(IS_PROBLEM)) prevRunsByCheck.set(f.check_id, (prevRunsByCheck.get(f.check_id) ?? new Set()).add(f.trace_id));
-  const byCheck = new Map<string, { f: FindingRec[]; runs: Set<string>; dismissed: number; quiet: number }>();
-  for (const f of cur.findings) {
-    if (f.status === "failed") continue;
-    const e = byCheck.get(f.check_id) ?? { f: [], runs: new Set<string>(), dismissed: 0, quiet: 0 };
-    if (f.status === "dismissed") e.dismissed++;
-    else if (f.status === "quiet") e.quiet++;
-    else {
-      e.f.push(f);
-      e.runs.add(f.trace_id);
-    }
-    byCheck.set(f.check_id, e);
-  }
+  const cur = byCheck(checkProjects(db, from, until));
+  const prev = new Map([...byCheck(checkProjects(db, prevFrom, from))].filter(([, e]) => e.runs > 0));
   // A check has nothing to report when every finding this window is dismissed, failed, or quiet.
   const reportedNothing = (id: string) => {
-    const e = byCheck.get(id);
-    return !e?.runs.size && !e?.quiet;
+    const e = cur.get(id);
+    return !e?.runs && !e?.quiet;
   };
-  const problems: ProblemAgg[] = [...byCheck]
-    .filter(([, e]) => e.runs.size > 0)
-    .map(([id, e]) => {
-      const latest = e.f.reduce((a, b) => (b.created_ms > a.created_ms ? b : a));
-      return {
-        check_id: id,
-        title: titles.get(id)?.title ?? latest.title,
-        kind: latest.check_kind,
-        runs: e.runs.size,
-        prev_runs: prevRunsByCheck.get(id)?.size ?? 0,
-        dismissed: e.dismissed,
-        last_ms: latest.created_ms,
-        example_trace_id: latest.trace_id,
-        projects: [...new Set([...e.runs].map((t) => projectOf.get(t) ?? "unknown"))],
-      };
-    })
+  const problems: ProblemAgg[] = [...cur]
+    .filter(([, e]) => e.runs > 0)
+    .map(([id, e]) => ({
+      check_id: id,
+      title: titles.get(id)?.title ?? e.title,
+      kind: e.check_kind,
+      runs: e.runs,
+      prev_runs: prev.get(id)?.runs ?? 0,
+      dismissed: e.dismissed,
+      last_ms: e.last_ms,
+      example_trace_id: e.trace_id,
+      projects: e.projects,
+    }))
     .sort((a, b) => b.runs - a.runs || b.last_ms - a.last_ms);
 
   // Tools, with the previous window for trends.
@@ -274,32 +323,37 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
     }))
     .sort((a, b) => b.calls - a.calls);
 
-  // Projects.
+  // Projects, with the problem each one found most often.
+  const topProblem = new Map(
+    (
+      db
+        .prepare(
+          `SELECT project, title FROM (
+             SELECT ${PROJECT} AS project, f.title, ROW_NUMBER() OVER (PARTITION BY ${PROJECT} ORDER BY COUNT(*) DESC, f.title) AS k
+             FROM runs JOIN findings f ON f.trace_id = runs.trace_id WHERE ${IN_WINDOW} AND ${PROBLEM} GROUP BY 1, 2)
+           WHERE k = 1`,
+        )
+        .all({ from, to: until }) as { project: string; title: string }[]
+    ).map((r) => [r.project, r.title]),
+  );
   const projects = new Map<string, ProjectAgg>();
-  const topByProject = new Map<string, Map<string, number>>();
-  for (const f of cur.findings.filter(IS_PROBLEM)) {
-    const p = projectOf.get(f.trace_id) ?? "unknown";
-    const m = topByProject.get(p) ?? new Map<string, number>();
-    m.set(f.title, (m.get(f.title) ?? 0) + 1);
-    topByProject.set(p, m);
+  for (const g of groups) {
+    const a = projects.get(g.project) ?? { name: g.project, runs: 0, failed: 0, with_problems: 0, prev_runs: 0, prev_with_problems: 0, last_ms: 0, top_problem: null };
+    a.runs += g.runs;
+    a.failed += g.failed;
+    a.with_problems += g.with_problems;
+    a.last_ms = Math.max(a.last_ms, g.last_ms);
+    projects.set(g.project, a);
   }
-  for (const r of cur.runs) {
-    const a = projects.get(r.project) ?? { name: r.project, runs: 0, failed: 0, with_problems: 0, prev_runs: 0, prev_with_problems: 0, last_ms: 0, top_problem: null };
-    a.runs++;
-    if (r.status === "error" || r.status === "interrupted") a.failed++;
-    if (cur.problemRuns.has(r.trace_id)) a.with_problems++;
-    a.last_ms = Math.max(a.last_ms, r.t);
-    projects.set(r.project, a);
-  }
-  for (const r of prev.runs) {
-    const a = projects.get(r.project);
+  for (const g of prevGroups) {
+    const a = projects.get(g.project);
     if (!a) continue;
-    a.prev_runs++;
-    if (prev.problemRuns.has(r.trace_id)) a.prev_with_problems++;
+    a.prev_runs += g.runs;
+    a.prev_with_problems += g.with_problems;
   }
-  for (const [p, m] of topByProject) {
+  for (const [p, title] of topProblem) {
     const a = projects.get(p);
-    if (a) a.top_problem = [...m].sort((x, y) => y[1] - x[1])[0]?.[0] ?? null;
+    if (a) a.top_problem = title;
   }
 
   // Checks that ran and found nothing: questions from the decisions they made, rules on every run.
@@ -310,27 +364,26 @@ export function computeInsights(db: Database.Database, key: WindowKey, checks: C
     )
     .all({ from, to: until }) as { check_id: string; runs: number }[];
   const ranOn = new Map(asked.map((a) => [a.check_id, a.runs]));
-  for (const c of checks) if (c.kind === "rule" && c.enabled && cur.totals.runs) ranOn.set(c.id, cur.totals.runs);
+  for (const c of checks) if (c.kind === "rule" && c.enabled && totals.runs) ranOn.set(c.id, totals.runs);
   const passing = [...ranOn]
     .filter(([id]) => reportedNothing(id))
     .map(([id, runs]) => ({ check_id: id, title: titles.get(id)?.title ?? id, kind: titles.get(id)?.kind ?? "question", runs }))
     .sort((a, b) => b.runs - a.runs);
 
-  const prevTitle = new Map(prev.findings.map((f) => [f.check_id, f.title]));
-  const gone = [...prevRunsByCheck]
+  const gone = [...prev]
     .filter(([id]) => reportedNothing(id))
-    .map(([id, runs]) => ({ check_id: id, title: titles.get(id)?.title ?? prevTitle.get(id) ?? id, prev_runs: runs.size }))
+    .map(([id, e]) => ({ check_id: id, title: titles.get(id)?.title ?? e.title, prev_runs: e.runs }))
     .sort((a, b) => b.prev_runs - a.prev_runs);
 
   return {
     window: { key, from_ms: from, to_ms: to, bucket_ms: w.bucketMs },
-    totals: cur.totals,
-    previous: prev.totals,
+    totals,
+    previous: totalsOf(db, prevFrom, from, prevGroups),
     buckets,
     problems,
     tools: toolAggs,
     models: models(db, from, until),
-    projects: [...projects.values()].sort((a, b) => b.runs - a.runs),
+    projects: [...projects.values()].sort((a, b) => b.runs - a.runs || b.last_ms - a.last_ms),
     passing,
     gone,
   };

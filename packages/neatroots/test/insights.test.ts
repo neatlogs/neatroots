@@ -100,31 +100,56 @@ describe("insights", () => {
     expect(q.passing.map((p) => p.check_id)).not.toContain("ignored-tool-error");
   });
 
-  it("counts every run and finding in a large window, so its numbers agree", () => {
+  it("counts every run and finding in a large window, so its numbers agree, without reading them all into memory", () => {
     // Past 20,000 runs (and 50,000 findings) the totals used to cover only part of the window while
-    // the problem list covered more of it, and the runs beyond the cap had no project.
+    // the problem list covered more of it, and the runs beyond the cap had no project. Reading the
+    // whole window into JS instead could exhaust the server's heap on a large store.
     const st = store();
     const n = 50_050;
     const base = Date.now() - 86_400_000;
     const addRun = st.db.prepare("INSERT INTO runs (trace_id, project, workflow, status, started_ms, received_ms, updated_ms) VALUES (?, 'big-agent', 'big-agent', 'ok', ?, ?, ?)");
-    const addFinding = st.db.prepare(
-      "INSERT INTO findings (id, trace_id, check_id, check_kind, title, status, evidence_span_ids, detail, created_ms, updated_ms) VALUES (?, ?, 'ignored-tool-error', 'question', 'Carried on after a failed tool call', 'raised', '[]', '{}', ?, ?)",
-    );
     st.db.transaction(() => {
       for (let i = 0; i < n; i++) {
         const t = hex(16);
         const ms = base + i;
         addRun.run(t, ms, ms, ms);
-        addFinding.run(`fnd_${i}`, t, ms, ms);
+        st.insertFinding({
+          trace_id: t,
+          check_id: "ignored-tool-error",
+          check_kind: "question",
+          title: "Carried on after a failed tool call",
+          probability: 0.9,
+          status: "raised",
+          evidence_span_ids: [],
+          detail: {},
+          model: null,
+          triage_score: null,
+          explanation_id: null,
+        });
       }
     })();
+    // Count the rows the queries hand to JS.
+    const prepare = st.db.prepare.bind(st.db);
+    let rows = 0;
+    st.db.prepare = ((sql: string) => {
+      const stmt = prepare(sql);
+      const all = stmt.all.bind(stmt);
+      stmt.all = ((...args: unknown[]) => {
+        const r = (all as (...a: unknown[]) => unknown[])(...args);
+        rows += r.length;
+        return r;
+      }) as typeof stmt.all;
+      return stmt;
+    }) as typeof st.db.prepare;
     const ins = computeInsights(st.db, "7d", CHECKS);
+    st.db.prepare = prepare;
     expect(ins.totals.runs).toBe(n); // was 20000
     expect(ins.totals.with_problems).toBe(n); // was 19985
     expect(ins.problems[0].runs).toBe(n); // was 50000
     expect(ins.problems[0].projects).toEqual(["big-agent"]); // runs past the cap read as "unknown"
     expect(ins.buckets.reduce((a, b) => a + b.runs, 0)).toBe(n);
     expect(ins.projects).toMatchObject([{ name: "big-agent", runs: n, with_problems: n }]);
+    expect(rows).toBeLessThan(100); // was 70,000 (capped), and over 100,000 with the caps simply removed
   });
 
   it("lets the digest quote only numbers that are in the data", () => {
