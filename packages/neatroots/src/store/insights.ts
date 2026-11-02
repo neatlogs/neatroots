@@ -122,6 +122,10 @@ const RUNS_IN = `SELECT trace_id FROM runs WHERE doctor = 0 AND COALESCE(started
 /** A problem counts unless the user dismissed it, the check could not run, or it went quiet. */
 const IS_PROBLEM = (f: { status: string }) => f.status !== "dismissed" && f.status !== "failed" && f.status !== "quiet";
 
+/**
+ * A window's runs and findings, all of them: every total, bucket, project and problem below is
+ * counted from these, so a cap on either would make them disagree with each other.
+ */
 function slice(db: Database.Database, from: number, to: number) {
   const p = { from, to };
   const runs = db
@@ -130,11 +134,11 @@ function slice(db: Database.Database, from: number, to: number) {
         CASE WHEN ended_ms IS NOT NULL AND started_ms IS NOT NULL THEN ended_ms - started_ms END AS dur,
         total_tokens, llm_calls, tool_calls
        FROM runs WHERE doctor = 0 AND COALESCE(started_ms, received_ms) >= @from AND COALESCE(started_ms, received_ms) < @to
-       ORDER BY t DESC LIMIT 20000`,
+       ORDER BY t DESC`,
     )
     .all(p) as RunRec[];
   const findings = db
-    .prepare(`SELECT trace_id, check_id, check_kind, title, status, created_ms FROM findings WHERE trace_id IN (${RUNS_IN}) LIMIT 50000`)
+    .prepare(`SELECT trace_id, check_id, check_kind, title, status, created_ms FROM findings WHERE trace_id IN (${RUNS_IN})`)
     .all(p) as FindingRec[];
   const problemRuns = new Set(findings.filter(IS_PROBLEM).map((f) => f.trace_id));
   const done = runs.filter((r) => r.status !== "running");
