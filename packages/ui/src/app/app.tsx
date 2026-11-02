@@ -1,3 +1,4 @@
+import { CompareRuns } from "@/features/runs/_components/compare-runs";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { Toaster } from "sonner";
@@ -61,7 +62,9 @@ export function App() {
           <PushBanner />
           <div className="min-h-0 flex-1">
           <PageErrorBoundary key={route.join("/")}>
-          {page === "checks" ? (
+          {page === "compare" ? (
+            <CompareRuns query={query} />
+          ) : page === "checks" ? (
             <ChecksPage />
           ) : page === "search" ? (
             <SearchPage query={query} />
