@@ -47,6 +47,31 @@ flag_at: 0.8
     expect(fitEvidence(c).scope).toBe("span");
   });
 
+  it("keeps a session question a session question", () => {
+    const [c] = parseChecks(`
+id: cross-turn-contradiction
+kind: yes_no
+scope: session
+ask: Did the agent contradict what it said in an earlier turn?
+evidence: { spans: { type: [llm, tool] } }
+flag_at: 0.8
+`).checks as QuestionCheck[];
+    const fit = fitEvidence(c);
+    expect(fit.scope).toBe("session");
+    expect(fit.evidence).toMatchObject({ final_output: true, spans: { type: ["llm", "tool", "mcp_tool"] } });
+
+    const [d] = parseChecks(`
+id: two-turn-tool-mismatch
+kind: yes_no
+scope: session
+ask: Did a later turn repeat a tool call that already failed earlier?
+evidence: { spans: { type: [tool] }, fields: [input] }
+flag_at: 0.8
+`).checks as QuestionCheck[];
+    expect(fitEvidence(d).scope).toBe("session");
+    expect(checkWarnings(d)).toEqual([]);
+  });
+
   it("rejects a choice check whose flag_on is not one of its options", () => {
     const { checks, errors } = parseChecks(`
 id: bad-choice

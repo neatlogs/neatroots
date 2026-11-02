@@ -72,6 +72,11 @@ is the expected level, not necessarily a whole number.
   show the same problem join it).
 - `scope: trace` sees the run's spans in order: right whenever a question relates two things, such
   as a tool's result and what the agent said next.
+- `scope: session` sees the conversation's runs so far, oldest first: right for cross-turn problems
+  such as the agent contradicting a constraint the user set in an earlier turn. It is judged at each
+  run's end, and the finding pins to the run where the problem became visible, with evidence from
+  that run. It reads at most the 25 earlier finished runs of the session (the newest ones), and runs
+  still in progress are skipped. It can also see the run's final answer with `evidence.final_output: true`.
 - A question about the agent's answer ("claims", "says", "reports", "the final response") needs
   `scope: trace` and `evidence.final_output: true`. `neatroots checks validate`, the app's check
   editor and the MCP check tools warn when a check asks about the answer but can't see it; a check

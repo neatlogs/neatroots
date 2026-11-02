@@ -39,7 +39,7 @@ export async function draftCheckFromConcern(roots: Roots, concern: string, opts:
     kind: "yes_no",
     title: out.title ?? out.ask.slice(0, 80),
     description: `Written from: ${concern}`,
-    scope: out.scope === "span" ? "span" : "trace",
+    scope: out.scope === "span" ? "span" : out.scope === "session" ? "session" : "trace",
     ask: out.ask,
     evidence: { spans: { type: types }, fields: ["input", "output", "status", "error"], ...(out.scope === "span" ? {} : { last: 12 }) },
     flag_at: 0.8,

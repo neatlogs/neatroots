@@ -28,7 +28,7 @@ export function checkWarnings(c: Check): string[] {
 /**
  * Evidence a whole-run question needs: tool calls and LLM calls in order, plus the final answer.
  * A drafted check about what the agent said becomes a whole-run question whatever scope the model
- * picked, so it can relate a tool's result to the answer.
+ * picked (a session question stays session), so it can relate a tool's result to the answer.
  */
 export function fitEvidence<T extends QuestionCheck>(c: T): T {
   const ask = c.ask.replace(/^\s*yes,\s*/i, "").replace(/^\w/, (x) => x.toUpperCase());
@@ -37,7 +37,7 @@ export function fitEvidence<T extends QuestionCheck>(c: T): T {
   return {
     ...c,
     ask,
-    scope: "trace",
+    scope: c.scope === "session" ? "session" : "trace",
     evidence: { ...c.evidence, spans: { type: ["llm", "tool", "mcp_tool"] }, fields: c.evidence?.fields ?? ["input", "output", "status", "error"], final_output: true, last: c.evidence?.last ?? 12 },
   };
 }
