@@ -29,12 +29,26 @@ export function useLiveEvents(): { connected: boolean; spanTick: number } {
     };
     const schedule = (traceId: unknown) => {
       if (typeof traceId === "string") pending.current.add(traceId);
-      clearTimeout(timer.current);
-      timer.current = setTimeout(flush, 300);
+      if(!timer.current){
+        timer.current = setTimeout(()=>{
+          flush()
+          timer.current=undefined
+        }, 300);
+      }
     };
     const open = () => {
       es = new EventSource("/api/events");
-      es.onopen = () => setConnected(true);
+      es.onopen = () => {
+        setConnected(true);
+        // Reconcile updates missed before the initial connection or during a disconnect.
+        void qc.invalidateQueries({ queryKey: runKeys.lists() });
+        void qc.invalidateQueries({
+          queryKey: runKeys.details(),
+          type: "active",
+          predicate: ({ queryKey }) => queryKey.length === 3 ||
+            ["chat", "conversation", "replay-options"].includes(String(queryKey[3])),
+        });
+      };
       es.onerror = () => {
         setConnected(false);
         es?.close();
@@ -89,6 +103,8 @@ export function useLiveEvents(): { connected: boolean; spanTick: number } {
       closed = true;
       clearTimeout(retry);
       clearTimeout(timer.current);
+      timer.current = undefined;
+      pending.current.clear();
       es?.close();
     };
   }, [qc]);
