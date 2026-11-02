@@ -464,6 +464,8 @@ export class DecisionModel {
   }
 
   reset(): void {
+    // In-flight decisions retain the old cache, so their answers cannot refill this one.
+    this.cache = new Map();
     this.laya.reset();
     this.jev.reset();
     this.jevCloud.reset();
@@ -484,8 +486,9 @@ export class DecisionModel {
   }
 
   async decide(state: string, questions: DecisionQuestion[], opts: DecideOptions = {}): Promise<DecisionResult> {
+    const cache = this.cache;
     const key = createHash("sha256").update(state).update(JSON.stringify(questions)).digest("hex");
-    const hit = this.cache.get(key);
+    const hit = cache.get(key);
     if (hit) return { ...hit, latencyMs: 0 };
     const candidates = await this.candidates(questions);
     let lastErr: Error | undefined;
@@ -493,8 +496,8 @@ export class DecisionModel {
       if (!(await b.available())) continue;
       try {
         const result = await b.decide(state, questions, opts);
-        this.cache.set(key, result);
-        if (this.cache.size > 1000) this.cache.delete(this.cache.keys().next().value as string);
+        cache.set(key, result);
+        if (cache.size > 1000) cache.delete(cache.keys().next().value as string);
         if (b === this.llmBackend) this.shadow(state, questions, result);
         return result;
       } catch (err) {
