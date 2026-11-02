@@ -177,6 +177,8 @@ export class Engine {
   /** The quiet-run sweep in progress; a sweep that starts meanwhile waits for it instead of running alongside. */
   private quietSweep?: Promise<void>;
   readonly progress: CheckProgress;
+  /** Runs the last process left unfinished, read before this process starts any work of its own. */
+  private inherited: string[];
 
   constructor(
     private readonly roots: Roots,
@@ -186,8 +188,24 @@ export class Engine {
     readonly steering: SteeringHub,
   ) {
     this.progress = new CheckProgress(roots.store);
+    this.inherited = this.progress.unfinished();
     roots.bus.on("trace", (u) => this.onTrace(u));
     steering.idleWaiter = (traceId, ms) => this.waitIdle(traceId, ms);
+  }
+
+  /** Hands the inherited runs to startup recovery once; later calls get none. */
+  takeInherited(): string[] {
+    return this.inherited.splice(0);
+  }
+
+  /** Waits for a run's checks and any end pass still scheduled for it; false on timeout. */
+  async waitSettled(traceId: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.pending(traceId) || this.live.get(traceId)?.endTimer) {
+      const left = deadline - Date.now();
+      if (left <= 0 || !(await this.waitIdle(traceId, left, true))) return false;
+    }
+    return true;
   }
 
   // ----------------------------------------------------------- job tracking
@@ -221,8 +239,8 @@ export class Engine {
   }
 
   /** Resolves true when nothing is pending for the trace, false on timeout. */
-  waitIdle(traceId: string, timeoutMs: number): Promise<boolean> {
-    if (!this.pending(traceId)) return Promise.resolve(true);
+  waitIdle(traceId: string, timeoutMs: number, endToo = false): Promise<boolean> {
+    if (!this.pending(traceId) && !(endToo && this.live.get(traceId)?.endTimer)) return Promise.resolve(true);
     return new Promise((resolve) => {
       let cb: (() => void) | undefined;
       const timer = setTimeout(() => {
@@ -315,6 +333,12 @@ export class Engine {
     if (reopened) {
       run.ended = false;
       clearTimeout(run.endTimer);
+      run.endTimer = undefined;
+      // A wait that counted the cancelled end pass re-checks what is left.
+      if (!this.pending(u.traceId)) {
+        for (const fn of this.idleWaiters.get(u.traceId) ?? []) fn();
+        this.idleWaiters.delete(u.traceId);
+      }
     }
     const fresh = u.spans.filter((s) => s.isNew && !s.view.isMarker);
     if (fresh.length) this.track(u.traceId, this.handleSpans(run, fresh.map((s) => s.row.span_id)));
@@ -322,7 +346,10 @@ export class Engine {
       run.ended = true;
       // Trailing spans can arrive in the next batch; give them a moment.
       clearTimeout(run.endTimer);
-      run.endTimer = setTimeout(() => void this.track(u.traceId, this.handleEnd(run)), 400);
+      run.endTimer = setTimeout(() => {
+        run.endTimer = undefined;
+        void this.track(u.traceId, this.handleEnd(run));
+      }, 400);
     }
   }
 
@@ -1434,11 +1461,13 @@ ${library}`;
 /** How many interrupted runs a restart finishes; older ones are marked interrupted for Re-run checks. */
 const RESUME_LIMIT = 200;
 
-/** How long recovery waits for a run's in-flight checks in this process before resuming it anyway. */
+/** How long recovery waits for a run's in-flight checks in this process before leaving it alone. */
 const RESUME_WAIT_MS = 120_000;
 
-export async function resumeUnfinished(engine: Engine, roots: Roots): Promise<number> {
-  const ids = engine.progress.unfinished();
+export async function resumeUnfinished(engine: Engine, roots: Roots, waitMs = RESUME_WAIT_MS): Promise<number> {
+  // What the last process left is rechecked once settled; other unfinished runs only if still unfinished then.
+  const inherited = new Set(engine.takeInherited());
+  const ids = [...inherited, ...engine.progress.unfinished().filter((id) => !inherited.has(id))];
   const ended = ids.filter((id) => {
     // A quiet-run sweep claimed this run and is rechecking it: leave it to the sweep (issue #673).
     if (engine.isQuietClaimed(id)) return false;
@@ -1450,15 +1479,26 @@ export async function resumeUnfinished(engine: Engine, roots: Roots): Promise<nu
   const todo = ended.slice(0, RESUME_LIMIT);
   if (todo.length) log.info(`finishing checks for ${todo.length} run${todo.length === 1 ? "" : "s"} a restart interrupted`);
   let resumed = 0;
-  for (const id of todo) {
-    // A run this process is checking right now (spans arrived since the start) finishes its own
-    // work first: rechecking it mid-check rebuilds its live state and drops an answer still on its
-    // way in. Its progress row is cleared once that work completes the run; only what is left resumes.
-    await engine.waitIdle(id, RESUME_WAIT_MS);
-    if (engine.progress.state(id) !== "checking") continue;
-    await engine.recheck(id, { resume: true });
-    resumed++;
-  }
+  let queue = Promise.resolve();
+  await Promise.all(
+    todo.map(async (id) => {
+      // Rechecking mid-check drops a newer answer; local work covers only new spans, so recheck after it.
+      if (!(await engine.waitSettled(id, waitMs))) {
+        log.warn(`left checks for ${id.slice(0, 8)} to this process: they were still running after ${waitMs / 1000} s`);
+        return;
+      }
+      // Each run resumes once it is settled, one recheck at a time.
+      queue = queue
+        .then(async () => {
+          if (!roots.store.getRun(id) || engine.isQuietClaimed(id)) return;
+          if (!inherited.has(id) && engine.progress.state(id) !== "checking") return;
+          await engine.recheck(id, { resume: true });
+          resumed++;
+        })
+        .catch((e: Error) => log.warn(`couldn't resume checks for ${id.slice(0, 8)}: ${e.message}`));
+      await queue;
+    }),
+  );
   return resumed;
 }
 
