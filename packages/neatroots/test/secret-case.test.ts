@@ -35,6 +35,26 @@ const KEYS = [
   "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
   "xoxb-1234567890-abcdefgh",
   "-----BEGIN RSA PRIVATE KEY-----",
+  // Stripe live/test keys (underscore separator, caught by issue #254)
+  "sk_live_abcdefghijklmnopqrst",
+  "sk_test_abcdefghijklmnopqrst",
+  "rk_live_abcdefghijklmnopqrst",
+  // GitHub fine-grained PAT
+  "github_pat_abcdefghijklmnopqrstuvwxyz0",
+  // GCP API key (AIza + exactly 35 alphanum/_/-)
+  "AIzaabcdefghijklmnopqrstuvwxyz012345678",
+  // HuggingFace token (hf_ + 30+)
+  "hf_abcdefghijklmnopqrstuvwxyzabcd",
+  // npm token (npm_ + 36+)
+  "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+  // SendGrid API key (SG. + 16+. + 16+)
+  "SG.abcdefghijklmnopqrst.abcdefghijklmnopqrst",
+  // Docker PAT (dckr_pat_ + 20+)
+  "dckr_pat_abcdefghijklmnopqrstu",
+  // DigitalOcean PAT (dop_v1_ + 32+)
+  "dop_v1_abcdefghijklmnopqrstuvwxyz012345",
+  // GitHub enterprise tokens (gho_, ghu_, ghs_)
+  "gho_abcdefghijklmnopqrstuvwxyz0123456789",
 ];
 const NEAR = [
   "akiaiosfodnn7example",
@@ -45,6 +65,15 @@ const NEAR = [
   "the sk- prefix marks a key",
   "-----begin rsa private key-----",
   "Akiaiosfodnn7example",
+  // Stripe near-misses: wrong env or too short
+  "sk_dev_abcdefghijklmnopqrst",
+  "sk_live_tooshort",
+  // GitHub fine-grained PAT too short
+  "github_pat_shorttokenvalue",
+  // GCP near-miss: one char short of 35 (34 after AIza)
+  "AIzaabcdefghijklmnopqrstuvwxyz01234567",
+  // HuggingFace too short
+  "hf_abcdefghijklmnopqrstuvwxyz",
 ];
 
 describe("secret-in-output", () => {
