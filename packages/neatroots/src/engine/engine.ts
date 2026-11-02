@@ -1434,6 +1434,9 @@ ${library}`;
 /** How many interrupted runs a restart finishes; older ones are marked interrupted for Re-run checks. */
 const RESUME_LIMIT = 200;
 
+/** How long recovery waits for a run's in-flight checks in this process before resuming it anyway. */
+const RESUME_WAIT_MS = 120_000;
+
 export async function resumeUnfinished(engine: Engine, roots: Roots): Promise<number> {
   const ids = engine.progress.unfinished();
   const ended = ids.filter((id) => {
@@ -1446,8 +1449,17 @@ export async function resumeUnfinished(engine: Engine, roots: Roots): Promise<nu
   for (const id of ended.slice(RESUME_LIMIT)) engine.progress.interrupted(id);
   const todo = ended.slice(0, RESUME_LIMIT);
   if (todo.length) log.info(`finishing checks for ${todo.length} run${todo.length === 1 ? "" : "s"} a restart interrupted`);
-  for (const id of todo) await engine.recheck(id, { resume: true });
-  return todo.length;
+  let resumed = 0;
+  for (const id of todo) {
+    // A run this process is checking right now (spans arrived since the start) finishes its own
+    // work first: rechecking it mid-check rebuilds its live state and drops an answer still on its
+    // way in. Its progress row is cleared once that work completes the run; only what is left resumes.
+    await engine.waitIdle(id, RESUME_WAIT_MS);
+    if (engine.progress.state(id) !== "checking") continue;
+    await engine.recheck(id, { resume: true });
+    resumed++;
+  }
+  return resumed;
 }
 
 function slug(s: string): string {
