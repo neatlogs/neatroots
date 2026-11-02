@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { appKeys, runKeys } from "../features/runs/_services/run-keys";
 import type { ChatEvent } from "./api";
 import { go } from "./router";
@@ -15,26 +15,40 @@ export function useLiveEvents(): { connected: boolean; spanTick: number } {
   const qc = useQueryClient();
   const [connected, setConnected] = useState(false);
   const [spanTick, setSpanTick] = useState(0);
-  const pending = useRef(new Set<string>());
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
     let es: EventSource | undefined;
     let closed = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    const pending = new Set<string>();
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const flush = () => {
+      timer = undefined;
       void qc.invalidateQueries({ queryKey: runKeys.lists() });
-      for (const id of pending.current) void qc.invalidateQueries({ queryKey: runKeys.detail(id) });
-      pending.current.clear();
+      for (const id of pending) void qc.invalidateQueries({ queryKey: runKeys.detail(id) });
+      pending.clear();
     };
     const schedule = (traceId: unknown) => {
-      if (typeof traceId === "string") pending.current.add(traceId);
-      clearTimeout(timer.current);
-      timer.current = setTimeout(flush, 300);
+      if (typeof traceId === "string") pending.add(traceId);
+      // Keep a fixed window so a busy stream cannot postpone refresh indefinitely.
+      timer ??= setTimeout(flush, 300);
+    };
+    const reconcile = async () => {
+      const filters = [runKeys.lists(), runKeys.details()].map((queryKey) => ({ queryKey, type: "active" as const }));
+      // Invalidation alone reuses an initial request without cached data. Cancel it
+      // first so the replacement reads state from after the subscription opened.
+      await Promise.all(filters.map((filter) => qc.cancelQueries(filter)));
+      if (closed) return;
+      await Promise.all(filters.map((filter) => qc.invalidateQueries(filter)));
     };
     const open = () => {
       es = new EventSource("/api/events");
-      es.onopen = () => setConnected(true);
+      es.onopen = () => {
+        if (closed) return;
+        setConnected(true);
+        // Events have no replay cursor: reconcile the subscription gap on every open.
+        void reconcile();
+      };
       es.onerror = () => {
         setConnected(false);
         es?.close();
@@ -88,7 +102,8 @@ export function useLiveEvents(): { connected: boolean; spanTick: number } {
     return () => {
       closed = true;
       clearTimeout(retry);
-      clearTimeout(timer.current);
+      clearTimeout(timer);
+      pending.clear();
       es?.close();
     };
   }, [qc]);
