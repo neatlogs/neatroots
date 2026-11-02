@@ -617,7 +617,8 @@ it("adds the completion flag to an old store and keeps abandoned work recoverabl
     reopened.completeQuietRun(id);
     expect(reopened.abandonedQuietRuns(200)).toEqual([]);
     reopened.restoreQuietRun(id);
-    expect(reopened.markRunInterrupted(id, "no end received", Date.now() + 1)).toBe(true);
+    const activity = reopened.db.prepare("SELECT last_span_ms FROM runs WHERE trace_id = ?").get(id) as { last_span_ms: number };
+    expect(reopened.markRunInterrupted(id, "no end received", activity.last_span_ms + 1)).toBe(true);
     expect(reopened.abandonedQuietRuns(200).map((r) => r.trace_id)).toEqual([id]);
   } finally { reopened.close(); }
 });
