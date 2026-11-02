@@ -670,4 +670,87 @@ describe("server", () => {
     expect(msg).toMatch(/Settings → Models|neatroots llm use/);
     expect(msg).not.toMatch(/fetch failed/);
   });
+
+  it("returns 413 for oversized bodies on /v1/traces, /v1/trace, and /v1/logs", async () => {
+    const tb = await served();
+    const oversized = Buffer.alloc(64 * 1024 * 1024 + 1);
+
+    const rTraces = await fetch(`${tb.url}/v1/traces`, {
+      method: "POST",
+      headers: { "content-type": "application/x-protobuf" },
+      body: oversized,
+    });
+    expect(rTraces.status).toBe(413);
+
+    const rTrace = await fetch(`${tb.url}/v1/trace`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: oversized,
+    });
+    expect(rTrace.status).toBe(413);
+
+    const rLogs = await fetch(`${tb.url}/v1/logs`, {
+      method: "POST",
+      headers: { "content-type": "application/x-protobuf" },
+      body: oversized,
+    });
+    expect(rLogs.status).toBe(413);
+  });
+
+  it("returns 413 for gzip-compressed bodies that decompress beyond the limit", async () => {
+    const tb = await served();
+    const huge = Buffer.alloc(270 * 1024 * 1024);
+    const compressed = zlib.gzipSync(huge);
+
+    for (const [path, ct] of [
+      ["/v1/traces", "application/x-protobuf"],
+      ["/v1/trace", "application/json"],
+      ["/v1/logs", "application/x-protobuf"],
+    ] as const) {
+      const r = await fetch(`${tb.url}${path}`, {
+        method: "POST",
+        headers: { "content-type": ct, "content-encoding": "gzip" },
+        body: compressed,
+      });
+      expect(r.status, path).toBe(413);
+    }
+  });
+
+  it("returns 413 for deflate-compressed bodies that decompress beyond the limit", async () => {
+    const tb = await served();
+    const huge = Buffer.alloc(270 * 1024 * 1024);
+    const compressed = zlib.deflateSync(huge);
+
+    for (const [path, ct] of [
+      ["/v1/traces", "application/x-protobuf"],
+      ["/v1/trace", "application/json"],
+      ["/v1/logs", "application/x-protobuf"],
+    ] as const) {
+      const r = await fetch(`${tb.url}${path}`, {
+        method: "POST",
+        headers: { "content-type": ct, "content-encoding": "deflate" },
+        body: compressed,
+      });
+      expect(r.status, path).toBe(413);
+    }
+  });
+
+  it("returns 413 for brotli-compressed bodies that decompress beyond the limit", async () => {
+    const tb = await served();
+    const huge = Buffer.alloc(270 * 1024 * 1024);
+    const compressed = zlib.brotliCompressSync(huge);
+
+    for (const [path, ct] of [
+      ["/v1/traces", "application/x-protobuf"],
+      ["/v1/trace", "application/json"],
+      ["/v1/logs", "application/x-protobuf"],
+    ] as const) {
+      const r = await fetch(`${tb.url}${path}`, {
+        method: "POST",
+        headers: { "content-type": ct, "content-encoding": "br" },
+        body: compressed,
+      });
+      expect(r.status, path).toBe(413);
+    }
+  }, 120000);
 });
