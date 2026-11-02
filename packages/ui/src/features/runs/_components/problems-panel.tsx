@@ -172,13 +172,16 @@ function ProblemRow({
     f.precision.precision !== null && f.precision.hits >= 3 ? `${pct(f.precision.precision)} of past findings kept` : null,
   ].filter(Boolean);
   const group = [f, ...related];
-  const params = Object.entries((f.detail.params ?? {}) as Record<string, string>).filter(([, v]) => v).slice(0, 2);
+  const allParams = Object.entries((f.detail.params ?? {}) as Record<string, string>).filter(([, v]) => v);
+  const tool = allParams.find(([key]) => key === "tool")?.[1];
+  const error = allParams.find(([key]) => key === "error")?.[1];
+  const params = allParams.filter(([key]) => key !== "tool" && key !== "error").slice(0, 2);
   return (
     <li>
-      <button type="button" aria-expanded={expanded} onClick={onToggle} className="flex h-14 w-full cursor-pointer items-center gap-3 px-4 text-left transition-colors hover:bg-surface-subtle focus-visible:ring-1 focus-visible:ring-ring/50 focus-visible:outline-none focus-visible:ring-inset">
+      <button type="button" aria-expanded={expanded} aria-label={`${f.title}${preview ? `. ${preview}` : ""}. ${state.label}`} title={`${f.title}${preview ? ` — ${preview}` : ""}`} onClick={onToggle} className="flex h-14 w-full cursor-pointer items-center gap-3 px-4 py-1 text-left transition-colors hover:bg-surface-subtle focus-visible:ring-1 focus-visible:ring-ring/50 focus-visible:outline-none focus-visible:ring-inset">
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className={cn("truncate text-sm", open ? "font-medium text-foreground" : "text-muted-foreground")}>{f.title}</span>
-          <span className="truncate text-xs text-muted-foreground">{preview || " "}</span>
+          <span className={cn("truncate text-sm leading-5", open ? "font-medium text-foreground" : "text-muted-foreground")}>{f.title}</span>
+          <span className="truncate text-xs leading-4 text-muted-foreground">{preview || " "}</span>
         </span>
         <StatusPill size="sm" tone={state.tone}>
           {state.label}
@@ -186,7 +189,12 @@ function ProblemRow({
         <Icon icon={ArrowDown01Icon} size="sm" className={cn("shrink-0 text-muted-foreground transition-transform", expanded && "rotate-180")} />
       </button>
       {expanded && (
-        <div className="flex flex-col gap-3 border-t border-border bg-surface-subtle/40 px-4 py-3">
+        <div data-testid="problem-detail" tabIndex={0} className="h-48 overflow-y-auto overscroll-contain border-t border-border bg-surface-subtle/40 px-4 py-3 sm:h-56">
+          <div className="flex min-w-0 flex-col gap-3">
+          <div className="min-w-0 max-w-full space-y-1">
+            <p data-testid="finding-full-title" className="break-words font-medium text-foreground">{f.title}</p>
+            {preview && <p data-testid="finding-full-preview" className="whitespace-pre-wrap break-words text-xs text-muted-foreground">{preview}</p>}
+          </div>
           {f.status === "quiet" && (
             <p className="text-xs text-muted-foreground">Quiet: this check was dismissed 3 times in this project, so it no longer counts here. Reopen it to count it.</p>
           )}
@@ -203,10 +211,22 @@ function ProblemRow({
               <span className="text-foreground">{related.map((r) => r.title).join(" · ")}</span>
             </p>
           )}
+          {tool && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-muted-foreground">Tool</span>
+              <span data-testid="finding-tool" title={tool} className="min-w-0 max-w-full break-words rounded-md border border-border bg-background px-2 py-0.5 font-mono text-foreground">{tool}</span>
+            </div>
+          )}
+          {error && (
+            <div data-testid="finding-error" role="note" className="flex min-w-0 flex-col gap-1 rounded-lg border border-danger-border bg-danger-surface px-3 py-2">
+              <span className="text-xs font-medium text-danger-fg">{tool ? "Tool error" : "Error detail"}</span>
+              <pre data-testid="finding-error-copy" title={error} className="max-h-24 max-w-full overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-danger-fg">{error}</pre>
+            </div>
+          )}
           {params.map(([k, v]) => (
-            <p key={k} className="text-xs">
+            <p key={k} className="flex min-w-0 flex-wrap items-baseline gap-x-1 text-xs">
               <span className="text-muted-foreground">{k} </span>
-              <span className="text-foreground">{v}</span>
+              <span className="min-w-0 max-w-full whitespace-pre-wrap break-words text-foreground">{v}</span>
             </p>
           ))}
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -232,6 +252,7 @@ function ProblemRow({
                 )
               )}
             </span>
+          </div>
           </div>
         </div>
       )}

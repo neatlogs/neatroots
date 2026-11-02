@@ -242,8 +242,11 @@ export function SetupGuide({ status, projects, agents }: { status: Status; proje
                 <button
                   type="button"
                   aria-expanded={isOpen}
+                  aria-controls={isOpen ? `setup-step-detail-${s.id}` : undefined}
+                  aria-label={`${s.title}${s.done ? `, Done: ${s.state}` : next?.id === s.id ? ", Next" : ""}`}
+                  title={s.title}
                   onClick={() => setActive(isOpen ? "" : s.id)}
-                  className="flex h-11 w-full cursor-pointer items-center gap-3 px-4 text-left transition-colors hover:bg-surface-subtle focus-visible:bg-surface-subtle focus-visible:outline-none"
+                  className="flex h-14 w-full cursor-pointer items-center gap-3 px-4 py-1 text-left transition-colors hover:bg-surface-subtle focus-visible:bg-surface-subtle focus-visible:outline-none"
                 >
                   {s.done ? (
                     <Icon icon={CheckmarkCircle02Icon} size="sm" className="shrink-0 text-success-fg" />
@@ -252,14 +255,30 @@ export function SetupGuide({ status, projects, agents }: { status: Status; proje
                       {i + 1}
                     </span>
                   )}
-                  <span className={cn("min-w-0 flex-1 truncate text-sm", s.done ? "text-muted-foreground" : "text-foreground")}>
-                    {s.title}
-                    {s.optional && !s.done && <span className="ml-2 text-xs text-muted-foreground">optional</span>}
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span data-testid="setup-step-title" title={s.title} className={cn("truncate text-sm leading-5", s.done ? "text-muted-foreground" : "text-foreground")}>
+                      {s.title}
+                      {s.optional && !s.done && <span className="ml-2 text-xs text-muted-foreground">optional</span>}
+                    </span>
+                    {(s.done || next?.id === s.id) && (
+                      <span className="flex min-w-0 items-center gap-2 text-xs leading-4">
+                        <span className={cn("font-medium", s.done ? "text-success-fg" : "text-foreground")}>{s.done ? "Done" : "Next"}</span>
+                        {s.done && <span data-testid="setup-step-state" title={s.state} className="min-w-0 truncate text-muted-foreground">{s.state}</span>}
+                      </span>
+                    )}
                   </span>
-                  {s.done && <span className="hidden max-w-[45%] min-w-0 truncate text-xs text-muted-foreground sm:block">{s.state}</span>}
                   <Icon icon={ArrowDown01Icon} size="xs" className={cn("shrink-0 text-muted-foreground transition-transform", isOpen && "rotate-180")} />
                 </button>
-                {isOpen && <div className="flex flex-col gap-2 px-4 pb-4 pl-11 text-sm text-muted-foreground">{s.body}</div>}
+                {isOpen && (
+                  <div id={`setup-step-detail-${s.id}`} data-testid="setup-step-detail" tabIndex={0} className="h-40 overflow-y-auto overscroll-contain border-t border-border/60 px-4 py-3 pl-11 text-sm text-muted-foreground">
+                    <div className="flex min-w-0 flex-col gap-2">
+                      <p className="break-words font-medium text-foreground">{s.title}</p>
+                      {s.done && <p data-testid="setup-step-full-state" className="break-words">Done: {s.state}</p>}
+                      {next?.id === s.id && <p className="font-medium text-foreground">Next step</p>}
+                      {s.body}
+                    </div>
+                  </div>
+                )}
               </li>
             );
           })}
