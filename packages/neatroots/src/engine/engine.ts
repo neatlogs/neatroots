@@ -36,7 +36,7 @@ import type { Plain } from "../otlp/types.js";
 import { preview } from "../semantics/view.js";
 import { log } from "../util/log.js";
 import { CheckProgress } from "./progress.js";
-import { addOccurrence, dropOccurrence, findingSpans, isOpenFinding, newFindingStatus } from "./findings.js";
+import { addOccurrence, clearFailure, dropOccurrence, findingSpans, isOpenFinding, newFindingStatus, recordFailure } from "./findings.js";
 import { verifyFlag } from "./verify.js";
 
 /** Default library questions when no LLM is available to plan. */
@@ -80,6 +80,8 @@ interface LiveRun {
   /** Per question: flags the second look turned down; after a few, the question stops raising. */
   rejected: Map<string, number>;
   traceEvidence: Map<string, string>;
+  /** Per trace question: its calls, numbered in order, so an older one never writes over a newer one. */
+  traceAsks: Map<string, { last: number; written: number; out: Map<number, Promise<void>> }>;
   dirty: Set<string>;
   debounce?: NodeJS.Timeout;
   endTimer?: NodeJS.Timeout;
@@ -156,6 +158,8 @@ function pickSpans<S extends { id: string }>(spans: S[], ids: string[], traceId:
 
 /** A run with no new spans for this long is treated as ended: its end never arrived (issue #213). */
 export const QUIET_RUN_MS = 30 * 60_000;
+/** Quiet runs ended per sweep, so a backlog (the first start after an update) is worked off a batch a minute. */
+export const QUIET_SWEEP_LIMIT = 50;
 
 export class Engine {
   private live = new Map<string, LiveRun>();
@@ -163,6 +167,8 @@ export class Engine {
   private jobs = new Map<string, number>();
   private idleWaiters = new Map<string, (() => void)[]>();
   private decisionDown = false;
+  /** The quiet-run sweep in progress; a sweep that starts meanwhile waits for it instead of running alongside. */
+  private quietSweep?: Promise<void>;
   readonly progress: CheckProgress;
 
   constructor(
@@ -265,6 +271,7 @@ export class Engine {
       retrySpans: new Map(),
       rejected: new Map(),
       traceEvidence: new Map(),
+      traceAsks: new Map(),
       dirty: new Set(),
       ruleGrace: new Map(),
       ended: false,
@@ -560,7 +567,32 @@ export class Engine {
     const key = ev.spanIds.join(",") + (check.evidence?.final_output ? `|${finalOutput(snap) ?? ""}` : "");
     if (run.traceEvidence.get(check.id) === key) return;
     run.traceEvidence.set(check.id, key);
-    const outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null);
+    // Evidence can change while the model call is out and a newer call asks again. This call writes
+    // only if no newer one has written: it waits for newer calls still out, so a newer call that finds
+    // no model leaves this answer standing rather than losing it. Re-run checks replaces the live run,
+    // so a call from before it is stale.
+    const asks = run.traceAsks.get(check.id) ?? { last: 0, written: 0, out: new Map<number, Promise<void>>() };
+    run.traceAsks.set(check.id, asks);
+    const mine = ++asks.last;
+    let settle!: () => void;
+    asks.out.set(mine, new Promise<void>((r) => (settle = r)));
+    const current = async () => {
+      for (;;) {
+        if (this.live.get(run.traceId) !== run || asks.written > mine) return false;
+        const newer = [...asks.out].filter(([n]) => n > mine).map(([, p]) => p);
+        if (!newer.length) break;
+        await Promise.all(newer);
+      }
+      asks.written = mine;
+      return true;
+    };
+    let outcome: "unavailable" | void;
+    try {
+      outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null, current);
+    } finally {
+      asks.out.delete(mine);
+      settle();
+    }
     // Not asked after all, so the run-end pass asks again; unless an overlapping pass cached newer evidence.
     if (outcome === "unavailable" && run.traceEvidence.get(check.id) === key) run.traceEvidence.delete(check.id);
   }
@@ -573,6 +605,8 @@ export class Engine {
     spanIds: string[],
     snap: TraceSnapshot,
     spanId: string | null,
+    /** Asked right before each write: false when a newer call took over, so this result is dropped. */
+    current: () => boolean | Promise<boolean> = () => true,
   ): Promise<"unavailable" | void> {
     const dismissed = () => this.roots.store.latestFindingFor(run.traceId, check.id)?.status === "dismissed";
     if (dismissed()) return;
@@ -586,28 +620,13 @@ export class Engine {
         this.decisionDown = true;
         return "unavailable";
       }
-      if (dismissed()) return;
+      if (!(await current()) || dismissed()) return;
       // A model error or timeout is a failed check, never a "no".
-      const existing = this.roots.store.latestFindingFor(run.traceId, check.id);
-      if (!existing || existing.status !== "failed") {
-        const f = this.roots.store.insertFinding({
-          trace_id: run.traceId,
-          check_id: check.id,
-          check_kind: "question",
-          title: checkTitle(check),
-          probability: null,
-          status: "failed",
-          evidence_span_ids: spanIds,
-          detail: { error: (err as Error).message, span_id: spanId },
-          model: null,
-          triage_score: null,
-          explanation_id: null,
-        });
-        this.roots.bus.emit("finding", f);
-      }
+      const f = recordFailure(this.roots.store, { traceId: run.traceId, checkId: check.id, title: checkTitle(check), spanId, spanIds, message: (err as Error).message });
+      if (f) this.roots.bus.emit("finding", f);
       return;
     }
-    if (dismissed()) return;
+    if (!(await current()) || dismissed()) return;
     const answer = result.answers[check.id];
     const verdict = flagged(check, result);
     this.roots.store.insertDecision({
@@ -619,6 +638,9 @@ export class Engine {
       backend: result.backend,
       latency_ms: result.latencyMs,
     });
+    // It ran this time, so an earlier "could not run" for this span (or the whole run) is stale:
+    // the panel would keep saying the check failed, and a flag now would sit next to it.
+    for (const f of clearFailure(this.roots.store, run.traceId, check.id, spanId)) this.roots.bus.emit("finding", f);
     const open = this.findOpen(run.traceId, check.id, spanId);
     if (verdict.flagged) {
       if (open) {
@@ -637,7 +659,7 @@ export class Engine {
       // A second look, with a quote that must be in the run, before anything is raised.
       if ((run.rejected.get(check.id) ?? 0) >= 3) return;
       const check2 = check.kind === "yes_no" ? await verifyFlag(this.llm, fillTemplate(check.ask, params) || check.ask, evidence) : undefined;
-      if (dismissed()) return;
+      if (!(await current()) || dismissed()) return;
       if (check2 && !check2.verified) {
         run.rejected.set(check.id, (run.rejected.get(check.id) ?? 0) + 1);
         log.debug(`${check.id}: flag not confirmed on a second look${check2.quote ? ` (quote: ${clip(check2.quote, 80)})` : ""}`);
@@ -1081,14 +1103,22 @@ ${library}`;
    * Ends runs that went quiet without an end: marks each one interrupted ("no end received")
    * and runs its end-of-run pass on the spans that did arrive, so it does not sit "running"
    * forever (issue #213). Runs at startup and on a timer; resumeUnfinished then treats these
-   * like any other ended run.
+   * like any other ended run. One sweep at a time, at most `limit` runs each, most recent first,
+   * so a large backlog doesn't stack up model calls.
    */
-  async endQuietRuns(quietMs = QUIET_RUN_MS): Promise<void> {
+  endQuietRuns(quietMs = QUIET_RUN_MS, limit = QUIET_SWEEP_LIMIT): Promise<void> {
+    this.quietSweep ??= this.sweepQuietRuns(quietMs, limit).finally(() => {
+      this.quietSweep = undefined;
+    });
+    return this.quietSweep;
+  }
+
+  private async sweepQuietRuns(quietMs: number, limit: number): Promise<void> {
     const now = Date.now();
     const cutoff = now - quietMs;
-    for (const run of this.roots.store.quietRuns(quietMs, now)) {
-      // Only recheck when this sweep actually marked the run - an overlapping sweep
-      // that already claimed it must not repeat the end-of-run model calls.
+    for (const run of this.roots.store.quietRuns(quietMs, now, limit)) {
+      // Only recheck when this sweep actually marked the run - one that reported since it
+      // was listed stays running, and one already claimed must not repeat the model calls.
       if (this.roots.store.markRunInterrupted(run.trace_id, "no end received", cutoff)) await this.recheck(run.trace_id, { resume: true });
     }
   }

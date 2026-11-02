@@ -69,6 +69,8 @@
     var(--motion-fast) ease-in;
   /* Deep-link locate flash on Fixes board rows — soft lift, not a status ring. */
   --animate-board-row-locate: board-row-locate 700ms var(--ease-out-expo) both;
+  --color-chart-bar: var(--chart-bar);
+  --color-chart-bar-hover: var(--chart-bar-hover);
   --color-chart-label: var(--chart-label);
   --color-chart-ring-background: var(--chart-ring-background);
   --color-chart-marker-foreground: var(--chart-marker-foreground);
@@ -965,9 +967,9 @@
        this mid-light gray carries value through height, not maximum contrast,
        and shares the 285° cool temperature of the UI greys (--muted-foreground)
        so it sits in the same family rather than as a dead neutral. */
-    --color-chart-bar: oklch(0.68 0.012 285.9);
+    --chart-bar: oklch(0.68 0.012 285.9);
     /* Hover/active emphasis — one step darker so the focused bar reads on white. */
-    --color-chart-bar-hover: oklch(0.55 0.014 285.9);
+    --chart-bar-hover: oklch(0.55 0.014 285.9);
 
     /* ── Brand green (light mode) ──
        The @theme layer maps --color-brand-green → var(--brand-green) while
@@ -1089,9 +1091,9 @@
     --trace-connector-stroke-active: oklch(0.42 0 0);
 
     /* ── Trace activity chart bar fill — recessive mid-grey, not glaring white ── */
-    --color-chart-bar: oklch(0.52 0 0);
+    --chart-bar: oklch(0.52 0 0);
     /* Hover/active emphasis — one step brighter so the focused bar reads on dark. */
-    --color-chart-bar-hover: oklch(0.68 0 0);
+    --chart-bar-hover: oklch(0.68 0 0);
 
     /* ── Badge token dark overrides ──
        bg = low-lightness translucent hue (~0.26), text = bright readable hue (~0.78) */

@@ -7,3 +7,8 @@ onlyBuiltDependencies:
 overrides:
   '@opentelemetry/core@>=2.0.0 <2.8.0': ^2.8.0
   protobufjs@>=8.0.0 <8.6.6: ^8.8.0
+  # Patched versions for the server's own dependencies (zod) and the MCP SDK's (validator, express).
+  zod@>=4.0.0 <4.6.6: ^4.6.7
+  fast-uri@>=3.0.0 <3.1.9: ^3.1.9
+  body-parser@>=2.0.0 <2.4.0: ^2.4.0
+  ip-address@<10.7.4: ^10.7.4
