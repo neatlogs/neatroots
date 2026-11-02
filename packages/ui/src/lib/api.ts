@@ -41,6 +41,7 @@ export interface Span {
   end_ns?: string;
   duration_ms: number;
   status_code: number;
+  stream_cancelled?: boolean;
   model: string | null;
   tool_name: string | null;
   total_tokens: number | null;

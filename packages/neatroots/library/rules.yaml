@@ -36,6 +36,18 @@
     span: { type: llm }
     consecutive: 1
 
+- id: stream-abandoned
+  kind: rule
+  title: A streamed model reply was abandoned before it finished
+  rule:
+    type: count
+    span: { type: llm, status: ok, has_error: false, stream_cancelled: true }
+    at_least: 1
+  guidance: >-
+    A streamed model reply was abandoned before it finished. Check for an early break,
+    a cancelled task or a timeout around the stream. Read the reply to completion when
+    it is needed, or cancel deliberately when the remaining reply is no longer useful.
+
 - id: runaway-loop
   kind: rule
   group: loop

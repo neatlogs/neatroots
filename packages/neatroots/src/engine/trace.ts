@@ -19,6 +19,7 @@ export interface SpanInfo {
   status: "ok" | "error" | "unset";
   error?: string;
   finishReason?: string;
+  streamCancelled?: boolean;
   toolName?: string;
   model?: string;
   tokens?: number;
@@ -62,6 +63,7 @@ function traceCache(store: Store, traceId: string): Map<string, SpanInfo> {
   return spans;
 }
 
+/** Load stored spans into a cached trace snapshot with derived checking semantics. */
 export function loadTrace(store: Store, traceId: string): TraceSnapshot {
   const rows = store.getSpans(traceId, false);
   const cache = traceCache(store, traceId);
@@ -92,6 +94,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
       status: statusOf(row),
       error: v.error,
       finishReason: v.finishReason,
+      streamCancelled: v.streamCancelled,
       toolName: v.toolName,
       model: v.model,
       tokens: v.totalTokens,
@@ -114,8 +117,11 @@ function asList(v: string | string[] | undefined): string[] | undefined {
   return (Array.isArray(v) ? v : [v]).map((x) => x.toLowerCase());
 }
 
+/** Match recorded span semantics against the optional selector fields. */
 export function matchesSelector(s: SpanInfo, sel: SpanSelector | undefined): boolean {
   if (!sel) return true;
+  if (sel.stream_cancelled !== undefined && s.streamCancelled !== sel.stream_cancelled) return false;
+  if (sel.has_error !== undefined && Boolean(s.error) !== sel.has_error) return false;
   const types = asList(sel.type);
   if (types && !types.includes(s.kind.toLowerCase())) return false;
   const names = asList(sel.name);
