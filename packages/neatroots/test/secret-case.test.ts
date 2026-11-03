@@ -45,6 +45,9 @@ const NEAR = [
   "the sk- prefix marks a key",
   "-----begin rsa private key-----",
   "Akiaiosfodnn7example",
+  "I created branch task-add-user-authentication-flow and pushed it",
+  "Saved the file as risk-assessment-report-q3-2026.md",
+  "Set the kiosk-mode-configuration-for-lobby flag",
 ];
 
 describe("secret-in-output", () => {
