@@ -12,13 +12,15 @@ import { go } from "@/lib/router";
 import { useSpanDetail } from "../_services/run-queries";
 import { useReplay, useReplayOptions } from "../_services/view-queries";
 
-type Msg = { role: string; content: string };
+type Msg = Record<string, unknown> & { role: string; content: string };
 
 function toMessages(v: unknown): Msg[] {
   if (!Array.isArray(v)) return typeof v === "string" ? [{ role: "user", content: v }] : [];
   return v
     .filter((m): m is Record<string, unknown> => !!m && typeof m === "object" && "role" in m)
-    .map((m) => ({ role: String(m.role), content: typeof m.content === "string" ? m.content : m.content == null ? "" : JSON.stringify(m.content) }));
+    // Keep the rest of each message: an assistant turn's tool_calls and a tool result's
+    // tool_call_id are what let the server replay a tool-enabled call as it was recorded.
+    .map((m) => ({ ...m, role: String(m.role), content: typeof m.content === "string" ? m.content : m.content == null ? "" : JSON.stringify(m.content) }));
 }
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {

@@ -2,13 +2,27 @@ import os from "node:os";
 import Anthropic from "@anthropic-ai/sdk";
 import type { RootsConfig } from "../config.js";
 import { log } from "../util/log.js";
-import { BUILTIN_RULES, compileRules, CREDENTIAL_KINDS, RedactionPatternError, redactString, type RedactionRule } from "../relay/redact.js";
+import { BUILTIN_RULES, compileRules, CREDENTIAL_KINDS, RedactionPatternError, redactJsonStrings, redactString, type RedactionRule } from "../relay/redact.js";
 import { isLocalUrl, llmKeyName, providerById, strictSchema, type ProviderPreset } from "./providers.js";
 import { trimSlash } from "../util/url.js";
 
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /** Tool calls the assistant turn asked for (tool-call replays). */
+  tool_calls?: { id?: string; name: string; arguments: string }[];
+  /** The call a tool result answers (role "tool"). */
+  tool_call_id?: string;
+  /** The tool a result message came from (role "tool"). */
+  name?: string;
+}
+
+/** A tool offered to the model, in a shape both transport paths carry. */
+export interface LlmTool {
+  name: string;
+  description?: string;
+  /** JSON schema of the arguments. */
+  parameters?: Record<string, unknown>;
 }
 
 export interface TokenLogprob {
@@ -21,6 +35,8 @@ export interface ChatResult {
   text: string;
   json?: unknown;
   logprobs?: TokenLogprob[];
+  /** Tool calls the model asked for, when it answered with a call instead of text. */
+  toolCalls?: { id?: string; name: string; arguments: string }[];
   model: string;
   latencyMs: number;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
@@ -36,6 +52,8 @@ export interface ChatOptions {
   topLogprobs?: number;
   timeoutSec?: number;
   signal?: AbortSignal;
+  /** Tools the model may call (a replay of a recorded tool call). */
+  tools?: LlmTool[];
   /**
    * urgent: notes for a running agent. interactive: something a person or coding agent is waiting
    * on (drafting a check, a preview, ask, judge, explain). high: background decisions and
@@ -216,7 +234,21 @@ class OpenAiTransport implements Transport {
     const probe = await this.probe(false);
     const model = opts.model || this.model();
     if (!probe.ok || !model) throw new LlmUnavailableError(probe.error ?? "no LLM available");
-    const body: Record<string, unknown> = { model, messages, temperature: opts.temperature ?? 0, stream: false };
+    const body: Record<string, unknown> = {
+      model,
+      messages: messages.map((m, i) => {
+        if (m.role === "tool") return { role: "tool", content: m.content, tool_call_id: m.tool_call_id, ...(m.name ? { name: m.name } : {}) };
+        if (m.tool_calls?.length) {
+          return { role: m.role, content: m.content, tool_calls: m.tool_calls.map((c, j) => ({ id: c.id ?? `call_${i}_${j}`, type: "function", function: { name: c.name, arguments: c.arguments } })) };
+        }
+        return { role: m.role, content: m.content };
+      }),
+      temperature: opts.temperature ?? 0,
+      stream: false,
+    };
+    if (opts.tools?.length) {
+      body.tools = opts.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description ?? "", parameters: t.parameters ?? { type: "object", properties: {} } } }));
+    }
     // Hosted reasoning models count thinking against the limit, so give them room.
     const maxTokens = this.t.local ? (opts.maxTokens ?? 512) : Math.max(opts.maxTokens ?? 512, 4096);
     body[this.t.completionTokensParam ? "max_completion_tokens" : "max_tokens"] = maxTokens;
@@ -259,14 +291,16 @@ class OpenAiTransport implements Transport {
     }
     if (!res?.ok) throw new Error("LLM request was rejected after adjusting its parameters");
     const data = (await res.json()) as {
-      choices?: { message?: { content?: string }; logprobs?: { content?: TokenLogprob[] } }[];
+      choices?: { message?: { content?: string; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] }; logprobs?: { content?: TokenLogprob[] } }[];
       usage?: ChatResult["usage"];
       model?: string;
     };
     const choice = data.choices?.[0];
     const text = choice?.message?.content ?? "";
+    const toolCalls = (choice?.message?.tool_calls ?? []).map((c) => ({ id: c.id, name: c.function?.name ?? "tool", arguments: c.function?.arguments?.trim() || "{}" }));
     const result: ChatResult = {
       text,
+      toolCalls: toolCalls.length ? toolCalls : undefined,
       logprobs: choice?.logprobs?.content ?? undefined,
       model: data.model ?? model,
       latencyMs: Date.now() - started,
@@ -345,11 +379,36 @@ class AnthropicTransport implements Transport {
     const client = await this.sdk();
     if (!model || !client) throw new LlmUnavailableError(model ? "no Anthropic API key stored" : "no Claude model set");
     const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
-    const turns: Anthropic.Beta.BetaMessageParam[] = messages
-      .filter((m) => m.role !== "system")
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+    const turns: Anthropic.Beta.BetaMessageParam[] = [];
+    for (const m of messages) {
+      if (m.role === "system") continue;
+      if (m.role === "tool") {
+        // Parallel tool calls: the API wants their results in one user turn, right after the
+        // assistant turn that called them, so consecutive results merge into it.
+        const block: Anthropic.Beta.BetaContentBlockParam = { type: "tool_result", tool_use_id: m.tool_call_id ?? "", content: m.content };
+        const last = turns.at(-1);
+        const lastBlocks = last && last.role === "user" && Array.isArray(last.content) ? last.content : undefined;
+        if (lastBlocks?.length && lastBlocks.every((b) => b.type === "tool_result")) lastBlocks.push(block);
+        else turns.push({ role: "user", content: [block] });
+        continue;
+      }
+      if (m.tool_calls?.length) {
+        const blocks: Anthropic.Beta.BetaContentBlockParam[] = [];
+        if (m.content) blocks.push({ type: "text", text: m.content });
+        for (const c of m.tool_calls) {
+          const parsed = parseJsonLoose(c.arguments);
+          blocks.push({ type: "tool_use", id: c.id ?? "", name: c.name, input: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {} });
+        }
+        turns.push({ role: "assistant", content: blocks });
+        continue;
+      }
+      turns.push({ role: m.role as "user" | "assistant", content: m.content });
+    }
     // Short answers (decisions, notes for a running agent) need little thought; the rest gets the default.
     const effort = (opts.maxTokens ?? 512) <= 64 || opts.priority === "urgent" ? "low" : "medium";
+    const tools = opts.tools?.length
+      ? opts.tools.map((t) => ({ name: t.name, description: t.description ?? "", input_schema: t.parameters ?? { type: "object", properties: {} } }))
+      : undefined;
     const started = Date.now();
     for (let attempt = 0; attempt < 4; attempt++) {
       const outputConfig: Anthropic.Beta.BetaOutputConfig = {};
@@ -362,6 +421,7 @@ class AnthropicTransport implements Transport {
         messages: turns,
         ...(system ? { system } : {}),
         ...(Object.keys(outputConfig).length ? { output_config: outputConfig } : {}),
+        ...(tools ? { tools: tools as unknown as NonNullable<Anthropic.Beta.MessageCreateParamsNonStreaming["tools"]> } : {}),
         ...(useFallbacks ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const } : {}),
       };
       try {
@@ -373,8 +433,10 @@ class AnthropicTransport implements Transport {
           throw new Error(`Claude declined this request${msg.stop_details?.category ? ` (${msg.stop_details.category})` : ""}`);
         }
         const text = msg.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
+        const toolCalls = msg.content.flatMap((b) => (b.type === "tool_use" ? [{ id: b.id, name: b.name, arguments: JSON.stringify(b.input ?? {}) }] : []));
         const result: ChatResult = {
           text,
+          toolCalls: toolCalls.length ? toolCalls : undefined,
           model: msg.model,
           latencyMs: Date.now() - started,
           usage: { prompt_tokens: msg.usage.input_tokens, completion_tokens: msg.usage.output_tokens },
@@ -650,9 +712,22 @@ export class LlmClient {
     for (const t of targets) {
       try {
         const redact = this.redactFor(t);
+        // Tool definitions go off the machine too: redact their descriptions and schemas like the
+        // messages. The local LLM gets them as recorded, since nothing leaves this machine.
+        const tools = t === this.local || !opts.tools?.length
+          ? opts.tools
+          : opts.tools.map((d) => ({
+              ...d,
+              ...(d.description !== undefined ? { description: redact(d.description) } : {}),
+              ...(d.parameters !== undefined ? { parameters: redactJsonStrings(d.parameters, redact) as Record<string, unknown> } : {}),
+            }));
         const r = await t.send(
-          messages.map((m) => ({ ...m, content: redact(m.content) })),
-          opts,
+          messages.map((m) => ({
+            ...m,
+            content: redact(m.content),
+            ...(m.tool_calls ? { tool_calls: m.tool_calls.map((c) => ({ ...c, arguments: redact(c.arguments) })) } : {}),
+          })),
+          tools === opts.tools ? opts : { ...opts, tools },
         );
         log.debug(`llm ${r.where} ${r.model} ${r.latencyMs}ms ${r.text.slice(0, 80).replace(/\n/g, " ")}`);
         return r;
