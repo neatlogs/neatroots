@@ -262,7 +262,14 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       if (!guarded.length) return null;
       // Instrumented spans that succeed usually report status unset, so only errors are ruled out.
       const needed = selectSpans(t.spans, { ...r.requires, status: "any" }).filter((s) => s.status !== "error");
-      const missed = guarded.filter((g) => !needed.some((n) => n.id !== g.id && n.startMs <= g.startMs));
+      // Raw timestamps keep sub-microsecond overlaps from comparing equal. Checking both bounds
+      // preserves the store's zero-duration handling of an end time before the start.
+      const missed = guarded.filter((g) => {
+        const startNs = BigInt(g.startNs);
+        return !needed.some(
+          (n) => n.id !== g.id && n.ended && BigInt(n.startNs) <= startNs && BigInt(n.endNs) <= startNs,
+        );
+      });
       // Spans can arrive out of order: once a late prerequisite covers every call, say so,
       // so a finding raised before it arrived resolves.
       if (!missed.length) return { firing: false, satisfied: true, evidenceSpanIds: guarded.map((s) => s.id), params: {} };
