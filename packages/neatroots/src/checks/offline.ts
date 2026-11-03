@@ -7,6 +7,7 @@ import { parseTraceFile } from "../ingest/importers/file.js";
 import { Store } from "../store/db.js";
 import { CheckRegistry } from "./registry.js";
 import { evaluateRule } from "./rules.js";
+import { checkAppliesTo } from "./scope.js";
 import { isRule, type RuleCheck } from "./types.js";
 
 export interface OfflineFinding {
@@ -51,9 +52,9 @@ export function checkFiles(files: string[], opts: OfflineOptions = {}): { runs: 
         const snap = loadTrace(store, traceId);
         const findings: OfflineFinding[] = [];
         for (const rule of rules) {
-          const a = rule.applies_to;
-          const list = (v: string | string[] | undefined) => (v === undefined ? undefined : Array.isArray(v) ? v : [v]);
-          if (run && ((list(a?.project) && !list(a?.project)!.includes(run.project ?? "")) || (list(a?.workflow) && !list(a?.workflow)!.includes(run.workflow ?? "")))) continue;
+          // The same matcher the engine and insights use, so `neatroots check` cannot drift from
+          // what the run would actually have done. A file with no run row is checked as before.
+          if (run && !checkAppliesTo(rule, { project: run.project ?? "unknown", workflow: run.workflow ?? run.project ?? "unknown" })) continue;
           const hit = evaluateRule(rule, snap, true, undefined, untrusted.has(rule.id));
           if (hit && !hit.satisfied) findings.push({ check_id: rule.id, title: rule.title ?? rule.id, evidence_span_ids: hit.evidenceSpanIds, params: hit.params });
         }

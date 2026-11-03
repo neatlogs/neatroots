@@ -34,6 +34,7 @@ const AppliesTo = z
     workflow: z.union([z.string(), z.array(z.string())]).optional(),
   })
   .strict();
+export type AppliesTo = z.infer<typeof AppliesTo>;
 
 const Base = {
   id: z.string().regex(/^[a-z0-9][a-z0-9_.-]*$/, "use lowercase letters, digits, dot, dash or underscore"),

@@ -16,6 +16,8 @@ function insights(roots: Roots, key: WindowKey) {
     title: checkTitle(lc.check),
     kind: lc.check.kind,
     enabled: lc.check.enabled !== false && (stats[lc.check.id]?.enabled ?? 1) === 1,
+    // Carried through: without it every enabled rule counted against every run in the window.
+    applies_to: lc.check.applies_to,
   }));
   return computeInsights(roots.store.db, key, checks);
 }
