@@ -11,6 +11,7 @@ import { body, clampInt, err, isTraceIds } from "./util.js";
 import { runSummary } from "./api.js";
 import { bodyLimit } from "hono/body-limit";
 import type { RunFilter } from "../store/db.js";
+import { parseSince, SINCE_FORMS } from "../util/since.js";
 
 // Run views (chat, conversation), search, imports, cloud import, replays and the in-app coding
 // agent. Everything here is local; the cloud and import routes call out only when the user asks.
@@ -41,13 +42,6 @@ export function parseSearch(q: string): { text: string; filters: Record<string, 
 /** The words people type for a run's status, mapped to what runs store. */
 const STATUS: Record<string, string> = { failed: "error", failing: "error", error: "error", errored: "error", ok: "ok", succeeded: "ok", success: "ok", passed: "ok", running: "running", interrupted: "interrupted" };
 
-function sinceMs(v: string | undefined): number | undefined {
-  if (!v) return undefined;
-  const m = /^(\d+)([hdw])$/.exec(v);
-  if (!m) return Date.parse(v) || undefined;
-  return Date.now() - Number(m[1]) * { h: 3_600_000, d: 86_400_000, w: 604_800_000 }[m[2] as "h" | "d" | "w"];
-}
-
 export function mountExploreApi(app: Hono, roots: Roots): void {
   // ---------------------------------------------------------------- views
 
@@ -72,6 +66,9 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
     const limit = clampInt(c.req.query("limit"), 50, 1, 100);
     const offset = clampInt(c.req.query("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const kind = filters.kind?.toUpperCase();
+    // A since: we can't read is refused rather than dropped, which would quietly search every run.
+    const since = filters.since !== undefined ? parseSince(filters.since) : undefined;
+    if (filters.since !== undefined && since === undefined) return err(c, 400, `since: takes ${SINCE_FORMS}, not "${filters.since}"`);
     // The store matches every filter and the text in SQL, so the total and the page cover all runs.
     const filter: RunFilter = {
       text: text || undefined,
@@ -80,7 +77,7 @@ export function mountExploreApi(app: Hono, roots: Roots): void {
       sessionId: filters.session,
       checkId: filters.check,
       hasOpenFinding: filters.has === "problems",
-      sinceMs: sinceMs(filters.since),
+      sinceMs: since,
       spanKind: kind,
       tool: filters.tool,
       model: filters.model,
