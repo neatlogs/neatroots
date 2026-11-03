@@ -105,7 +105,8 @@ describe("checkFiles", () => {
       else tn++;
     });
     expect({ tp, fn, fp, tn }).toEqual({ tp: 60, fn: 0, fp: 0, tn: 60 });
-  });
+    // 120 runs take about 15 s on their own, so the default 20 s leaves no room for a busy machine.
+  }, 60_000);
 
   it("gives each file its own verdict when two files share a trace id, in either order", () => {
     const checks = path.join(dir, "same-trace-checks");

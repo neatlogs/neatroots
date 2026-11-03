@@ -6,7 +6,23 @@ import { testWithin } from "../util/regex.js";
 
 /** How long one check's pattern may run on one span before it is treated as too slow. */
 const MATCH_MS = 50;
-/** Patterns that ran out of time; skipped from then on, so a bad check costs one short stall. */
+/**
+ * The budget for a second attempt, for the whole scan rather than for each span in it. The time
+ * limit is wall clock: the watchdog interrupts the script once that much real time has passed, so
+ * on a loaded machine a pattern that normally takes a fraction of a millisecond can be descheduled
+ * past the first budget. A pattern that cannot finish even this much slower attempt is the
+ * catastrophic one the limit is for.
+ *
+ * It is a budget for the scan so that a pattern which is merely slow, rather than catastrophic,
+ * cannot spend a retry on every span of a trace. That pattern keeps working, and the price is
+ * bounded by this one number per evaluation instead of by the span count.
+ */
+const MATCH_RETRY_MS = 250;
+/**
+ * Patterns that ran out of time twice in a row, by check: skipped from then on, so a bad check costs
+ * one short stall. Keyed by check as well as pattern, because one check's slow pattern must not
+ * quietly switch off another check that happens to use the same pattern text.
+ */
 const tooSlow = new Set<string>();
 /** Results for patterns run under the time limit, per span, so a span is tested once per pattern. */
 const matchMemo = new Map<string, boolean>();
@@ -208,7 +224,8 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
     }
     case "match": {
       const key = `${r.flags ?? "i"}/${r.pattern}`;
-      if (untrusted && tooSlow.has(key)) return null;
+      const slowKey = `${check.id}\u0000${key}`;
+      if (untrusted && tooSlow.has(slowKey)) return null;
       let re: RegExp;
       try {
         re = new RegExp(r.pattern, r.flags ?? "i");
@@ -217,16 +234,15 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       }
       // Library patterns are known to be fast. Patterns from checks people (or coding agents) write
       // run under a time limit, since a regex can backtrack for minutes and stall the server.
-      const test = (text: string): boolean => {
+      const test = (text: string, ms: number): boolean => {
         re.lastIndex = 0;
         if (!untrusted) return re.test(text);
-        const ok = testWithin(re, text, MATCH_MS);
+        const ok = testWithin(re, text, ms);
         if (ok === undefined) throw TIMED_OUT;
         return ok;
       };
-      let hits: SpanInfo[];
-      try {
-        hits = selectSpans(t.spans, r.span).filter((s) => {
+      const scan = (ms: number, deadline = Number.POSITIVE_INFINITY): SpanInfo[] =>
+        selectSpans(t.spans, r.span).filter((s) => {
           const v =
             r.field === "input"
               ? s.input
@@ -239,19 +255,41 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
                     : s.name;
           if (v === undefined || v === null) return false;
           const texts = matchTexts(v);
-          if (!untrusted) return texts.some(test);
+          if (!untrusted) return texts.some((x) => test(x, ms));
           const memo = `${key}\u0000${t.run?.trace_id ?? ""}\u0000${s.id}\u0000${r.field}\u0000${texts.reduce((n, x) => n + x.length, 0)}\u0000${r.field === "finish_reason" ? jsonKey(v) : ""}`;
           const known = matchMemo.get(memo);
           if (known !== undefined) return known;
-          const found = texts.some(test);
+          // What is left of the attempt, worked out per text value rather than once per span: a
+          // span can carry several (an MCP result's content[].text items, then the whole value),
+          // and each one must not be handed the full budget again. Only the retry has a deadline;
+          // the first attempt gives each value its own `ms`.
+          const left = (): number => {
+            const t = Math.min(ms, deadline - Date.now());
+            if (t <= 0) throw TIMED_OUT;
+            return t;
+          };
+          const found = texts.some((x) => test(x, left()));
           if (matchMemo.size >= 50_000) matchMemo.clear();
           matchMemo.set(memo, found);
           return found;
         });
+      // One timeout is a suspicion, not a verdict: it can be the machine, not the pattern. Only a
+      // pattern that also misses the slower second attempt is the one this limit exists for, and
+      // that attempt gets `MATCH_RETRY_MS` for the whole scan, not for each span in it.
+      let hits: SpanInfo[] | undefined;
+      try {
+        hits = scan(MATCH_MS);
       } catch (e) {
         if (e !== TIMED_OUT) throw e;
-        tooSlow.add(key);
-        log.warn(`check ${check.id}: its pattern took over ${MATCH_MS} ms on one span, so it is skipped until neatroots restarts. Simplify the regex (overlapping alternatives in a repeat, like (a|aa)+, are slow).`);
+        try {
+          hits = scan(MATCH_RETRY_MS, Date.now() + MATCH_RETRY_MS);
+        } catch (retry) {
+          if (retry !== TIMED_OUT) throw retry;
+        }
+      }
+      if (!hits) {
+        tooSlow.add(slowKey);
+        log.warn(`check ${check.id}: its pattern ran out of time twice on one span (${MATCH_MS} ms, then ${MATCH_RETRY_MS} ms for the whole scan), so this check is skipped until neatroots restarts. Simplify the regex (overlapping alternatives in a repeat, like (a|aa)+, are slow).`);
         return null;
       }
       if (!hits.length) return null;
