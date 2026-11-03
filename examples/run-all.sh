@@ -28,9 +28,10 @@ fi
 # example → project it reports as
 PAIRS="python-openai:example-openai-support python-anthropic:example-anthropic-assistant python-langgraph:example-langgraph-orders
 python-openai-agents:example-openai-agents python-sessions:example-chat-session python-sub-agents:example-sub-agents
-python-replay:example-replay python-opentelemetry:example-opentelemetry typescript-openai:example-typescript-openai
+python-replay:example-replay python-opentelemetry:example-opentelemetry python-pydanticai:example-pydanticai typescript-openai:example-typescript-openai
 typescript-vercel-ai:example-vercel-ai http-api:example-http-api"
 
+# how many runs a project has, for the before/after comparison; 0 when the server cannot be reached
 count() { curl -sf "$URL/api/runs?project=$1&limit=500" | python3 -c "import sys,json; print(len(json.load(sys.stdin)['runs']))" 2>/dev/null || echo 0; }
 
 pass=0; fail=0
