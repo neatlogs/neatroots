@@ -98,6 +98,15 @@ describe("insights", () => {
     expect(q.problems).toHaveLength(0);
     expect(q.totals.with_problems).toBe(0);
     expect(q.passing.map((p) => p.check_id)).not.toContain("ignored-tool-error");
+
+    // Resolved findings do not count as open problems in totals, buckets, or project health.
+    const resolvedOnly = store();
+    const rTrace = run(resolvedOnly, "search-agent", true);
+    resolvedOnly.insertFinding({ ...base, trace_id: rTrace, check_id: "ignored-tool-error", title, status: "resolved" });
+    const resInsights = computeInsights(resolvedOnly.db, "7d", CHECKS);
+    expect(resInsights.totals.with_problems).toBe(0);
+    expect(resInsights.problems).toHaveLength(0);
+    expect(resInsights.projects.find((p) => p.name === "search-agent")).toMatchObject({ runs: 1, with_problems: 0, top_problem: null });
   });
 
   it("lets the digest quote only numbers that are in the data", () => {
