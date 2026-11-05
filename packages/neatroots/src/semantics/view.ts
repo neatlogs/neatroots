@@ -214,6 +214,33 @@ function llmMessages(attrs: Attrs, dir: "input" | "output"): Plain | undefined {
 }
 
 /**
+ * The system prompt an OpenTelemetry GenAI span records apart from its messages, in
+ * `gen_ai.system_instructions`: a list of parts, as a JSON string or a structured value. Only text
+ * parts are instructions; images and other parts are left out.
+ */
+function systemInstructions(attrs: Attrs): string | undefined {
+  const v = maybeJson(first(attrs, ["gen_ai.system_instructions"]));
+  if (typeof v === "string") return v.trim() ? v : undefined;
+  if (!Array.isArray(v)) return undefined;
+  const texts = v.map((p) => {
+    if (typeof p === "string") return p;
+    const part = p && typeof p === "object" && !Array.isArray(p) ? (p as Record<string, Plain>) : undefined;
+    return part?.type === "text" ? str(part.content) : undefined;
+  });
+  return texts.filter((t): t is string => !!t?.trim()).join("\n") || undefined;
+}
+
+/** An LLM span's input with its separately recorded system prompt first, unless it already has one. */
+function withSystemInstructions(attrs: Attrs, input: Plain | undefined): Plain | undefined {
+  const system = systemInstructions(attrs);
+  if (!system) return input;
+  const isMessage = (m: Plain) => !!m && typeof m === "object" && !Array.isArray(m) && "role" in m;
+  const messages = Array.isArray(input) && input.every(isMessage) ? (input as Record<string, Plain>[]) : input === undefined || input === null || input === "" ? [] : [{ role: "user", content: input }];
+  if (messages.some((m) => isSystemRole(m.role))) return input;
+  return [{ role: "system", content: system }, ...messages];
+}
+
+/**
  * OpenTelemetry GenAI messages ({role, parts: [{type: "text", content}]}) and AI SDK
  * content arrays ({type: "text", text}) flattened to {role, content} so they read like chat.
  */
@@ -316,7 +343,7 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
   switch (kind) {
     case "LLM": {
       const msgs = llmMessages(attrs, "input");
-      view.input = msgs ?? maybeJson(first(attrs, ["neatlogs.llm.input", ...genericIn]));
+      view.input = withSystemInstructions(attrs, msgs ?? maybeJson(first(attrs, ["neatlogs.llm.input", ...genericIn])));
       const out = llmMessages(attrs, "output");
       view.toolCalls = llmToolCalls(attrs);
       view.output = out ?? maybeJson(first(attrs, ["neatlogs.llm.output", ...genericOut]));
