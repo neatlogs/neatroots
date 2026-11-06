@@ -99,7 +99,10 @@ is the expected level, not necessarily a whole number.
 A finding is raised when a rule fires or a probability crosses the line. It becomes **active** when a
 note reaches the agent, **resolved** when a later check of the same question falls below the line, and
 **dismissed** when you disagree. A model error or timeout records the check as **not checked**; it never
-counts as a pass. Dismissals feed each check's precision; noisy checks are flagged for retirement.
+counts as a pass. Dismissals feed each check's precision; noisy checks are flagged for retirement. You
+can also **confirm** a finding that is a real problem: confirmations and dismissals together give the
+check's accuracy over the findings you reviewed, shown on the Checks page. Dismissing a confirmed
+finding takes the confirmation back.
 
 Before a question raises a finding, the LLM takes a second look: it must quote the words in the run
 that show the problem, the quote must really be there, and it must still hold given what the run did

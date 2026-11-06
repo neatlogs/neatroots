@@ -61,6 +61,7 @@ export function ProblemsPanel({
   names,
   onPick,
   onSetStatus,
+  onConfirm,
   onInvestigate,
   onRecheck,
   investigating,
@@ -73,6 +74,7 @@ export function ProblemsPanel({
   names: Map<string, string>;
   onPick: (id: string) => void;
   onSetStatus: (id: string, status: string) => void;
+  onConfirm: (id: string, confirmed: boolean) => void;
   onInvestigate: (id: string) => void;
   onRecheck?: () => void;
   investigating?: string;
@@ -112,6 +114,7 @@ export function ProblemsPanel({
                 onToggle={() => setExpanded(expanded === f.id ? undefined : f.id)}
                 onPick={onPick}
                 onSetStatus={onSetStatus}
+                onConfirm={onConfirm}
                 onInvestigate={onInvestigate}
                 investigating={investigating === f.id}
               />
@@ -145,6 +148,7 @@ function ProblemRow({
   onToggle,
   onPick,
   onSetStatus,
+  onConfirm,
   onInvestigate,
   investigating,
 }: {
@@ -155,6 +159,7 @@ function ProblemRow({
   onToggle: () => void;
   onPick: (id: string) => void;
   onSetStatus: (id: string, status: string) => void;
+  onConfirm: (id: string, confirmed: boolean) => void;
   onInvestigate: (id: string) => void;
   investigating: boolean;
 }) {
@@ -165,11 +170,17 @@ function ProblemRow({
     f.explanation?.cause ?? (related.length ? `Also: ${related.map((r) => r.title).join(" · ")}` : where.length ? `Seen in ${where.slice(0, 3).join(", ")}` : "");
   const calls = Array.isArray(f.detail.occurrences) ? f.detail.occurrences.length + 1 : 0;
   const quote = typeof f.detail.quote === "string" ? f.detail.quote : null;
+  const reviewed = f.precision.confirmed + f.precision.dismissed;
   const facts = [
     f.check_kind === "rule" ? "Rule" : "Question",
     likelihood(f),
     calls > 1 ? `in ${calls} calls` : null,
-    f.precision.precision !== null && f.precision.hits >= 3 ? `${pct(f.precision.precision)} of past findings kept` : null,
+    f.confirmed_ms ? "Confirmed by you" : null,
+    f.precision.accuracy !== null && reviewed >= 3
+      ? `${pct(f.precision.accuracy)} of reviewed findings confirmed`
+      : f.precision.precision !== null && f.precision.hits >= 3
+        ? `${pct(f.precision.precision)} of past findings kept`
+        : null,
   ].filter(Boolean);
   const group = [f, ...related];
   const params = Object.entries((f.detail.params ?? {}) as Record<string, string>).filter(([, v]) => v).slice(0, 2);
@@ -213,13 +224,23 @@ function ProblemRow({
             <span className="text-xs text-muted-foreground">
               {facts.join(" · ")} · <span className="font-mono">{f.check_id}</span>
             </span>
-            <span className="flex items-center gap-1">
+            <span className="flex flex-wrap items-center justify-end gap-1">
               {!f.explanation && open && (
                 <Button size="sm" variant="ghost" disabled={investigating} onClick={() => onInvestigate(f.id)}>
                   {investigating && <Spinner size="xs" />}
                   {investigating ? "Explaining…" : "Explain finding"}
                 </Button>
               )}
+              {(open || f.status === "resolved") &&
+                (f.confirmed_ms ? (
+                  <Button size="sm" variant="ghost" onClick={() => group.forEach((g) => onConfirm(g.id, false))}>
+                    Remove confirmation
+                  </Button>
+                ) : (
+                  <Button size="sm" variant="muted" title="A real problem. Counts toward this check's accuracy." onClick={() => group.forEach((g) => onConfirm(g.id, true))}>
+                    Confirm finding
+                  </Button>
+                ))}
               {open ? (
                 <Button size="sm" variant="muted" title="Not a problem. Counts against this check's precision." onClick={() => group.forEach((g) => onSetStatus(g.id, "dismissed"))}>
                   Dismiss finding

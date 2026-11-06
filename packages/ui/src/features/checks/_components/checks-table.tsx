@@ -74,9 +74,13 @@ export function ChecksTable({
                         </StatusPill>
                       )}
                       {c.precision.hits > 0 ? (
-                        <span title={`${c.precision.hits} findings, ${c.precision.dismissed} dismissed`}>
+                        <span title={`${c.precision.hits} findings, ${c.precision.confirmed} confirmed, ${c.precision.dismissed} dismissed`}>
                           {c.precision.hits}
-                          {c.precision.precision !== null ? ` · ${pct(c.precision.precision)} kept` : ""}
+                          {c.precision.accuracy !== null
+                            ? ` · ${pct(c.precision.accuracy)} confirmed`
+                            : c.precision.precision !== null
+                              ? ` · ${pct(c.precision.precision)} kept`
+                              : ""}
                         </span>
                       ) : (
                         <span>none</span>

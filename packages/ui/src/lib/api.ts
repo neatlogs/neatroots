@@ -60,6 +60,16 @@ export interface Explanation {
   created_ms: number;
 }
 
+/** How a check's findings fared: dismissed share (precision) and confirmed share of reviewed ones (accuracy). */
+export interface CheckPrecision {
+  hits: number;
+  dismissed: number;
+  confirmed: number;
+  precision: number | null;
+  accuracy: number | null;
+  noisy: boolean;
+}
+
 export type FindingStatus = "raised" | "active" | "resolved" | "dismissed" | "failed" | "quiet";
 
 export interface Finding {
@@ -75,7 +85,8 @@ export interface Finding {
   model: string | null;
   triage_score: number | null;
   explanation: Explanation | null;
-  precision: { hits: number; dismissed: number; precision: number | null; noisy: boolean };
+  precision: CheckPrecision;
+  confirmed_ms?: number | null;
   created_ms: number;
 }
 
@@ -386,7 +397,7 @@ export interface CheckRow {
   source: string;
   path: string | null;
   enabled: boolean;
-  precision: { hits: number; dismissed: number; precision: number | null; noisy: boolean };
+  precision: CheckPrecision;
   yaml: string;
   check: Record<string, unknown>;
 }
