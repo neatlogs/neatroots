@@ -257,6 +257,9 @@ export function RunDetail({ traceId, query }: { traceId: string; query?: URLSear
           onSetStatus={(id, status) =>
             actions.setFinding.mutate({ id, status }, { onSuccess: () => toast.success(status === "dismissed" ? "Finding dismissed" : "Finding reopened") })
           }
+          onConfirm={(id, confirmed) =>
+            actions.confirmFinding.mutate({ id, confirmed }, { onSuccess: () => toast.success(confirmed ? "Finding confirmed" : "Confirmation removed") })
+          }
           onInvestigate={(id) => {
             setInvestigating(id);
             actions.investigate.mutate(id, {

@@ -445,11 +445,14 @@ export class CheckRegistry {
   }
 
   /** Precision per check from dismissals; noisy checks are suggested for retirement. */
-  precision(id: string): { hits: number; dismissed: number; precision: number | null; noisy: boolean } {
+  precision(id: string): { hits: number; dismissed: number; confirmed: number; precision: number | null; accuracy: number | null; noisy: boolean } {
     const s = this.store.checkStats()[id];
-    if (!s || s.hits === 0) return { hits: s?.hits ?? 0, dismissed: s?.dismissed ?? 0, precision: null, noisy: false };
+    const confirmed = s?.confirmed ?? 0;
+    // Share of the findings the person reviewed that they confirmed; unreviewed ones don't count.
+    const accuracy = s && confirmed + s.dismissed > 0 ? confirmed / (confirmed + s.dismissed) : null;
+    if (!s || s.hits === 0) return { hits: s?.hits ?? 0, dismissed: s?.dismissed ?? 0, confirmed, precision: null, accuracy, noisy: false };
     const precision = 1 - s.dismissed / s.hits;
-    return { hits: s.hits, dismissed: s.dismissed, precision, noisy: s.hits >= 5 && precision < 0.4 };
+    return { hits: s.hits, dismissed: s.dismissed, confirmed, precision, accuracy, noisy: s.hits >= 5 && precision < 0.4 };
   }
 }
 

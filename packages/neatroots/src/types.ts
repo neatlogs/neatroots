@@ -82,6 +82,8 @@ export interface Finding {
   model: string | null;
   triage_score: number | null;
   explanation_id: string | null;
+  /** When the person confirmed it is a real problem; null if not confirmed. */
+  confirmed_ms?: number | null;
   created_ms: number;
   updated_ms: number;
 }

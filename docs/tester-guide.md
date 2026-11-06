@@ -150,7 +150,7 @@ Run it several times, including at least once where you expect it to go wrong.
 
 - [ ] Its runs appear while they run (set `flush_interval=0.5` if they only appear at the end).
 - [ ] The Overview shows its messages and tool calls correctly. Note anything missing or wrong.
-- [ ] What neatroots flagged was real. **Dismiss** anything that wasn't, and note it.
+- [ ] What neatroots flagged was real. **Confirm** what was, **Dismiss** anything that wasn't, and note it.
 - [ ] Note anything it missed that you would have wanted flagged.
 - [ ] **New check** on the Checks page turned a one-sentence concern into a check that previewed
       sensibly.

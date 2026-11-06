@@ -69,6 +69,7 @@ export function useRunActions(traceId: string) {
       },
     }),
     setFinding: useMutation({ mutationFn: (v: { id: string; status: string }) => post(`/api/findings/${v.id}`, { status: v.status }), onSettled: refresh }),
+    confirmFinding: useMutation({ mutationFn: (v: { id: string; confirmed: boolean }) => post(`/api/findings/${v.id}`, { confirmed: v.confirmed }), onSettled: refresh }),
     investigate: useMutation({ mutationFn: (id: string) => post(`/api/findings/${id}/investigate`), onSettled: refresh }),
     annotate: useMutation({
       mutationFn: (v: { span_id: string | null; label: string; text?: string | null }) => post("/api/annotations", { trace_id: traceId, ...v }),

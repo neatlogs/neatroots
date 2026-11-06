@@ -26,8 +26,12 @@ export function CheckSheet({ check, onClose, onEdit, onDelete }: { check: CheckR
                   <span className="font-mono">{check.id}</span>
                   {check.precision.hits > 0 && (
                     <span className="tabular-nums">
-                      · {check.precision.hits} findings, {check.precision.dismissed} dismissed
-                      {check.precision.precision !== null ? ` (${pct(check.precision.precision)} kept)` : ""}
+                      · {check.precision.hits} findings, {check.precision.confirmed} confirmed, {check.precision.dismissed} dismissed
+                      {check.precision.accuracy !== null
+                        ? ` (${pct(check.precision.accuracy)} of reviewed confirmed)`
+                        : check.precision.precision !== null
+                          ? ` (${pct(check.precision.precision)} kept)`
+                          : ""}
                     </span>
                   )}
                 </SheetDescription>

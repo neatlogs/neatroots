@@ -214,6 +214,7 @@ The **Runs** page lists each run with what it was asked to do and its most impor
 | **Conversation** | Every turn of the session this run belongs to, oldest first, with each turn's problems |
 
 - **Dismiss finding:** use it when a finding is wrong. neatroots counts dismissals per check, so you can see which checks are noisy.
+- **Confirm finding:** use it when a finding is a real problem. With dismissals, it gives each check's accuracy on the Checks page.
 - **Mark as issue / good** on a span records your judgment. neatroots uses it when measuring its checks.
 
 **Search** (⌘K or Ctrl+K from anywhere) looks through every span's name, input, output and error, and highlights the hits. Add filters to narrow it down, or use the chips under the box:

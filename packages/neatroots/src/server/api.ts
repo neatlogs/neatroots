@@ -219,7 +219,17 @@ export function mountApi(app: Hono, roots: Roots): void {
   });
 
   app.post("/api/findings/:id", async (c) => {
-    const b = await body<{ status?: string }>(c);
+    const b = await body<{ status?: string; confirmed?: unknown }>(c);
+    if (b.confirmed !== undefined) {
+      if (typeof b.confirmed !== "boolean") return err(c, 400, "confirmed must be true or false");
+      if (b.status !== undefined) return err(c, 400, "send status or confirmed, not both");
+      const cur = roots.store.getFinding(c.req.param("id"));
+      if (!cur) return err(c, 404, "finding not found");
+      if (b.confirmed && (cur.status === "dismissed" || cur.status === "failed")) return err(c, 409, "reopen the finding before confirming it");
+      const f = roots.store.confirmFinding(cur.id, b.confirmed)!;
+      roots.bus.emit("finding", f);
+      return c.json(f);
+    }
     if (!b.status || !["dismissed", "active", "resolved", "raised"].includes(b.status)) return err(c, 400, "status must be dismissed, active, resolved or raised");
     const f = roots.store.updateFinding(c.req.param("id"), { status: b.status as "dismissed" });
     if (!f) return err(c, 404, "finding not found");

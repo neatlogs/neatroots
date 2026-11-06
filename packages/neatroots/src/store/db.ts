@@ -460,6 +460,7 @@ export class Store {
     };
     ensure("plans", "body", "TEXT");
     ensure("runs", "quiet_sweep_done", "INTEGER NOT NULL DEFAULT 0");
+    ensure("findings", "confirmed_ms", "INTEGER");
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
     this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
@@ -1094,9 +1095,25 @@ export class Store {
     if (patch.status && patch.status !== cur.status) {
       if (patch.status === "dismissed") this.db.prepare("UPDATE checks SET dismissed = dismissed + 1 WHERE id = ?").run(cur.check_id);
       if (cur.status === "dismissed") this.db.prepare("UPDATE checks SET dismissed = MAX(0, dismissed - 1) WHERE id = ?").run(cur.check_id);
+      // Dismissed and confirmed are opposite verdicts, so a dismissal takes back a confirmation.
+      if (patch.status === "dismissed" && cur.confirmed_ms) {
+        this.confirmFinding(id, false);
+        next.confirmed_ms = null;
+      }
     }
     this.refreshFindingCounts(cur.trace_id);
     return next;
+  }
+
+  /** Records (or takes back) the person's word that a finding is a real problem. */
+  confirmFinding(id: string, confirmed: boolean): Finding | undefined {
+    const cur = this.getFinding(id);
+    if (!cur) return undefined;
+    if (Boolean(cur.confirmed_ms) === confirmed) return cur;
+    const now = Date.now();
+    this.db.prepare("UPDATE findings SET confirmed_ms = ?, updated_ms = ? WHERE id = ?").run(confirmed ? now : null, now, id);
+    this.db.prepare(`UPDATE checks SET confirmed = ${confirmed ? "confirmed + 1" : "MAX(0, confirmed - 1)"} WHERE id = ?`).run(cur.check_id);
+    return this.getFinding(id);
   }
 
   getFinding(id: string): Finding | undefined {
