@@ -7,6 +7,9 @@ interface CheckList {
 
 test("confirming a finding counts toward its check and can be taken back", async ({ page }) => {
   const errors = watchErrors(page);
+  // Start unconfirmed even if an earlier attempt stopped halfway.
+  const { findings } = await api<{ findings: { id: string }[] }>(`/api/findings?trace_id=${state().supportRun}`);
+  for (const f of findings) await api(`/api/findings/${f.id}`, { method: "POST", body: JSON.stringify({ confirmed: false }) });
   await open(page, `runs/${state().supportRun}`);
   const problems = page.getByTestId("problems");
   await expect(problems.getByText(/secret key/i).first()).toBeVisible();

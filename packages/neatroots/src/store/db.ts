@@ -1107,13 +1107,15 @@ export class Store {
 
   /** Records (or takes back) the person's word that a finding is a real problem. */
   confirmFinding(id: string, confirmed: boolean): Finding | undefined {
-    const cur = this.getFinding(id);
-    if (!cur) return undefined;
-    if (Boolean(cur.confirmed_ms) === confirmed) return cur;
-    const now = Date.now();
-    this.db.prepare("UPDATE findings SET confirmed_ms = ?, updated_ms = ? WHERE id = ?").run(confirmed ? now : null, now, id);
-    this.db.prepare(`UPDATE checks SET confirmed = ${confirmed ? "confirmed + 1" : "MAX(0, confirmed - 1)"} WHERE id = ?`).run(cur.check_id);
-    return this.getFinding(id);
+    return this.db.transaction(() => {
+      const cur = this.getFinding(id);
+      if (!cur) return undefined;
+      if (Boolean(cur.confirmed_ms) === confirmed) return cur;
+      const now = Date.now();
+      this.db.prepare("UPDATE findings SET confirmed_ms = ?, updated_ms = ? WHERE id = ?").run(confirmed ? now : null, now, id);
+      this.db.prepare(`UPDATE checks SET confirmed = ${confirmed ? "confirmed + 1" : "MAX(0, confirmed - 1)"} WHERE id = ?`).run(cur.check_id);
+      return this.getFinding(id);
+    })();
   }
 
   getFinding(id: string): Finding | undefined {
