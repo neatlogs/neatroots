@@ -145,9 +145,7 @@ export async function fetchCloudTrace(base: string, auth: CloudAuth, traceId: st
     cloudJson<{ data: { fields: { input?: Field; output?: Field; error?: Field } } }>(`${base}/traces/${id}/spans/${encodeURIComponent(s.spanId)}/payload?fields=input,output,error`, {
       headers: headers(auth),
       signal,
-    })
-      .then((r) => r.data.fields)
-      .catch(() => ({}) as { input?: Field; output?: Field; error?: Field }),
+    }).then((r) => r.data.fields),
   );
   const ids = new Set(spans.map((s) => s.spanId));
   const nodes = spans.map<SpanNode>((s, i) => {

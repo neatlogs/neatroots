@@ -314,6 +314,7 @@ describe("imports", () => {
     const tid = hex(16);
     const sid = hex(8);
     const seen: string[] = [];
+    let payloadStatus = 200;
     const cloud = http.createServer((req, res) => {
       res.setHeader("content-type", "application/json");
       // As the public API's OpenAPI spec says: Authorization: Bearer nlsa_…, x-project-id for the project.
@@ -328,7 +329,12 @@ describe("imports", () => {
       } else if (req.url?.startsWith(`/api/v1/public/traces/${tid}/export`)) {
         res.end(JSON.stringify({ success: true, requestId: "req_x", data: { schemaVersion: 1, trace: { traceId: tid, workflowName: "prod-agent", sessionId: "sess", startedAt: "2026-10-09T10:00:00Z" }, spans: [{ traceId: tid, spanId: sid, parentSpanId: null, spanName: "openai.chat", spanType: "llm", startedAt: "2026-10-09T10:00:00Z", endedAt: "2026-10-09T10:00:01Z", durationMs: 1000, status: "OK", model: "gpt-4o", provider: "openai", promptTokens: 4, completionTokens: 2, totalTokens: 6 }] } }));
       } else if (req.url?.includes(`/spans/${sid}/payload`)) {
-        res.end(JSON.stringify({ success: true, requestId: "req_y", data: { traceId: tid, spanId: sid, fields: { input: { available: true, value: '[{"role":"user","content":"hi"}]', mimeType: "application/json", truncated: false }, output: { available: true, value: "hello", mimeType: null, truncated: false }, error: { available: false, value: null, mimeType: null, truncated: false } } } }));
+        res.statusCode = payloadStatus;
+        res.end(
+          payloadStatus === 200
+            ? JSON.stringify({ success: true, requestId: "req_y", data: { traceId: tid, spanId: sid, fields: { input: { available: true, value: '[{"role":"user","content":"hi"}]', mimeType: "application/json", truncated: false }, output: { available: true, value: "hello", mimeType: null, truncated: false }, error: { available: false, value: null, mimeType: null, truncated: false } } } })
+            : JSON.stringify({ error: "payload unavailable" }),
+        );
       } else {
         res.statusCode = 404;
         res.end("{}");
@@ -363,6 +369,15 @@ describe("imports", () => {
       const s1 = t.roots.store.getOtlpSpan(tid, sid)!;
       expect(buildView(s1.span, s1.resource.attributes)).toMatchObject({ model: "gpt-4o", input: [{ role: "user", content: "hi" }], output: "hello" });
 
+      // A failed payload read must not turn into a successful trace with empty input/output.
+      t.roots.store.deleteRun(tid);
+      payloadStatus = 500;
+      const missingPayload = await t.roots.imports.start("neatlogs-cloud", { traceIds: tid }, { limit: 1 }).done;
+      expect(missingPayload).toMatchObject({ state: "succeeded", traces: 0, failed: 1 });
+      expect(missingPayload.last_error).toMatch(/answered 500.*payload unavailable/);
+      expect(t.roots.store.getRun(tid)).toBeUndefined();
+      payloadStatus = 200;
+
       process.env.NEATLOGS_SERVICE_TOKEN = "nlsa_wrong";
       const refused = await t.roots.imports.start("neatlogs-cloud", { traceIds: hex(16) }, { limit: 1 }).done;
       expect(refused.last_error).toMatch(/didn't accept the service-account token \(401\)/);
@@ -375,6 +390,7 @@ describe("imports", () => {
 
   it("keeps importing the other Neatlogs Cloud traces when one of them fails", async () => {
     const ids = [hex(16), hex(16), hex(16)];
+    const spanIds = ids.map(() => hex(8));
     let exportCalls = 0;
     const cloud = http.createServer((req, res) => {
       res.setHeader("content-type", "application/json");
@@ -390,7 +406,9 @@ describe("imports", () => {
         res.end('{"error":"boom"}');
       } else if (i >= 0) {
         const id = ids[i];
-        res.end(JSON.stringify({ success: true, data: { schemaVersion: 1, trace: { traceId: id, workflowName: "prod-agent", startedAt: "2026-10-09T10:00:00Z" }, spans: [{ traceId: id, spanId: hex(8), parentSpanId: null, spanName: "root", spanType: "workflow", startedAt: "2026-10-09T10:00:00Z", endedAt: "2026-10-09T10:00:01Z", durationMs: 1000, status: "OK" }] } }));
+        res.end(JSON.stringify({ success: true, data: { schemaVersion: 1, trace: { traceId: id, workflowName: "prod-agent", startedAt: "2026-10-09T10:00:00Z" }, spans: [{ traceId: id, spanId: spanIds[i], parentSpanId: null, spanName: "root", spanType: "workflow", startedAt: "2026-10-09T10:00:00Z", endedAt: "2026-10-09T10:00:01Z", durationMs: 1000, status: "OK" }] } }));
+      } else if (spanIds.some((spanId) => req.url?.includes(`/spans/${spanId}/payload`))) {
+        res.end(JSON.stringify({ success: true, data: { fields: {} } }));
       } else {
         res.statusCode = 404;
         res.end("{}");
