@@ -51,4 +51,9 @@ describe("query_sql runner", () => {
     const left = await runReadonlySql(file, "SELECT COUNT(*) AS n FROM runs");
     expect(left.rows).toEqual([{ n: 300 }]);
   });
+
+  it("does not expand BLOB cells into JSON byte arrays", async () => {
+    const r = await runReadonlySql(file, "SELECT zeroblob(10000) AS payload");
+    expect(r.rows).toEqual([{ payload: "<BLOB 10000 bytes>" }]);
+  });
 });
