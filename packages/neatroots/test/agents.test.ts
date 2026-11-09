@@ -32,9 +32,9 @@ describe("finding a coding agent's CLI", () => {
   // These discovery fixtures use POSIX executable scripts and shell PATH lookup.
   it.skipIf(process.platform === "win32")("looks past the PATH: an npm install under any nvm Node, or ~/.local/bin", () => {
     const nvm = fakeBin(path.join(home, ".nvm", "versions", "node", "v24.14.1", "bin"), "codex");
-    expect(agentBin("codex")).toBe(nvm);
+    expect(agentBin("codex", [])).toBe(nvm);
     const local = fakeBin(path.join(home, ".local", "bin"), "codex");
-    expect(agentBin("codex")).toBe(local);
+    expect(agentBin("codex", [])).toBe(local);
   });
 
   it("accepts an explicit native executable override without PATH lookup", () => {
@@ -47,7 +47,7 @@ describe("finding a coding agent's CLI", () => {
 
   const chatgpt = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex";
   it.runIf(fs.existsSync(chatgpt))("finds the Codex that ships inside ChatGPT.app", () => {
-    expect(agentBin("codex")).toBe(chatgpt);
+    expect(agentBin("codex", [])).toBe(chatgpt);
   });
 
   it.skipIf(process.platform === "win32")("prefers the PATH, and NEATROOTS_CODEX_BIN over everything", () => {
