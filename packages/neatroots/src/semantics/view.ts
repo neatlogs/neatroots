@@ -72,7 +72,7 @@ function str(v: Plain | undefined): string | undefined {
 function int(v: Plain | undefined): number | undefined {
   if (v === undefined || v === null || v === "") return undefined;
   const n = Number(v);
-  return Number.isFinite(n) ? Math.round(n) : undefined;
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : undefined;
 }
 
 /** Parses a JSON string when it looks like JSON, otherwise returns it as is. */

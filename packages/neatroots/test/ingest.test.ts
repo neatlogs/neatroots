@@ -265,6 +265,12 @@ describe("other conventions", () => {
     expect(buildView({ ...tool, attributes: tool.attributes.filter((a) => a.key !== "neatlogs.span.kind") }, [])).toMatchObject({ kind: "TOOL", toolName: "weather", input: { city: "Paris" }, output: "sunny" });
   });
 
+  it("ignores negative token counts", () => {
+    const tid = hex(16);
+    const llm = span({ traceId: tid, name: "chat", kind: "llm", attrs: [s("neatlogs.llm.token_count.prompt", -4), s("neatlogs.llm.token_count.completion", 2), s("neatlogs.llm.token_count.total", -2)] });
+    expect(buildView(llm, [])).toMatchObject({ promptTokens: undefined, completionTokens: 2, totalTokens: 2 });
+  });
+
   it("reads OpenTelemetry GenAI parts and OpenLLMetry entity input", () => {
     const tid = hex(16);
     const llm = span({ traceId: tid, name: "chat", kind: "", attrs: [s("gen_ai.operation.name", "chat"), s("gen_ai.input.messages", JSON.stringify([{ role: "user", parts: [{ type: "text", content: "Q?" }] }]))] });
