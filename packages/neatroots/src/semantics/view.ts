@@ -185,18 +185,44 @@ function deriveKind(span: OtlpSpan, attrs: Attrs): SpanKind {
   );
 }
 
+function instructionText(value: Plain): string | undefined {
+  if (typeof value === "string") return value || undefined;
+  if (Array.isArray(value)) {
+    const text = value.map(instructionText).filter((part): part is string => !!part).join("\n");
+    return text || undefined;
+  }
+  if (!value || typeof value !== "object") return undefined;
+  const part = value as Record<string, Plain>;
+  if (part.type === "text") return str(part.content ?? part.text);
+  return instructionText(part.parts ?? part.content ?? null);
+}
+
+function withSystemInstructions(attrs: Attrs, messages: Plain | undefined): Plain | undefined {
+  const instructions = maybeJson(first(attrs, ["gen_ai.system_instructions"]));
+  if (instructions === undefined) return messages;
+  if (Array.isArray(messages) && messages.some((message) => message && typeof message === "object" && !Array.isArray(message) && isSystemRole((message as Record<string, Plain>).role))) return messages;
+  const content = instructionText(instructions);
+  if (!content) return messages;
+  const rest = Array.isArray(messages) ? messages : messages === undefined ? [] : [{ role: "user", content: messages }];
+  return [{ role: "system", content }, ...rest];
+}
+
 function llmMessages(attrs: Attrs, dir: "input" | "output"): Plain | undefined {
   const flat = collectIndexed(attrs, `neatlogs.llm.${dir}_messages`);
-  if (flat.length) return flat;
+  if (flat.length) return dir === "input" ? withSystemInstructions(attrs, flat) : flat;
   const oi = collectIndexed(attrs, `llm.${dir}_messages`).map((m) => (m.message as Record<string, Plain>) ?? m);
-  if (oi.length) return oi;
+  if (oi.length) return dir === "input" ? withSystemInstructions(attrs, oi) : oi;
   const genai = dir === "input" ? collectIndexed(attrs, "gen_ai.prompt") : collectIndexed(attrs, "gen_ai.completion");
-  if (genai.length) return genai;
+  if (genai.length) return dir === "input" ? withSystemInstructions(attrs, genai) : genai;
   const json = maybeJson(first(attrs, [`gen_ai.${dir}.messages`]));
-  if (json !== undefined) return normalizeParts(json);
+  if (json !== undefined) {
+    const messages = normalizeParts(json);
+    return dir === "input" ? withSystemInstructions(attrs, messages) : messages;
+  }
   if (dir === "input") {
     const prompt = maybeJson(first(attrs, ["ai.prompt.messages"]));
-    if (prompt !== undefined) return normalizeParts(prompt);
+    if (prompt !== undefined) return withSystemInstructions(attrs, normalizeParts(prompt));
+    return withSystemInstructions(attrs, undefined);
   } else {
     const text = first(attrs, ["ai.response.text"]);
     const calls = maybeJson(first(attrs, ["ai.response.toolCalls"]));
