@@ -1,6 +1,6 @@
 import { decodeTraceJson } from "../../otlp/codec.js";
 import type { ResourceSpansBatch } from "../../otlp/types.js";
-import { toBatches, type SpanNode } from "../build.js";
+import { toBatches, toNs, type SpanNode } from "../build.js";
 import { httpTraceToBatches } from "../http-trace.js";
 import { ImportError } from "./types.js";
 
@@ -20,8 +20,19 @@ function fromDoc(doc: unknown, project: string): ResourceSpansBatch[] {
 }
 
 function fromNeatlogsExport(exp: Record<string, unknown>, project: string): ResourceSpansBatch[] {
-  const trace = exp.trace as { traceId: string; workflowName?: string; traceName?: string; sessionId?: string };
+  const trace = exp.trace as { traceId?: unknown; workflowName?: string; traceName?: string; sessionId?: string };
   const spans = exp.spans as Record<string, unknown>[];
+  if (typeof trace.traceId !== "string" || !trace.traceId) throw new Error("trace.traceId is required");
+  const seen = new Set<string>();
+  for (const [i, span] of spans.entries()) {
+    if (!span || typeof span !== "object" || Array.isArray(span)) throw new Error(`spans[${i}] must be an object`);
+    if (typeof span.spanId !== "string" || !span.spanId) throw new Error(`spans[${i}].spanId is required`);
+    if (seen.has(span.spanId)) throw new Error(`spans[${i}].spanId is duplicated`);
+    seen.add(span.spanId);
+    if ((typeof span.startedAt !== "string" && typeof span.startedAt !== "number") || toNs(span.startedAt) === undefined) {
+      throw new Error(`spans[${i}].startedAt is required and must be a timestamp`);
+    }
+  }
   const ids = new Set(spans.map((s) => s.spanId));
   const nodes = spans.map<SpanNode>((s) => ({
     traceId: String(s.traceId ?? trace.traceId),

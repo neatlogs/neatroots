@@ -305,6 +305,11 @@ describe("imports", () => {
     expect(parseTraceFile(otlp, "trace.json")[0].spans[0].traceId).toBe(tid);
     const exp = JSON.stringify({ data: { schemaVersion: 1, trace: { traceId: tid, workflowName: "wf" }, spans: [{ traceId: tid, spanId: "1234567890abcdef", parentSpanId: null, spanName: "root", spanType: "workflow", startedAt: "2026-10-09T10:00:00Z", endedAt: null, durationMs: 5, status: "OK", model: null, provider: null, promptTokens: 0, completionTokens: 0, totalTokens: 0 }] } });
     expect(parseTraceFile(exp, "export.json")[0].spans[0].traceId).toBe(tid);
+    const malformed = (span: Record<string, unknown>) => JSON.stringify({ data: { trace: { traceId: tid }, spans: [span] } });
+    expect(() => parseTraceFile(malformed({ startedAt: 1 }), "missing-id.json")).toThrow(/spans\[0\]\.spanId is required/);
+    expect(() => parseTraceFile(malformed({ spanId: "s" }), "missing-time.json")).toThrow(/spans\[0\]\.startedAt/);
+    expect(() => parseTraceFile(JSON.stringify({ data: { trace: { traceId: tid }, spans: [null] } }), "null-span.json")).toThrow(/spans\[0\] must be an object/);
+    expect(() => parseTraceFile(JSON.stringify({ data: { trace: { traceId: tid }, spans: [{ spanId: "s", startedAt: 1 }, { spanId: "s", startedAt: 2 }] } }), "duplicate.json")).toThrow(/spanId is duplicated/);
     const lines = `${JSON.stringify({ name: "a" })}\n${JSON.stringify({ name: "b", children: [{ name: "c" }] })}\n`;
     expect(parseTraceFile(lines, "traces.jsonl").map((b) => b.spans.length)).toEqual([1, 2]);
     expect(() => parseTraceFile('{"foo":1}', "x.json")).toThrow(/not OTLP JSON/);
