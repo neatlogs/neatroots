@@ -488,8 +488,9 @@ export class LlmClient {
 
   /** Whether the active target reports token logprobs. */
   get logprobs(): boolean {
-    // Asking for a stated confidence is harmless when a call falls back to the local model.
-    return this.externalEnabled ? !!this.preset?.logprobs && this.preset.api === "openai" : true;
+    // Local OpenAI-compatible servers vary: request logprobs, but also ask for a stated
+    // confidence so a server that omits them does not silently get a made-up probability.
+    return this.externalEnabled ? !!this.preset?.logprobs && this.preset.api === "openai" : false;
   }
 
   async externalKey(): Promise<string | undefined> {
