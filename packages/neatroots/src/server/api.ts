@@ -34,7 +34,7 @@ export function runSummary(roots: Roots, r: RunRow) {
   const summary = roots.store.getSummary(r.trace_id);
   return {
     ...r,
-    duration_ms: r.ended_ms && r.started_ms ? r.ended_ms - r.started_ms : null,
+    duration_ms: r.ended_ms !== null && r.started_ms !== null ? r.ended_ms - r.started_ms : null,
     summary: summary?.text ?? null,
     top_finding: r.open_finding_count > 0 ? roots.store.topOpenFinding(r.trace_id) : null,
     steering: roots.steering.mode(r.project),

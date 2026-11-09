@@ -3,6 +3,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Store } from "../src/store/db.js";
 import { traceReadback } from "../src/server/readback.js";
+import { runSummary } from "../src/server/api.js";
 import { batch, closeTrackedStores, hex, llmSpan, markerSpan, s, span, tmpHome, toolSpan, trackedStore } from "./helpers.js";
 
 const homes: string[] = [];
@@ -17,6 +18,24 @@ afterEach(() => {
 });
 
 describe("store", () => {
+  it("keeps an epoch-zero run start and reports its duration", () => {
+    const st = store();
+    const t = hex(16);
+    const first = span({ traceId: t, name: "first", kind: "tool" });
+    first.startTimeUnixNano = "0";
+    first.endTimeUnixNano = "1000000";
+    const root = span({ traceId: t, name: "root", kind: "workflow" });
+    root.startTimeUnixNano = "2000000";
+    root.endTimeUnixNano = "5000000";
+
+    st.ingest([batch([first])]);
+    st.ingest([batch([root])]);
+
+    const run = st.getRun(t)!;
+    expect(run).toMatchObject({ started_ms: 0, ended_ms: 5 });
+    expect(runSummary({ store: st, steering: { mode: () => "off" } } as never, run).duration_ms).toBe(5);
+  });
+
   it("aggregates a run from child spans, root and completion marker", () => {
     const st = store();
     const t = hex(16);
