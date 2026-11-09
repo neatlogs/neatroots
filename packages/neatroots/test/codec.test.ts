@@ -86,6 +86,7 @@ describe("OTLP codec", () => {
               scope: { name: "x" },
               spans: [
                 { traceId: tid.toString("base64"), spanId: Buffer.from(hex(8), "hex").toString("base64"), name: "ok" },
+                { traceId: Buffer.from([1]).toString("base64"), spanId: Buffer.from([2]).toString("base64"), name: "short" },
                 { traceId: "00000000000000000000000000000000", spanId: "0000000000000000", name: "zero" },
               ],
             },
