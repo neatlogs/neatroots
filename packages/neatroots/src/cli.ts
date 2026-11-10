@@ -40,7 +40,11 @@ program
   .option("--no-laya", "do not install or start Laya (the local decision model)")
   .action(async (opts) => {
     const roots = new Roots({ noEngine: opts.engine === false });
-    if (opts.laya === false) roots.config.classifier.laya.enabled = false;
+    roots.applyStartOverrides({
+      port: opts.port ? Number(opts.port) : undefined,
+      grpcPort: opts.grpcPort !== undefined ? Number(opts.grpcPort) : undefined,
+      disableLaya: opts.laya === false,
+    });
     // Laya is a big download: ask once, when someone is at the terminal, before downloading it.
     if (shouldAskForLaya(roots.config, roots.laya.installed()) && process.stdin.isTTY && process.stdout.isTTY) {
       // No answer (Ctrl-D) leaves the choice open; the app and the next start ask again.
@@ -53,8 +57,6 @@ program
         console.log(`${layaNextSteps(consent)}\n`);
       } else console.log("");
     }
-    if (opts.port) roots.config.port = Number(opts.port);
-    if (opts.grpcPort !== undefined) roots.config.grpcPort = Number(opts.grpcPort);
     const app = createApp(roots);
     try {
       await startServer(roots, app);
