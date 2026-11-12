@@ -14,6 +14,19 @@ export function bundleDir(): string | undefined {
   return fs.existsSync(path.join(dir, ".neatroots-bundle")) && fs.existsSync(path.join(dir, "install.sh")) ? dir : undefined;
 }
 
+/** Release tags distinguish an RC from its final release, even at the same version and commit. */
+export function bundleBuild(dir: string | undefined): string | null {
+  if (!dir) return null;
+  try {
+    const info = JSON.parse(fs.readFileSync(path.join(dir, ".neatroots-bundle"), "utf8"));
+    // Older bundles only recorded the commit.
+    for (const id of [info.tag, info.commit]) if (typeof id === "string" && id.trim() && id !== "unknown") return id;
+  } catch {
+    // Missing or unreadable metadata must not prevent starting or updating neatroots.
+  }
+  return null;
+}
+
 /** The source checkout root: packages/neatroots/dist/cli.js → repo. */
 export function sourceDir(): string | undefined {
   const dir = path.resolve(path.dirname(cliPath()), "..", "..", "..");

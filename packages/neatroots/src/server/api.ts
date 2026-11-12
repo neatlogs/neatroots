@@ -17,7 +17,7 @@ import { mountInsightsApi } from "./api-insights.js";
 import { mountAgentsApi } from "./api-agents.js";
 import { importSource, mountExploreApi } from "./api-explore.js";
 import { checkCoverage } from "./coverage.js";
-import { installInfo } from "../util/install.js";
+import { bundleBuild, bundleDir, installInfo } from "../util/install.js";
 import { err, body, clampInt, isTraceIds } from "./util.js";
 import { checkDirState } from "../checks/registry.js";
 import { askRuns } from "../engine/assist.js";
@@ -111,6 +111,8 @@ function projects(roots: Roots) {
 
 export function mountApi(app: Hono, roots: Roots): void {
   const engine = roots.engine;
+  // Keep the running build's identity even after update replaces the bundle on disk.
+  const build = bundleBuild(bundleDir());
   mountModelsApi(app, roots);
   mountChecksApi(app, roots);
   mountInsightsApi(app, roots);
@@ -123,6 +125,7 @@ export function mountApi(app: Hono, roots: Roots): void {
     return c.json({
       name: "neatroots",
       version: VERSION,
+      build,
       uptime_ms: Date.now() - roots.startedMs,
       port: roots.config.port,
       home: roots.home,
