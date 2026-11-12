@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { loadTrace } from "../src/engine/trace.js";
 import { checkFromInput } from "../src/server/api.js";
 import { batch, hex, llmSpan, makeRoots, markerSpan, mockLlm, s, span, toolSpan, until, type TestRoots } from "./helpers.js";
 
@@ -528,6 +529,124 @@ rule:
     // The real end pass, on the full trace, runs the queued work.
     tb.roots.ingest([batch([caller])]);
     await until(() => investigations.length === 2, 10_000);
+  });
+
+  it("keeps going when one deferred investigation fails: the rest still run, and the run is summarized", async () => {
+    const llm = await mockLlm();
+    // No investigations budget, so both findings queue their investigation for the end pass.
+    const tb = await makeRoots({ llmUrl: llm.url, config: (c) => (c.budgets.investigationsPerRun = 0) });
+    cleanup.push(async () => {
+      await tb.close();
+      await llm.close();
+    });
+    for (const id of ["boom-a", "boom-b"]) {
+      const rule = checkFromInput(`
+id: ${id}
+kind: rule
+title: A problem worth investigating
+rule:
+  type: match
+  field: input
+  pattern: BOOM
+  span:
+    type: workflow
+`).check;
+      if (!rule) throw new Error("rule did not parse");
+      tb.roots.checks.save(rule, "user");
+    }
+    const engine = tb.roots.engine as unknown as { decisions: { decide: (...a: unknown[]) => Promise<unknown> } };
+    const real = engine.decisions.decide.bind(engine.decisions);
+    engine.decisions.decide = async (...args: unknown[]) => {
+      const qs = args[1] as { name?: string }[] | undefined;
+      if (qs?.some((q) => q.name === "triage")) return { answers: { triage: { score: 3 } }, backend: "test", model: "test" };
+      return real(...args);
+    };
+    const client = tb.roots.llm as unknown as { chat: (...a: unknown[]) => Promise<unknown>; isAvailable: () => Promise<boolean> };
+    client.isAvailable = async () => true;
+    const realChat = client.chat.bind(tb.roots.llm);
+    let investigations = 0;
+    client.chat = async (...args: unknown[]) => {
+      if ((args[1] as { schema?: { name?: string } } | undefined)?.schema?.name === "investigation") {
+        investigations++;
+        if (investigations === 1) throw new Error("the model went away");
+      }
+      return realChat(...args);
+    };
+    const t = hex(16);
+    tb.roots.ingest([batch([span({ traceId: t, name: "agent", kind: "workflow", attrs: [s("neatlogs.workflow.input", "BOOM happened")] })])]);
+
+    // The first investigation throws; the others are still attempted and the run still gets its summary.
+    await until(() => investigations >= 2, 10_000);
+    await until(() => tb.roots.store.getSummary(t), 10_000);
+  });
+
+  it("runs an investigation whose triage is still deciding when the end pass reaches its drain", async () => {
+    const llm = await mockLlm();
+    // No investigations budget, so the finding queues its investigation once its triage has decided.
+    const tb = await makeRoots({ llmUrl: llm.url, config: (c) => (c.budgets.investigationsPerRun = 0) });
+    cleanup.push(async () => {
+      await tb.close();
+      await llm.close();
+    });
+    const rule = checkFromInput(`
+id: boom-slow
+kind: rule
+title: A problem worth investigating
+rule:
+  type: match
+  field: input
+  pattern: BOOM
+  span:
+    type: workflow
+`).check;
+    if (!rule) throw new Error("rule did not parse");
+    tb.roots.checks.save(rule, "user");
+    const engine = tb.roots.engine as unknown as { decisions: { decide: (...a: unknown[]) => Promise<unknown> } };
+    const real = engine.decisions.decide.bind(engine.decisions);
+    engine.decisions.decide = async (...args: unknown[]) => {
+      const qs = args[1] as { name?: string }[] | undefined;
+      if (qs?.some((q) => q.name === "triage")) {
+        await new Promise((r) => setTimeout(r, 1500)); // the end pass (debounced 400 ms, then a few model calls) is done well before this
+        return { answers: { triage: { score: 3 } }, backend: "test", model: "test" };
+      }
+      return real(...args);
+    };
+    const client = tb.roots.llm as unknown as { chat: (...a: unknown[]) => Promise<unknown>; isAvailable: () => Promise<boolean> };
+    client.isAvailable = async () => true;
+    const realChat = client.chat.bind(tb.roots.llm);
+    let investigations = 0;
+    client.chat = async (...args: unknown[]) => {
+      if ((args[1] as { schema?: { name?: string } } | undefined)?.schema?.name === "investigation") investigations++;
+      return realChat(...args);
+    };
+    const t = hex(16);
+    tb.roots.ingest([batch([span({ traceId: t, name: "agent", kind: "workflow", attrs: [s("neatlogs.workflow.input", "BOOM happened")] })])]);
+
+    await until(() => investigations >= 1, 10_000);
+    await until(() => tb.roots.store.getSummary(t), 10_000);
+  });
+
+  it("does not let a failing whole-run explanation escape the triage of a failed run", async () => {
+    const llm = await mockLlm();
+    const tb = await makeRoots({ llmUrl: llm.url });
+    cleanup.push(async () => {
+      await tb.close();
+      await llm.close();
+    });
+    const t = hex(16);
+    tb.roots.ingest([batch([span({ traceId: t, name: "agent", kind: "workflow", status: 2, message: "boom", attrs: [s("neatlogs.workflow.input", "refund 4512")] })])]);
+    const engine = tb.roots.engine as unknown as {
+      decisions: { decide: (...a: unknown[]) => Promise<unknown> };
+      triageRun: (run: unknown, snap: unknown) => Promise<void>;
+    };
+    // Worth a closer look, so the run is explained, and the explanation's model call fails.
+    engine.decisions.decide = async () => ({ answers: { triage: { score: 3 } }, backend: "test", model: "test" });
+    const client = tb.roots.llm as unknown as { chat: (...a: unknown[]) => Promise<unknown>; isAvailable: () => Promise<boolean> };
+    client.isAvailable = async () => true;
+    client.chat = async () => {
+      throw new Error("the model went away");
+    };
+    await expect(engine.triageRun({ traceId: t, used: { investigations: 0 } }, loadTrace(tb.roots.store, t))).resolves.toBeUndefined();
   });
 });
 
