@@ -52,4 +52,22 @@ describe("RefreshQueue", () => {
     q.flush();
     expect(done).toEqual(["1", "2"]);
   });
+
+  it("tells only about spans whose refresh changed something", () => {
+    const told: string[][] = [];
+    const q = new RefreshQueue((s) => s.spanId !== "2", (work) => work(), 10, (spans) => told.push(spans.map((s) => s.spanId)));
+    q.queue([1, 2, 3].map(span));
+    q.queue([span(2)]);
+    expect(told).toEqual([["1", "3"]]);
+  });
+
+  it("keeps the earliest bound for a span queued again while it waits, and no bound beats any", () => {
+    const seen: (number | undefined)[] = [];
+    const q = new RefreshQueue((s) => void seen.push(s.since), (work) => work(), 1);
+    q.queue([span(0), { ...span(1), since: 9 }, { ...span(2), since: 5 }]);
+    q.queue([{ ...span(1), since: 4 }, span(2)]);
+    q.stop();
+    q.flush();
+    expect(seen).toEqual([undefined, 4, undefined]);
+  });
 });

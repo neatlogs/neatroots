@@ -294,6 +294,11 @@ function genAiEvents(span: OtlpSpan, logEvents: GenAiEvent[]): GenAiEvent[] {
   return all.map((e, i) => ({ e, t: times[i] as bigint })).sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0)).map((x) => x.e);
 }
 
+/**
+ * Everything neatroots derives from one span: its kind, input and output, model, tokens and so on. `logEvents` are
+ * GenAI message events logged against the span (a list, or a function read only when attributes and the span's own
+ * events left the input, output or finish reason empty); attributes always win over events.
+ */
 export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[], logEvents: GenAiEvent[] | (() => GenAiEvent[]) = []): SpanView {
   const attrs = kvToPlain(span.attributes);
   const res = kvToPlain(resourceAttrs);

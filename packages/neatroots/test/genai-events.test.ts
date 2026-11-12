@@ -97,8 +97,23 @@ describe("GenAI message events", () => {
     st.ingest([batch([a, b])]);
     expect(st.viewOf(st.getOtlpSpan(t, a.spanId)!).input).toEqual([{ role: "user", content: "hi" }]);
     expect(st.viewOf(st.getOtlpSpan(t, a.spanId)!).output).toEqual([{ role: "assistant", content: "hello" }]);
+    expect(st.viewOf(st.getOtlpSpan(t, a.spanId)!).finishReason).toBe("stop");
     expect(st.viewOf(st.getOtlpSpan(t, b.spanId)!).input).toEqual([{ role: "user", content: "old hi" }]);
     expect(st.viewOf(st.getOtlpSpan(t, b.spanId)!).output).toEqual([{ role: "assistant", content: "old hello" }]);
+  });
+
+  it("prefers the response's finish reasons in operation.details over a message's own", () => {
+    const st = store();
+    const t = hex(16);
+    const a = genai(t);
+    a.events = [
+      ev("gen_ai.client.inference.operation.details", {
+        "gen_ai.response.finish_reasons": JSON.stringify(["length"]),
+        "gen_ai.output.messages": JSON.stringify([{ role: "assistant", parts: [{ type: "text", content: "cut" }], finish_reason: "stop" }]),
+      }),
+    ];
+    st.ingest([batch([a])]);
+    expect(st.viewOf(st.getOtlpSpan(t, a.spanId)!).finishReason).toBe("length");
   });
 
   describe("as log records", () => {

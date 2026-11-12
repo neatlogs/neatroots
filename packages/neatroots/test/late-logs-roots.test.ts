@@ -83,10 +83,32 @@ describe("late GenAI logs through Roots", () => {
     await tb.roots.engine!.waitIdle(t, 5000);
     const labels = () => tb.roots.store.decisionsForTrace(t).filter((d) => d.check_id === "neatroots.tool-result" && d.span_id === sp.spanId);
     expect(labels()).toHaveLength(1);
+    updates.length = 0;
+    // Message events only fill LLM views, so this log changes nothing on the tool span: nothing to announce or ask.
     tb.roots.ingestLogs([log(t, sp.spanId, "gen_ai.choice", "message", "results: three hits")]);
-    await until(() => late(updates).some((u) => u.spans.some((x) => x.row.span_id === sp.spanId)));
     await tb.roots.engine!.waitIdle(t, 5000);
+    expect(late(updates)).toHaveLength(0);
     expect(labels()).toHaveLength(1);
+  });
+
+  it("does not announce or re-ask when late logs leave the view as it was", async () => {
+    const { tb, updates } = await setup();
+    const t = hex(16);
+    const sp = span({
+      traceId: t,
+      name: "chat gpt-4o",
+      kind: "llm",
+      attrs: [s("gen_ai.request.model", "gpt-4o"), s("input.value", "hello"), s("output.value", "hi there")],
+    });
+    tb.roots.ingest([batch([sp])]);
+    await tb.roots.engine!.waitIdle(t, 5000);
+    const asked = tb.roots.store.decisionsForTrace(t).length;
+    updates.length = 0;
+    // Attributes already carry input and output, and they win over events.
+    tb.roots.ingestLogs([log(t, sp.spanId, "gen_ai.user.message", "content", "hello"), log(t, sp.spanId, "gen_ai.choice", "message", "hi there")]);
+    await tb.roots.engine!.waitIdle(t, 5000);
+    expect(late(updates)).toHaveLength(0);
+    expect(tb.roots.store.decisionsForTrace(t)).toHaveLength(asked);
   });
 
   it("reaches the app's event stream when logs arrive over HTTP", async () => {

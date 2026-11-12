@@ -59,7 +59,7 @@ describe("GenAI log events in the store", () => {
     const plan = st.db.prepare(`EXPLAIN QUERY PLAN ${LOG_EVENTS_SQL}`).all(...logEventsArgs("t", "s")) as { detail: string }[];
     const text = plan.map((p) => p.detail).join(" ");
     expect(text).not.toMatch(/SCAN logs/);
-    expect(text).toMatch(/logs_span_event \(trace_id=\? AND span_id=\? AND event_name=\?\)/);
+    expect(text).toMatch(/logs_span_event \(trace_id=\? AND span_id=\? AND event_name=\? AND rowid<\?\)/);
   });
 
   it("adds the logs_span_event index and event_name column to a database created before them", () => {
@@ -77,6 +77,27 @@ describe("GenAI log events in the store", () => {
     expect(plan.map((p) => p.detail).join(" ")).toContain("logs_span_event");
   });
 
+  it("names logs stored before event_name from their event.name attribute, so their span reads them", () => {
+    const d = dir();
+    const t = hex(16);
+    const sp = bare(t);
+    const old = trackedStore(d);
+    old.ingest([batch([sp])]);
+    old.close();
+    const raw = new Database(path.join(d, "neatroots.db"));
+    raw.exec("DROP INDEX logs_span_event; ALTER TABLE logs DROP COLUMN event_name;");
+    const attrs = (name: string) => JSON.stringify([{ key: "event.name", value: { stringValue: name } }]);
+    const ins = raw.prepare("INSERT INTO logs (trace_id, span_id, time_ns, body, attributes, received_ms) VALUES (?, ?, '1', ?, ?, 0)");
+    ins.run(t, sp.spanId, JSON.stringify({ content: "from before" }), attrs("gen_ai.user.message"));
+    ins.run(null, null, "plain", attrs("app.event"));
+    raw.close();
+    const st = trackedStore(d);
+    const names = (st.db.prepare("SELECT event_name FROM logs ORDER BY id").all() as { event_name: string | null }[]).map((r) => r.event_name);
+    expect(names).toEqual(["gen_ai.user.message", null]);
+    const full = st.getOtlpSpan(t, sp.spanId)!;
+    expect(JSON.stringify(st.viewOf(full).input)).toContain("from before");
+  });
+
   it("drops view revisions of deleted runs and keeps the others", () => {
     const st = trackedStore(dir());
     const [a, b] = [hex(16), hex(16)];
@@ -89,7 +110,7 @@ describe("GenAI log events in the store", () => {
     st.deleteRuns([a]);
     expect(st.viewRevision(a, sa.spanId)).toBe(0);
     expect(st.viewRevision(b, sb.spanId)).toBe(1);
-    expect((st as unknown as { viewRevs: Map<string, number> }).viewRevs.size).toBe(1);
+    expect((st as unknown as { lateLogs: { revisions: number } }).lateLogs.revisions).toBe(1);
   });
 });
 

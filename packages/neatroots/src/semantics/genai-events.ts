@@ -32,8 +32,10 @@ const MESSAGE_ROLES: Record<string, string> = {
 
 type Obj = Record<string, Plain>;
 
+/** Whether a value is a plain object (not an array or a scalar). */
 const isObj = (v: Plain | undefined): v is Obj => !!v && typeof v === "object" && !Array.isArray(v);
 
+/** A value that may be JSON text, decoded when it is; anything else comes back as it was. */
 function parse(v: Plain | undefined): Plain | undefined {
   if (typeof v !== "string") return v;
   const t = v.trim();
@@ -53,6 +55,7 @@ function payload(e: GenAiEvent): Obj {
   return { ...e.attributes, ...(isObj(packed) ? packed : {}), ...(isObj(body) ? body : body !== undefined ? { content: body } : {}) };
 }
 
+/** OpenAI-shaped tool calls from an event, with their function arguments decoded; nothing when there are none. */
 function toolCalls(v: Plain | undefined): Plain[] | undefined {
   const calls = parse(v);
   if (!Array.isArray(calls) || !calls.length) return undefined;
@@ -63,6 +66,7 @@ function toolCalls(v: Plain | undefined): Plain[] | undefined {
   });
 }
 
+/** A chat message with the given role from an event payload: its content, tool calls and tool call id. */
 function message(role: string, p: Obj): Obj {
   const content = parse(p.content);
   const m: Obj = { role: typeof p.role === "string" && p.role ? p.role : role, content: typeof content === "string" ? content : content === undefined ? "" : JSON.stringify(content) };
@@ -72,6 +76,7 @@ function message(role: string, p: Obj): Obj {
   return m;
 }
 
+/** A value (or its JSON text) as a list: arrays as they are, one value as a list of one, nothing as empty. */
 const asList = (v: Plain | undefined): Plain[] => {
   const p = parse(v);
   return Array.isArray(p) ? p : p === undefined ? [] : [p];
@@ -102,8 +107,13 @@ export function messagesFromEvents(events: GenAiEvent[]): GenAiMessages {
       output = [...(output ?? []), ...asList(p["gen_ai.completion"] ?? p.content)];
     } else if (e.name === "gen_ai.client.inference.operation.details") {
       input.push(...asList(p["gen_ai.input.messages"]));
-      output = [...(output ?? []), ...asList(p["gen_ai.output.messages"])];
+      const out = asList(p["gen_ai.output.messages"]);
+      output = [...(output ?? []), ...out];
       system ??= parse(p["gen_ai.system_instructions"]);
+      // The newer shape: the response's finish reasons, else the first output message's own.
+      const reasons = asList(p["gen_ai.response.finish_reasons"]);
+      const reason = [reasons[0], ...out.map((m) => (isObj(m) ? m.finish_reason : undefined))].find((r) => typeof r === "string" && r);
+      if (typeof reason === "string" && !finishReason) finishReason = reason;
     }
   }
   if (choices.length) output = [...(output ?? []), ...choices.sort((a, b) => a.index - b.index).map((c) => c.msg)];
