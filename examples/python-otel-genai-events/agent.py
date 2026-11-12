@@ -1,11 +1,12 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#   "openai>=1.40",
+#   "openai>=1.40,<3",  # the instrumentation does not support openai 3 (httpx2) yet
 #   "opentelemetry-sdk>=1.30",
 #   "opentelemetry-exporter-otlp-proto-http>=1.30",
 #   "opentelemetry-exporter-otlp-proto-grpc>=1.30",
 #   "opentelemetry-instrumentation-openai-v2>=2.1b0",
+#   "opentelemetry-util-genai<1",  # 2.x of the instrumentation imports a module util-genai 1.x moved
 # ]
 # ///
 """No Neatlogs SDK: OpenTelemetry's own OpenAI instrumentation, which sends the prompt and reply as
@@ -27,10 +28,8 @@ if os.environ.get("REAL_LLM") != "1":  # neatroots' mock LLM (neatroots mock-llm
 os.environ.setdefault("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
 
 from opentelemetry import trace  # noqa: E402
-from opentelemetry._events import set_event_logger_provider  # noqa: E402
 from opentelemetry._logs import set_logger_provider  # noqa: E402
 from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor  # noqa: E402
-from opentelemetry.sdk._events import EventLoggerProvider  # noqa: E402
 from opentelemetry.sdk._logs import LoggerProvider  # noqa: E402
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor  # noqa: E402
 from opentelemetry.sdk.resources import Resource  # noqa: E402
@@ -57,7 +56,13 @@ trace.set_tracer_provider(tracer_provider)
 logger_provider = LoggerProvider(resource=resource)
 logger_provider.add_log_record_processor(BatchLogRecordProcessor(logs))
 set_logger_provider(logger_provider)
-set_event_logger_provider(EventLoggerProvider(logger_provider))
+try:  # Older SDKs route GenAI events through the events API; newer ones log them directly.
+    from opentelemetry._events import set_event_logger_provider
+    from opentelemetry.sdk._events import EventLoggerProvider
+
+    set_event_logger_provider(EventLoggerProvider(logger_provider))
+except ImportError:
+    pass
 OpenAIInstrumentor().instrument()
 
 from openai import OpenAI  # noqa: E402
