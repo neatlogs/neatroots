@@ -1,8 +1,10 @@
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Command } from "commander";
 import { loadConfig, saveConfig } from "../config.js";
 import { cloudApiBase, listCloudProjects } from "../ingest/importers/neatlogs-cloud.js";
+import { shellQuote } from "../mcp/clients.js";
 import { endpointProblem } from "../relay/endpoint.js";
 import { deleteCloudToken, getCloudToken, setCloudToken } from "../relay/keychain.js";
 import type { ImportSource } from "../ingest/importers/types.js";
@@ -34,6 +36,40 @@ async function needRunning(): Promise<number> {
 }
 
 const flag = (name: string) => `--${name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`;
+
+/** Writes an exported run atomically: a temp file in the same directory, renamed over the target, so an interrupted
+ *  export never leaves a half-written JSON file for `neatroots check` to fail on in CI. The temp name is random and
+ *  created exclusively ("wx"), so a file or symlink planted next to the target is never followed or truncated, and
+ *  cleanup removes only the file this export created. Replacing an export keeps that file's permissions. */
+export function writeExport(out: string, doc: unknown): void {
+  const json = JSON.stringify(doc);
+  let mode: number | undefined;
+  try {
+    mode = fs.statSync(out).mode & 0o777;
+  } catch {
+    /* a new file: umask defaults */
+  }
+  const tmp = `${out}.${randomBytes(6).toString("hex")}.neatroots-tmp`;
+  const fd = fs.openSync(tmp, "wx", mode ?? 0o666); // created private if the export it replaces is
+  try {
+    fs.writeFileSync(fd, json);
+    if (mode !== undefined) fs.fchmodSync(fd, mode);
+    fs.closeSync(fd);
+    fs.renameSync(tmp, out);
+  } catch (e) {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* already closed */
+    }
+    fs.rmSync(tmp, { force: true });
+    throw e;
+  }
+}
+
+/** The follow-up command, with the path quoted for a POSIX shell so `-o "my runs/a.json"` stays one argument, and
+ *  after `--` when it starts with a dash, which commander would otherwise read as an option. */
+export const checkHint = (out: string) => `neatroots check ${out.startsWith("-") ? "-- " : ""}${shellQuote(out)}`;
 
 export function registerDataCommands(program: Command): void {
   const imp = program
@@ -94,6 +130,20 @@ export function registerDataCommands(program: Command): void {
       return;
     }
   });
+
+  program
+    .command("export")
+    .argument("<trace-id>")
+    .description("Save a run as an OTLP JSON file, for neatroots check in CI or neatroots import on another machine")
+    .option("-o, --out <file>", "where to write it (default: <trace-id>.json)")
+    .action(async (traceId: string, opts: { out?: string }) => {
+      const p = await needRunning();
+      const doc = await api<{ resourceSpans: { scopeSpans: { spans: unknown[] }[] }[] }>(p, `/api/runs/${encodeURIComponent(traceId)}/otlp`);
+      const out = opts.out ?? `${traceId}.json`;
+      writeExport(out, doc);
+      const spans = doc.resourceSpans.reduce((n, r) => n + r.scopeSpans.reduce((m, s) => m + s.spans.length, 0), 0);
+      console.log(`✓ ${out}: ${spans} spans. Check it with: ${checkHint(out)}`);
+    });
 
   program
     .command("replay")
