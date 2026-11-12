@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { sha256 } from "../util/ids.js";
+import { log } from "../util/log.js";
 import type { AnyValue, KeyValue } from "../otlp/types.js";
 
 /** String attribute values above this size are stored as blob files beside the database. */
@@ -10,6 +11,14 @@ export const BLOB_THRESHOLD = 32 * 1024;
 export interface BlobRef {
   blobRef: { sha: string; len: number };
 }
+
+/** What a payload that cannot be read shows as: enough to find it, never an empty string that looks like real data. */
+export function missingBlobNotice(ref: BlobRef["blobRef"]): string {
+  return `[neatroots: the ${ref.len}-character payload ${ref.sha.slice(0, 12)} is missing from the blob store]`;
+}
+
+/** Payloads already reported missing in this process, so a page load or a second store does not repeat the warning. */
+const reportedMissing = new Set<string>();
 
 export class BlobStore {
   constructor(private readonly dir: string) {
@@ -136,7 +145,15 @@ export class BlobStore {
 
   private rehydrateValue(v: AnyValue): AnyValue {
     const ref = (v as unknown as BlobRef).blobRef;
-    if (ref) return { stringValue: this.get(ref.sha) ?? "" };
+    if (ref) {
+      const text = this.get(ref.sha);
+      if (text !== undefined) return { stringValue: text };
+      if (!reportedMissing.has(ref.sha)) {
+        reportedMissing.add(ref.sha);
+        log.warn(`payload ${ref.sha.slice(0, 12)} (${ref.len} characters) is missing from the blob store; reads show a placeholder`);
+      }
+      return { stringValue: missingBlobNotice(ref) };
+    }
     if ("arrayValue" in v) return { arrayValue: { values: v.arrayValue.values.map((x) => this.rehydrateValue(x)) } };
     if ("kvlistValue" in v) return { kvlistValue: { values: this.rehydrate(v.kvlistValue.values) } };
     return v;
