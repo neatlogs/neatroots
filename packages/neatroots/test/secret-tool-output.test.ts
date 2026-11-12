@@ -60,14 +60,20 @@ describe("secret-in-tool-output", () => {
   it("labeled smoke: 120 generated tool results, no misses and no false alarms", () => {
     let tp = 0, fn = 0, fp = 0, tn = 0;
     for (let i = 0; i < 120; i++) {
-      const kind = i % 6;
+      const kind = i % 12;
       let out: string, expectFire: boolean;
       if (kind === 0) { out = `{"api_key":"sk-${random(32, i)}"}`; expectFire = true; }
       else if (kind === 1) { out = `token=ghp_${random(36, i)}`; expectFire = true; }
       else if (kind === 2) { out = `Authorization: Bearer ${random(40, i)}`; expectFire = true; }
-      else if (kind === 3) { out = `{"order":"${1000 + i}","status":"shipped","note":"sk-short"}`; expectFire = false; }
-      else if (kind === 4) { out = `The bearer of order ${i} should sign here. Key ${random(12, i)}`; expectFire = false; }
-      else { out = `{"rows":[${i},${i + 1}],"cursor":"${random(30, i)}"}`; expectFire = false; }
+      else if (kind === 3) { out = `{"stripe":"sk_live_${random(24, i)}"}`; expectFire = true; }
+      else if (kind === 4) { out = `token: github_pat_${random(24, i)}`; expectFire = true; }
+      else if (kind === 5) { out = `{"groq":"gsk_${random(40, i)}"}`; expectFire = true; }
+      else if (kind === 6) { out = `{"order":"${1000 + i}","status":"shipped","note":"sk-short"}`; expectFire = false; }
+      else if (kind === 7) { out = `The bearer of order ${i} should sign here. Key ${random(12, i)}`; expectFire = false; }
+      else if (kind === 8) { out = `{"rows":[${i},${i + 1}],"cursor":"${random(30, i)}"}`; expectFire = false; }
+      else if (kind === 9) { out = `pk_live_${random(24, i)} goes in the browser`; expectFire = false; }
+      else if (kind === 10) { out = "ref TAS" + "K0123456789abcdef0123456789abcdef rolled out"; expectFire = false; }
+      else { out = `token_ghp_${random(36, i)} is one word`; expectFire = false; }
       const fired = run(out)?.firing === true;
       if (expectFire && fired) tp++; else if (expectFire) fn++; else if (fired) fp++; else tn++;
     }

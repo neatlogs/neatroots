@@ -35,6 +35,19 @@ const KEYS = [
   "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
   "xoxb-1234567890-abcdefgh",
   "-----BEGIN RSA PRIVATE KEY-----",
+  "sk_" + "live_abcdefghijklmnopqrstuvwx",
+  "rk_" + "live_abcdefghijklmnopqrstuvwx",
+  "git" + "hub_pat_11ABCDEFG0abcdefghijkl_abcdefghijklmnopqrstuvwxyz",
+  "gho" + "_abcdefghijklmnopqrstuvwxyz0123456789",
+  "AIz" + "aSyA1234567890abcdefghijklmnopqrstuv",
+  "SG." + "abcdefghijklmnop.qrstuvwxyz012345",
+  "npm" + "_abcdefghijklmnopqrstuvwxyz0123456789",
+  "SK0" + "123456789abcdef0123456789abcdef",
+  "hf_" + "abcdefghijklmnopqrstuvwxyz0123456789",
+  "dck" + "r_pat_abcdefghijklmnopqrstuvwx",
+  "dop" + "_v1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "gsk" + "_abcdefghijklmnopqrstuvwxyz0123456789ABCD",
+  "ya2" + "9.abcdefghijklmnopqrstuvwxyz0123",
 ];
 const NEAR = [
   "akiaiosfodnn7example",
@@ -45,6 +58,29 @@ const NEAR = [
   "the sk- prefix marks a key",
   "-----begin rsa private key-----",
   "Akiaiosfodnn7example",
+  "use sk_live_ keys only on the server",
+  "git" + "hub_pat_ tokens are fine-grained",
+  "connect to postgres://localhost:5432/main",
+  "see https://example.com:8080/path",
+  "email me at user@example.com",
+  "the JWT header starts with eyJ",
+  "SKU12345 is out of stock",
+  "set aws_secret_access_key in your config",
+  "npm" + "_config is an env prefix",
+  // Publishable keys are public by design.
+  "pk_" + "live_abcdefghijklmnopqrstuvwx",
+  // Credentials inside a connection string are the app's own config, not a leaked key.
+  "pos" + "tgres://app:s3cretpw@db.internal:5432/main",
+  "pos" + "tgres://user:password@localhost:5432/mydb",
+  "mon" + "godb://admin:admin@localhost:27017",
+  // Docs examples and placeholders are not live keys.
+  "aws" + "_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY12",
+  "eyJ" + "hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijk",
+  "eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+  // SK followed by 32 hex chars inside a longer identifier is not a key.
+  "TAS" + "K0123456789abcdef0123456789abcdef",
+  // A key glued to a preceding underscore has no word boundary, same as the redactor.
+  "token_ghp_abcdefghijklmnopqrstuvwxyz0123456789",
 ];
 
 describe("secret-in-output", () => {
