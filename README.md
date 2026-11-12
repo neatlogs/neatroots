@@ -16,7 +16,7 @@ machine unless you send it.
 
 - **Takes runs from anywhere.** The [Neatlogs SDKs](https://github.com/neatlogs/neatlogs) (Python,
   TypeScript, Go, Browser), the Neatlogs HTTP trace API, or any OpenTelemetry exporter over OTLP
-  HTTP or gRPC (OpenInference, OpenLLMetry, GenAI and Vercel AI SDK attributes). It also imports
+  HTTP or gRPC (OpenInference, OpenLLMetry, GenAI and Vercel AI SDK attributes, plus GenAI message events sent as span events or OTLP logs). It also imports
   trace files, and pulls production traces from Neatlogs Cloud.
 - **Checks every run.** Rules in code on every span (loops, repeated tool calls, error streaks,
   leaked keys, failed or empty runs). Yes/no questions picked for your agent, each answered with a

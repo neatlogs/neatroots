@@ -3,6 +3,7 @@ import { rootsHome, loadConfig, saveConfig, type RootsConfig } from "./config.js
 import { Bus } from "./bus.js";
 import { Store, type TraceUpdate } from "./store/db.js";
 import type { ResourceSpansBatch } from "./otlp/types.js";
+import type { OtlpLogRecord } from "./otlp/codec.js";
 import { LlmClient } from "./models/llm.js";
 import { DecisionModel } from "./models/decision.js";
 import { CheckRegistry } from "./checks/registry.js";
@@ -62,6 +63,9 @@ export class Roots {
     this.home = opts.home ?? rootsHome();
     this.config = opts.config ?? loadConfig();
     this.store = new Store(path.join(this.home, "data"));
+    this.store.onLateLogs((updates) => {
+      for (const u of updates) this.bus.emit("trace", u);
+    });
     this.llm = new LlmClient(this.config.llm, { secret: (n) => getSecret(n), redactPatterns: () => this.config.cloud.redactPatterns });
     this.laya = new LayaManager(this.home, this.config.classifier);
     this.decisions = new DecisionModel(
@@ -97,6 +101,11 @@ export class Roots {
     const updates = this.store.ingest(batches);
     for (const u of updates) this.bus.emit("trace", u);
     return updates;
+  }
+
+  /** Stores OTLP log records; spans whose message content they carry are refreshed and announced as trace updates. */
+  ingestLogs(records: OtlpLogRecord[]): number {
+    return this.store.ingestLogs(records);
   }
 
   /** Saves to this instance's own home (the one it was opened with), never another one. */

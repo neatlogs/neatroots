@@ -109,7 +109,7 @@ export function mountCollector(app: Hono, roots: Roots): void {
       return c.json({ code: 3, message: `invalid OTLP logs payload: ${(err as Error).message}` }, 400);
     }
     try {
-      roots.store.ingestLogs(records);
+      roots.ingestLogs(records);
     } catch (err) {
       return storeFailed(c, err);
     }

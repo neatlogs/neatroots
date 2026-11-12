@@ -24,6 +24,7 @@ and the HTTP API example, and checks that each produced a run. Run `browser`, `i
 | [python-sessions](python-sessions) | Python | Neatlogs SDK sessions | A three-turn chat: open any turn's Conversation tab |
 | [python-replay](python-replay) | Python | Neatlogs SDK + `neatroots_steer` | An agent you can re-run from the app with a different input, model or system prompt |
 | [python-opentelemetry](python-opentelemetry) | Python | Plain OpenTelemetry + OpenInference, OTLP/HTTP or gRPC | No Neatlogs SDK at all |
+| [python-otel-genai-events](python-otel-genai-events) | Python | OpenTelemetry's OpenAI instrumentation, messages as GenAI events over `/v1/logs` | Message content that arrives after its span |
 | [typescript-openai](typescript-openai) | TypeScript | Neatlogs TS SDK `wrapOpenAI` | The support agent on the OpenAI Node SDK |
 | [typescript-vercel-ai](typescript-vercel-ai) | TypeScript | Neatlogs TS SDK `wrapAISDK` | A Vercel AI SDK agent with a tool |
 | [http-api](http-api) | curl / Python stdlib | Neatlogs HTTP trace API (`POST /v1/trace`) | No SDK, no dependencies |
