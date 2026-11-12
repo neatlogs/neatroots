@@ -8,6 +8,7 @@ import { draftCheckFromConcern } from "../engine/assist.js";
 import { err, body } from "./util.js";
 import { llmErrorMessage } from "../models/llm.js";
 import { regexProblem } from "../util/regex.js";
+import { toQuestion } from "../engine/engine.js";
 
 /** Accepts a check as YAML text, a JSON object, or {yaml}. */
 export function checkFromInput(input: unknown): { check?: Check; error?: string } {
@@ -77,6 +78,9 @@ export function mountChecksApi(app: Hono, roots: Roots): void {
       if (!state.ok && !state.creatable) return err(c, 400, `that checks directory ${state.reason}`);
     }
     const saved = roots.checks.save(check, dir ? { dir } : "user");
+    if (isQuestion(saved.check)) {
+      roots.decisions.trust.activate?.(toQuestion(saved.check, saved.check.params ?? {}));
+    }
     const warnings = checkWarnings(check);
     if (roots.steering.inactiveHalts([saved.check]).length) {
       warnings.push("This halt rule won't stop the agent until steering is on for the project (off sends nothing, halts included). Turn it on in the sidebar or with neatroots steering advisory --project <name>.");
