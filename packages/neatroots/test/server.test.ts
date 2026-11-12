@@ -8,7 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { encodeTraceRequest, decodeTraceProtobuf } from "../src/otlp/codec.js";
 import { findUiDir } from "../src/server/app.js";
-import { batch, hex, llmSpan, makeRoots, markerSpan, s, span, toolSpan, until } from "./helpers.js";
+import { batch, hex, llmSpan, makeRoots, markerSpan, mockLlm, s, span, toolSpan, until } from "./helpers.js";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -586,6 +586,29 @@ describe("server", () => {
       expect(await r.json()).toEqual({ error: `${field} must be a boolean` });
     }
     expect(tb.roots.chats.list()).toEqual([]);
+  });
+
+  it("refuses a non-string concern or workflow when drafting a check instead of drafting from it", async () => {
+    const llm = await mockLlm();
+    cleanup.push(llm.close);
+    const tb = await makeRoots({ serve: true, llmUrl: llm.url });
+    cleanup.push(tb.close);
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const draft = (b: unknown) => fetch(`${tb.url}/api/checks/draft`, { method: "POST", headers, body: JSON.stringify(b) });
+    for (const concern of [5, {}, true, []]) {
+      const r = await draft({ concern }); // was 200 with a drafted check from "Written from: 5" / "[object Object]"
+      expect(r.status, JSON.stringify(concern)).toBe(400);
+      expect(await r.json()).toEqual({ error: "describe the concern in a sentence" });
+    }
+    for (const field of ["workflow", "project"] as const) {
+      const r = await draft({ concern: "Refunds must be ownership-checked", [field]: 5 }); // was 503 with a raw ZodError dump
+      expect(r.status, field).toBe(400);
+      expect(await r.json()).toEqual({ error: `${field} must be a string` });
+    }
+    expect(llm.requests).toEqual([]); // nothing reached the model
+    const ok = await draft({ concern: "Refunds must be ownership-checked" });
+    expect(ok.status).toBe(200);
+    expect(llm.requests.length).toBeGreaterThan(0);
   });
 
   it("returns 404 JSON for unknown /api and /v1 routes, not the SPA", async () => {

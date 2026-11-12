@@ -107,7 +107,10 @@ export function mountChecksApi(app: Hono, roots: Roots): void {
 
   app.post("/api/checks/draft", async (c) => {
     const b = await body<{ concern?: string; workflow?: string; project?: string }>(c);
-    if (!b.concern || b.concern.length < 8) return err(c, 400, "describe the concern in a sentence");
+    if (typeof b.concern !== "string" || b.concern.trim().length < 8) return err(c, 400, "describe the concern in a sentence");
+    for (const field of ["workflow", "project"] as const) {
+      if (b[field] !== undefined && typeof b[field] !== "string") return err(c, 400, `${field} must be a string`);
+    }
     try {
       const check = await draftCheckFromConcern(roots, b.concern, { workflow: b.workflow, project: b.project, signal: c.req.raw.signal });
       return c.json({ check, yaml: YAML.stringify(check), warnings: checkWarnings(check) });
