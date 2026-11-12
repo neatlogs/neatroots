@@ -49,7 +49,7 @@ function attention(d: Insights): Group[] {
         title: p.title,
         detail: `in ${p.runs} of ${d.totals.runs} runs${multi ? ` · ${p.projects.join(", ")}` : ""}${p.dismissed ? ` · ${p.dismissed} dismissed as wrong` : ""}`,
         trend: runsTrend(p.runs, p.prev_runs, hadBefore),
-        href: `#/runs?check=${encodeURIComponent(p.check_id)}&label=${encodeURIComponent(p.title)}`,
+        href: `#/runs?check=${encodeURIComponent(p.check_id)}&label=${encodeURIComponent(p.title)}&has_open_finding=1`,
       })),
     },
     {

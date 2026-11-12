@@ -13,7 +13,7 @@ export function useRuns(p: RunListParams) {
       const q = new URLSearchParams({ limit: String(RUNS_PAGE), offset: String(pageParam) });
       if (p.q) q.set("q", p.q);
       if (p.status) q.set("status", p.status);
-      if (p.hasFinding) q.set("has_finding", "1");
+      if (p.hasFinding) q.set("has_open_finding", "1");
       if (p.project) q.set("project", p.project);
       if (p.check) q.set("check", p.check);
       return api<{ runs: Run[]; total: number; matching?: number }>(`/api/runs?${q}`);
