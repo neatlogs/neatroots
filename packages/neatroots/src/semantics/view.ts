@@ -122,7 +122,22 @@ export function collectIndexed(attrs: Attrs, prefix: string): Record<string, Pla
     }
     rows.set(idx, row);
   }
-  return [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([, r]) => r);
+  return [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([, r]) => indexedToArrays(r) as Record<string, Plain>);
+}
+
+/** Converts nested objects whose own keys are all non-negative integers into sorted arrays. */
+function indexedToArrays(v: Plain): Plain {
+  if (Array.isArray(v)) return v.map((item) => indexedToArrays(item));
+  if (!v || typeof v !== "object") return v;
+  const entries = Object.entries(v);
+  if (entries.length > 0 && entries.every(([k]) => /^\d+$/.test(k))) {
+    return entries
+      .sort((a, b) => Number(a[0]) - Number(b[0]))
+      .map(([, val]) => indexedToArrays(val));
+  }
+  const out: Record<string, Plain> = {};
+  for (const [k, val] of entries) setOwn(out, k, indexedToArrays(val));
+  return out;
 }
 
 /** Keys come from span attributes, so only own properties are read and written (see setOwn). */
@@ -185,10 +200,75 @@ function deriveKind(span: OtlpSpan, attrs: Attrs): SpanKind {
   );
 }
 
+/**
+ * Normalizes an OpenInference `llm.{input,output}_messages.N.message` object so `contents`
+ * (`message_content.text` / `message_content.image`) and `tool_calls` (`tool_call.function.*`)
+ * match the `{role, content, tool_calls}` shape expected by previews, search and Conversation.
+ */
+function normalizeOpenInferenceMessage(m: Record<string, Plain>): Record<string, Plain> {
+  if (!m || typeof m !== "object" || Array.isArray(m)) return m;
+  const out: Record<string, Plain> = {};
+  for (const [k, v] of Object.entries(m)) {
+    if (k === "contents") continue;
+    setOwn(out, k, v);
+  }
+  if ((out.content === undefined || out.content === null || out.content === "") && Array.isArray(m.contents)) {
+    const texts: string[] = [];
+    const images: string[] = [];
+    for (const entry of m.contents) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const item = entry as Record<string, Plain>;
+      const mc =
+        item.message_content && typeof item.message_content === "object" && !Array.isArray(item.message_content)
+          ? (item.message_content as Record<string, Plain>)
+          : item;
+      const text = str(mc.text ?? mc.content);
+      if (text !== undefined) {
+        texts.push(text);
+        continue;
+      }
+      const img = mc.image && typeof mc.image === "object" && !Array.isArray(mc.image) ? (mc.image as Record<string, Plain>) : undefined;
+      const innerImg = img?.image && typeof img.image === "object" && !Array.isArray(img.image) ? (img.image as Record<string, Plain>) : undefined;
+      const url = str(innerImg?.url ?? img?.url ?? mc.image_url);
+      if (url) images.push(`[image: ${url}]`);
+      else if (mc.type === "image") images.push("[image]");
+    }
+    setOwn(out, "content", texts.length ? texts.join("\n") : images.join("\n"));
+  }
+  if (Array.isArray(m.tool_calls)) {
+    const calls = m.tool_calls
+      .map((raw) => {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+        const item = raw as Record<string, Plain>;
+        const tc =
+          item.tool_call && typeof item.tool_call === "object" && !Array.isArray(item.tool_call)
+            ? (item.tool_call as Record<string, Plain>)
+            : item;
+        const fn =
+          tc.function && typeof tc.function === "object" && !Array.isArray(tc.function)
+            ? (tc.function as Record<string, Plain>)
+            : undefined;
+        const name = str(tc.name ?? fn?.name);
+        const args = maybeJson(tc.arguments ?? fn?.arguments) ?? null;
+        const id = str(tc.id ?? tc.tool_call_id) ?? null;
+        if (!name && args === null && !id) return undefined;
+        return { id, name: name ?? "tool", arguments: args };
+      })
+      .filter((c): c is { id: string | null; name: string; arguments: Plain } => !!c);
+    if (calls.length) {
+      setOwn(out, "tool_calls", calls);
+      if (out.content === undefined || out.content === null) setOwn(out, "content", "");
+    }
+  }
+  return out;
+}
+
 function llmMessages(attrs: Attrs, dir: "input" | "output"): Plain | undefined {
   const flat = collectIndexed(attrs, `neatlogs.llm.${dir}_messages`);
   if (flat.length) return flat;
-  const oi = collectIndexed(attrs, `llm.${dir}_messages`).map((m) => (m.message as Record<string, Plain>) ?? m);
+  const oi = collectIndexed(attrs, `llm.${dir}_messages`).map((m) =>
+    normalizeOpenInferenceMessage(((m.message && typeof m.message === "object" && !Array.isArray(m.message) ? m.message : m) as Record<string, Plain>)),
+  );
   if (oi.length) return oi;
   const genai = dir === "input" ? collectIndexed(attrs, "gen_ai.prompt") : collectIndexed(attrs, "gen_ai.completion");
   if (genai.length) return genai;
@@ -327,6 +407,21 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
         }
       } else if (view.toolCalls && view.output === undefined) {
         view.output = [{ role: "assistant", tool_calls: view.toolCalls.map((c) => ({ id: c.id ?? null, name: c.name, arguments: c.arguments })) }];
+      } else if (!view.toolCalls && Array.isArray(view.output)) {
+        const calls = (view.output as Record<string, Plain>[]).flatMap((m) =>
+          Array.isArray(m?.tool_calls)
+            ? (m.tool_calls as Record<string, Plain>[]).map((c) => {
+                const fn = c?.function && typeof c.function === "object" && !Array.isArray(c.function) ? (c.function as Record<string, Plain>) : undefined;
+                const id = str(c?.id);
+                return {
+                  ...(id ? { id } : {}),
+                  name: str(c?.name) ?? str(fn?.name) ?? "tool",
+                  arguments: maybeJson(c?.arguments ?? fn?.arguments) ?? null,
+                };
+              })
+            : [],
+        );
+        if (calls.length) view.toolCalls = calls;
       }
       const tools = collectIndexed(attrs, "neatlogs.llm.tools").map((t) => str(t.name)).filter((x): x is string => !!x);
       if (tools.length) view.tools = tools;
