@@ -135,12 +135,16 @@ export function createApp(roots: Roots): Hono {
       // A malformed percent-escape is an unknown path, not a server error: the fallback below serves the app shell.
     }
     let file = path.join(uiDir, rel);
+    let fallback = false;
     // Append path.sep before the prefix check so a sibling directory whose name starts
     // with the same string as uiDir (e.g. ui-x/) cannot be reached via path traversal.
-    if (!file.startsWith(uiDir + path.sep) || !rel || !fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(uiDir, "index.html");
+    if (!file.startsWith(uiDir + path.sep) || !rel || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+      file = path.join(uiDir, "index.html");
+      fallback = true;
+    }
     const ext = path.extname(file);
     const headers: Record<string, string> = { "content-type": MIME[ext] ?? "application/octet-stream" };
-    if (rel.startsWith("assets/")) headers["cache-control"] = "public, max-age=31536000, immutable";
+    if (!fallback && rel.startsWith("assets/")) headers["cache-control"] = "public, max-age=31536000, immutable";
     return new Response(fs.readFileSync(file), { headers });
   });
   return app;
