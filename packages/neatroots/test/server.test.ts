@@ -588,6 +588,25 @@ describe("server", () => {
     expect(tb.roots.chats.list()).toEqual([]);
   });
 
+  it("refuses a non-string cwd, title or trace_id when creating a chat instead of echoing a TypeError", async () => {
+    const tb = await served();
+    const headers = { "content-type": "application/json", origin: tb.url.replace("127.0.0.1", "localhost") };
+    const create = (b: unknown) => fetch(`${tb.url}/api/chat/sessions`, { method: "POST", headers, body: JSON.stringify(b) });
+    for (const [field, message] of [
+      ["cwd", "cwd must be a string"],
+      ["title", "title must be a string"],
+      ["trace_id", "trace_id must be a string"],
+    ] as const) {
+      const r = await create({ agent: "codex", cwd: os.tmpdir(), [field]: 5 }); // was 400 "opts.cwd?.trim is not a function" and friends
+      expect(r.status, field).toBe(400);
+      expect(await r.json()).toEqual({ error: message });
+    }
+    expect(tb.roots.chats.list()).toEqual([]);
+    const ok = await create({ agent: "codex", cwd: os.tmpdir(), title: "Named" });
+    expect(ok.status).toBe(201);
+    expect((await ok.json()) as { title: string }).toMatchObject({ title: "Named" });
+  });
+
   it("returns 404 JSON for unknown /api and /v1 routes, not the SPA", async () => {
     const tb = await served();
     for (const path of ["/api/anything-unknown", "/api/imports/abc", "/v1/unknown"]) {
