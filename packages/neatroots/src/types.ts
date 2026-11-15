@@ -31,6 +31,7 @@ export interface RunRow {
   open_finding_count: number;
   pinned: number;
   doctor: number;
+  imported: number;
   plan_id: string | null;
   received_ms: number;
   updated_ms: number;
