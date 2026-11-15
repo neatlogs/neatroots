@@ -40,7 +40,7 @@ export const PLANNER_SCHEMA = {
         properties: {
           id: { type: "string" },
           ask: { type: "string" },
-          scope: { type: "string", enum: ["span", "trace"] },
+          scope: { type: "string", enum: ["span", "trace", "session"] },
           span_type: { type: "string", enum: ["llm", "tool", "any"] },
           guidance: { type: "string" },
         },
@@ -110,6 +110,7 @@ export const CONCERN_SYSTEM = `You turn a developer's plain-language concern abo
 Write a yes/no question phrased as a failure, so "yes" means the problem happened. Make it specific and answerable from the agent's spans. Write the question itself, not an answer to it.
 Choose scope "span" only when one LLM or tool call holds everything needed to answer, such as "Did this tool call pass a negative amount?".
 Choose scope "trace" when the question relates two things, such as a tool's result and what the agent said or did afterwards, or when it is about the agent's final answer. A trace question sees the tool calls, the LLM calls and the final answer.
+Choose scope "session" only when the problem is about the conversation across turns, such as the agent contradicting a constraint the user set in an earlier turn. A session question is judged at each run's end over the session's spans so far.
 Also write a short note the agent should get if the problem happens.
 Reply with JSON only.`;
 
@@ -119,7 +120,7 @@ export const CONCERN_SCHEMA = {
     id: { type: "string", description: "kebab-case id" },
     title: { type: "string" },
     ask: { type: "string" },
-    scope: { type: "string", enum: ["span", "trace"] },
+    scope: { type: "string", enum: ["span", "trace", "session"] },
     span_type: { type: "string", enum: ["llm", "tool", "any"] },
     guidance: { type: "string" },
   },

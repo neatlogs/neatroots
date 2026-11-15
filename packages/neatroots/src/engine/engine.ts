@@ -10,6 +10,7 @@ import type { SteeringHub } from "../steering/hub.js";
 import {
   buildEvidence,
   describeSpan,
+  type BuiltEvidence,
   finalOutput,
   loadTrace,
   matchesSelector,
@@ -38,6 +39,7 @@ import { log } from "../util/log.js";
 import { CheckProgress } from "./progress.js";
 import { addOccurrence, clearFailure, dropOccurrence, findingSpans, isOpenFinding, newFindingStatus, recordFailure } from "./findings.js";
 import { verifyFlag } from "./verify.js";
+import { askSession, sessionEvidence } from "./session.js";
 
 /** Default library questions when no LLM is available to plan. */
 export const DEFAULT_PLAN = ["ignored-tool-error", "repeat-without-progress", "unfinished-task", "contradicts-tool-output"];
@@ -369,7 +371,8 @@ export class Engine {
 
   private scheduleQuestions(run: LiveRun, snap: TraceSnapshot, fresh: SpanInfo[]): void {
     for (const { check, params } of this.questionsFor(run)) {
-      if (check.when === "end") continue;
+      // Session questions judge across runs, so they only run at run end, never live.
+      if (check.when === "end" || check.scope === "session") continue;
       const sel = check.evidence?.spans;
       if (check.scope === "span") {
         const queue = run.spanQueue.get(check.id) ?? [];
@@ -582,6 +585,18 @@ export class Engine {
     }
     // Not asked after all, so the run-end pass asks again; unless an overlapping pass cached newer evidence.
     if (outcome === "unavailable" && run.traceEvidence.get(check.id) === key) run.traceEvidence.delete(check.id);
+  }
+
+  private sessionEvidence(check: QuestionCheck, snap: TraceSnapshot): BuiltEvidence & { ownSpanIds: string[] } {
+    return sessionEvidence(this.roots.store, check, snap);
+  }
+
+  private async askSession(run: LiveRun, check: QuestionCheck, params: Record<string, string>, snap: TraceSnapshot): Promise<void> {
+    const pass = run.endPass;
+    return askSession(run, check, snap, {
+      evidence: () => this.sessionEvidence(check, snap),
+      decide: (ev) => this.decideAndApply(run, check, params, ev.text, ev.ownSpanIds, snap, null, () => this.live.get(run.traceId) === run && run.endPass === pass),
+    });
   }
 
   private async decideAndApply(
@@ -1055,7 +1070,7 @@ ${library}`;
         id,
         kind: "yes_no",
         title: clip(q.ask, 80),
-        scope: q.scope === "span" ? "span" : "trace",
+        scope: q.scope === "span" ? "span" : q.scope === "session" ? "session" : "trace",
         ask: q.ask,
         evidence: { spans: { type: types }, fields: ["input", "output", "status", "error"], last: q.scope === "span" ? undefined : 12 },
         flag_at: 0.8,
@@ -1209,6 +1224,8 @@ ${library}`;
         run.spanQueue.set(check.id, queue);
         await this.drainSpanQueue(run, check, params);
         await this.retryFailedSpans(run, check, params);
+      } else if (check.scope === "session") {
+        await this.askSession(run, check, params, snap);
       } else {
         await this.askTrace(run, check, params, snap);
       }
@@ -1369,13 +1386,28 @@ ${library}`;
     truncated: boolean;
   }> {
     const limit = opts.limit ?? 50;
+    const sessionQ = !isRule(check) && check.scope === "session";
     // Only runs the check would watch: the engine skips runs outside its applies_to, so a preview
     // over them would report hits the check can never raise. Look further back to still fill `limit`.
-    const runs = this.roots.store
-      .listRuns({ workflow: opts.workflow, project: opts.project, limit: check.applies_to ? 500 : limit })
+    const eligible = this.roots.store
+      .listRuns({ workflow: opts.workflow, project: opts.project, limit: check.applies_to || sessionQ ? 500 : limit })
       .filter((r) => r.status !== "running")
-      .filter((r) => this.appliesTo(check, { project: r.project ?? "unknown", workflow: r.workflow ?? r.project ?? "unknown" }))
-      .slice(0, limit);
+      .filter((r) => this.appliesTo(check, { project: r.project ?? "unknown", workflow: r.workflow ?? r.project ?? "unknown" }));
+    // A session question is previewed once per session, on its newest run: pick distinct sessions
+    // before the limit, so one chatty session can't crowd the others out of the window.
+    const runs: typeof eligible = [];
+    if (sessionQ) {
+      const seen = new Set<string>();
+      for (const r of eligible) {
+        const sid = r.session_id ?? r.trace_id;
+        if (seen.has(sid)) continue;
+        seen.add(sid);
+        runs.push(r);
+        if (runs.length >= limit) break;
+      }
+    } else {
+      runs.push(...eligible.slice(0, limit));
+    }
     const deadline = Date.now() + (opts.timeBudgetMs ?? 90_000);
     const hits: { trace_id: string; probability: number | null; evidence_span_ids: string[]; root_name: string | null }[] = [];
     let checked = 0;
@@ -1391,14 +1423,20 @@ ${library}`;
       }
       const targets = check.scope === "span" ? selectSpans(snap.spans, check.evidence?.spans).slice(-5) : [undefined];
       for (const focus of targets) {
-        const ev = buildEvidence(snap, check.evidence, { focus });
-        if (!ev.spanIds.length && !check.evidence?.final_output) continue;
+        // The final answer must be this run's: the merged session spans' first root is the oldest turn.
+        const sess = !isRule(check) && check.scope === "session" ? this.sessionEvidence(check, snap) : undefined;
+        const ev = sess ?? buildEvidence(snap, check.evidence, { focus });
+        if (check.scope === "session" && check.evidence?.final_output) {
+          const out = finalOutput(snap);
+          if (out) ev.text += `\n\nFinal answer (this run): ${clip(out, 1500)}`;
+        }
+        if (sess ? !sess.ownSpanIds.length && !(check.evidence?.final_output && finalOutput(snap)) : !ev.spanIds.length && !check.evidence?.final_output) continue;
         try {
           if (opts.signal?.aborted) break;
           const res = await this.decisions.decide(ev.text, [toQuestion(check, check.params ?? {})], { priority: "interactive", signal: opts.signal });
           const v = flagged(check, res);
           if (v.flagged) {
-            hits.push({ trace_id: r.trace_id, probability: v.probability, evidence_span_ids: ev.spanIds, root_name: r.root_name });
+            hits.push({ trace_id: r.trace_id, probability: v.probability, evidence_span_ids: sess ? sess.ownSpanIds : ev.spanIds, root_name: r.root_name });
             break;
           }
         } catch (err) {

@@ -116,7 +116,7 @@ export function batch(spans: OtlpSpan[], service = "test-agent", scope = "neatlo
   };
 }
 
-export function llmSpan(traceId: string, parent: string, opts: { system?: string; user: string; out?: string; toolCalls?: { name: string; args: string }[]; tools?: string[] }): OtlpSpan {
+export function llmSpan(traceId: string, parent: string, opts: { system?: string; user: string; out?: string; toolCalls?: { name: string; args: string }[]; tools?: string[]; attrs?: KeyValue[] }): OtlpSpan {
   const attrs: KeyValue[] = [s("neatlogs.llm.model_name", "mock"), s("neatlogs.llm.token_count.prompt", "10"), s("neatlogs.llm.token_count.completion", "5"), s("neatlogs.llm.token_count.total", "15")];
   let i = 0;
   if (opts.system) {
@@ -127,6 +127,7 @@ export function llmSpan(traceId: string, parent: string, opts: { system?: string
   if (opts.out !== undefined) attrs.push(s("neatlogs.llm.output_messages.0.role", "assistant"), s("neatlogs.llm.output_messages.0.content", opts.out));
   (opts.toolCalls ?? []).forEach((c, j) => attrs.push(s(`neatlogs.llm.tool_calls.${j}.name`, c.name), s(`neatlogs.llm.tool_calls.${j}.arguments`, c.args)));
   (opts.tools ?? []).forEach((t, j) => attrs.push(s(`neatlogs.llm.tools.${j}.name`, t)));
+  attrs.push(...(opts.attrs ?? []));
   return span({ traceId, parent, name: "openai.chat.completions.create", kind: "llm", attrs });
 }
 
