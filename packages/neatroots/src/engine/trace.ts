@@ -62,12 +62,13 @@ function traceCache(store: Store, traceId: string): Map<string, SpanInfo> {
   return spans;
 }
 
-export function loadTrace(store: Store, traceId: string): TraceSnapshot {
+export function loadTrace(store: Store, traceId: string, spanIds?: ReadonlySet<string>): TraceSnapshot {
   const rows = store.getSpans(traceId, false);
   const cache = traceCache(store, traceId);
   const live = new Set<string>();
   const spans: SpanInfo[] = [];
   for (const row of rows) {
+    if (spanIds && !spanIds.has(row.span_id)) continue;
     // neatroots' own guidance records are not part of the agent's behavior.
     if (row.name === "neatroots.guidance" || row.name === "roots.guidance") continue;
     live.add(row.span_id);
@@ -104,7 +105,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
     cache.set(row.span_id, info);
     spans.push(info);
   }
-  for (const id of cache.keys()) if (!live.has(id)) cache.delete(id);
+  if (!spanIds) for (const id of cache.keys()) if (!live.has(id)) cache.delete(id);
   spans.sort((a, b) => a.startMs - b.startMs || a.seq - b.seq);
   return { traceId, run: store.getRun(traceId), spans };
 }
@@ -114,7 +115,7 @@ function asList(v: string | string[] | undefined): string[] | undefined {
   return (Array.isArray(v) ? v : [v]).map((x) => x.toLowerCase());
 }
 
-export function matchesSelector(s: SpanInfo, sel: SpanSelector | undefined): boolean {
+export function matchesSelector(s: Pick<SpanInfo, "kind" | "name" | "toolName" | "status">, sel: SpanSelector | undefined): boolean {
   if (!sel) return true;
   const types = asList(sel.type);
   if (types && !types.includes(s.kind.toLowerCase())) return false;

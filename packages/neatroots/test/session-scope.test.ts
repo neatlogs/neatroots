@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { loadTrace } from "../src/engine/trace.js";
 import type { QuestionCheck } from "../src/checks/types.js";
 import { parseChecks } from "../src/checks/registry.js";
 import { batch, hex, llmSpan, makeRoots, markerSpan, mockLlm, span, until } from "./helpers.js";
@@ -52,6 +53,85 @@ function decisionRequests(requests: any[], containing: string): any[] {
 }
 
 describe("scope: session", () => {
+  it("keeps stored session answers during recovery without building evidence again", async () => {
+    const llm = await mockLlm({});
+    cleanup.push(llm.close);
+    const tb = await makeRoots({ llmUrl: llm.url });
+    cleanup.unshift(tb.close);
+    const engine = tb.roots.engine as any;
+    const question = check("session");
+    const run = { answered: { traceChecks: new Set([question.id]) }, traceEvidence: new Map() };
+    const evidence = vi.spyOn(engine, "sessionEvidence").mockReturnValue({ text: "evidence", spanIds: ["span"], ownSpanIds: ["span"] });
+    const decide = vi.spyOn(engine, "decideAndApply").mockResolvedValue(undefined);
+    await engine.askSession(run, question, {}, { spans: [] });
+    expect(evidence).not.toHaveBeenCalled();
+    expect(decide).not.toHaveBeenCalled();
+  });
+
+  it("does not let a replaced live run persist a session answer", async () => {
+    const llm = await mockLlm({});
+    cleanup.push(llm.close);
+    const tb = await makeRoots({ llmUrl: llm.url });
+    cleanup.unshift(tb.close);
+    const engine = tb.roots.engine as any;
+    const question = check("session");
+    const traceId = hex(16);
+    const run = { traceId, traceEvidence: new Map() };
+    engine.live.set(traceId, run);
+    vi.spyOn(engine, "sessionEvidence").mockReturnValue({ text: "evidence", spanIds: ["span"], ownSpanIds: ["span"] });
+    const decide = vi.spyOn(engine, "decideAndApply").mockImplementation(async (...args: any[]) => {
+      const current = args[7];
+      expect(typeof current).toBe("function");
+      expect(await current()).toBe(true);
+      engine.live.set(traceId, { traceId });
+      expect(await current()).toBe(false);
+    });
+    await engine.askSession(run, question, {}, { traceId, spans: [] });
+    expect(decide).toHaveBeenCalledOnce();
+    engine.live.delete(traceId);
+  });
+
+  it("hydrates only six matching earlier spans, rather than the entire earlier run", async () => {
+    const llm = await mockLlm({});
+    cleanup.push(llm.close);
+    const tb = await makeRoots({ llmUrl: llm.url });
+    cleanup.unshift(tb.close);
+    const traceId = hex(16);
+    const root = hex(8);
+    const spans = Array.from({ length: 80 }, (_, i) => llmSpan(traceId, root, { user: `old ${i}`, out: `answer ${i}`, attrs: [sessionAttr] }));
+    tb.roots.ingest([batch(spans)]);
+    await tb.roots.engine!.waitIdle(traceId, 10_000);
+    tb.roots.store.db.prepare("UPDATE runs SET status = 'ok' WHERE trace_id = ?").run(traceId);
+    const snap = { traceId: hex(16), run: { ...tb.roots.store.getRun(traceId)!, started_ms: Date.now() + 60_000 }, spans: [] };
+    // Invalidate the parser cache populated by ingestion so this measures a cold history load.
+    tb.roots.store.db.prepare("UPDATE spans SET seq = seq + 1000 WHERE trace_id = ?").run(traceId);
+    const hydrate = vi.spyOn(tb.roots.store, "getOtlpSpan");
+    const evidence = (tb.roots.engine as any).sessionEvidence(check("session"), snap);
+    expect(hydrate).toHaveBeenCalledTimes(6);
+    expect(evidence.spanIds).toHaveLength(6);
+    expect(evidence.ownSpanIds).toEqual([]);
+    expect(evidence.text).toContain("old 79");
+    // A later full load must still return every span after the selective load cached a subset.
+    expect(loadTrace(tb.roots.store, traceId).spans).toHaveLength(80);
+  });
+
+  it("never reaches the 26th earlier run when the newest 25 have no matching spans", async () => {
+    const llm = await mockLlm({});
+    cleanup.push(llm.close);
+    const tb = await makeRoots({ llmUrl: llm.url });
+    cleanup.unshift(tb.close);
+    const [oldest] = await turn(tb, "outside the window", "old response");
+    const row = tb.roots.store.getRun(oldest)!;
+    const window = Array.from({ length: 25 }, () => ({ ...row, trace_id: hex(16) }));
+    vi.spyOn(tb.roots.store, "listRuns").mockReturnValue([...window, row]);
+    const metadata = vi.spyOn(tb.roots.store, "getSpans");
+    const evidence = (tb.roots.engine as any).sessionEvidence(check("session"), { traceId: hex(16), run: { ...row, started_ms: 0 }, spans: [] });
+    expect(evidence.spanIds).toEqual([]);
+    expect(metadata).toHaveBeenCalledTimes(25);
+    expect(metadata).not.toHaveBeenCalledWith(oldest, false);
+    expect(tb.roots.store.listRuns).toHaveBeenCalledWith(expect.objectContaining({ untilMs: -1 }));
+  });
+
   it("judges turn two over the whole conversation, and pins the finding to turn two", async () => {
     const llm = await mockLlm({ yesWhen: ["drop the constraint"] });
     cleanup.push(llm.close);
