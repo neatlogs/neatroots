@@ -91,6 +91,28 @@ describe("scope: session", () => {
     engine.live.delete(traceId);
   });
 
+  it("rejects a session decision when the same live run starts a newer end pass", async () => {
+    const llm = await mockLlm({});
+    cleanup.push(llm.close);
+    const tb = await makeRoots({ llmUrl: llm.url });
+    cleanup.unshift(tb.close);
+    const engine = tb.roots.engine as any;
+    const question = check("session");
+    const traceId = hex(16);
+    const run = { traceId, endPass: 1, traceEvidence: new Map() };
+    engine.live.set(traceId, run);
+    vi.spyOn(engine, "sessionEvidence").mockReturnValue({ text: "old end pass", spanIds: ["span"], ownSpanIds: ["span"] });
+    vi.spyOn(engine, "decideAndApply").mockImplementation(async (...args: any[]) => {
+      const current = args[7];
+      expect(await current()).toBe(true);
+      run.endPass++;
+      expect(engine.live.get(traceId)).toBe(run);
+      expect(await current()).toBe(false);
+    });
+    await engine.askSession(run, question, {}, { traceId, spans: [] });
+    engine.live.delete(traceId);
+  });
+
   it("hydrates only six matching earlier spans, rather than the entire earlier run", async () => {
     const llm = await mockLlm({});
     cleanup.push(llm.close);

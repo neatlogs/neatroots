@@ -592,9 +592,10 @@ export class Engine {
   }
 
   private async askSession(run: LiveRun, check: QuestionCheck, params: Record<string, string>, snap: TraceSnapshot): Promise<void> {
+    const pass = run.endPass;
     return askSession(run, check, snap, {
       evidence: () => this.sessionEvidence(check, snap),
-      decide: (ev) => this.decideAndApply(run, check, params, ev.text, ev.ownSpanIds, snap, null, () => this.live.get(run.traceId) === run),
+      decide: (ev) => this.decideAndApply(run, check, params, ev.text, ev.ownSpanIds, snap, null, () => this.live.get(run.traceId) === run && run.endPass === pass),
     });
   }
 
