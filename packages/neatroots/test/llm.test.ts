@@ -2,7 +2,7 @@ import http from "node:http";
 import type net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { defaultConfig, type RootsConfig } from "../src/config.js";
-import { LlmClient, LlmUnavailableError } from "../src/models/llm.js";
+import { LlmClient, LlmUnavailableError, preferredLocalModel, TIER_PREFERENCES } from "../src/models/llm.js";
 import { LlmDecisionBackend } from "../src/models/decision.js";
 import { strictSchema } from "../src/models/providers.js";
 import { applyExternalLlm } from "../src/server/api-models.js";
@@ -59,6 +59,31 @@ const claudeReply = (text: string, extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 const schema = { name: "x", schema: { type: "object", properties: { ok: { type: "boolean" }, tags: { type: "array", items: { type: "string" }, minItems: 1 } }, required: ["ok"] } };
+
+describe("automatic local model selection", () => {
+  it("recognizes Ollama's 3B default tag regardless of model-list order", () => {
+    const models = ["pythia-160m:latest", "tinyllama:latest", "llama3.2:latest"];
+    expect(preferredLocalModel(models, TIER_PREFERENCES.medium)).toBe("llama3.2:latest");
+    expect(preferredLocalModel(models, TIER_PREFERENCES.small)).toBe("llama3.2:latest");
+  });
+
+  it("keeps tier ordering and does not treat other sizes as the 3B default", () => {
+    expect(preferredLocalModel(["llama3.2:latest", "qwen3:4b"], TIER_PREFERENCES.medium)).toBe("qwen3:4b");
+    expect(preferredLocalModel(["llama3.2:1b", "pythia-160m:latest"], TIER_PREFERENCES.medium)).toBeUndefined();
+  });
+
+  it("reports an unmatched auto list instead of silently selecting its first model", async () => {
+    const srv = await mock((r) => r.path.endsWith("/models")
+      ? { json: { data: [{ id: "pythia-160m:latest" }, { id: "tinyllama:latest" }] } }
+      : { json: chatReply("ok") });
+    closers.push(srv.close);
+    const llm = new LlmClient(cfgWith((c) => Object.assign(c, { baseUrl: `${srv.url}/v1`, model: "auto" })));
+    const probe = await llm.probe(true);
+    expect(probe.ok).toBe(false);
+    expect(probe.error).toMatch(/no preferred local chat model installed/);
+    expect(srv.seen.map((r) => r.path)).toEqual(["/v1/models"]);
+  });
+});
 
 describe("strictSchema", () => {
   it("closes objects, drops unsupported constraints, and can require every property", () => {

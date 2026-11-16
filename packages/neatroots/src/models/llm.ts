@@ -64,6 +64,17 @@ export const TIER_PREFERENCES: Record<string, string[]> = {
   small: ["qwen3:4b", "llama3.2:3b", "gemma3:4b", "qwen3:1.7b", "gemma3:1b"],
 };
 
+/** Ollama's unqualified llama3.2 tag points to the same 3B model as llama3.2:3b. */
+const DEFAULT_TAG_EQUIVALENTS: Record<string, string> = { "llama3.2:3b": "llama3.2:latest" };
+
+export function preferredLocalModel(models: readonly string[], preferences: readonly string[]): string | undefined {
+  for (const preference of preferences) {
+    const match = models.find((model) => model.startsWith(preference) || model === DEFAULT_TAG_EQUIVALENTS[preference]);
+    if (match) return match;
+  }
+  return undefined;
+}
+
 export function hardwareTier(totalBytes = os.totalmem()): { tier: "large" | "medium" | "small"; memoryGb: number; description: string } {
   const gb = Math.round(totalBytes / 1024 ** 3);
   if (gb >= 32) return { tier: "large", memoryGb: gb, description: "8–14B instruct model, everything on device" };
@@ -200,7 +211,10 @@ class OpenAiTransport implements Transport {
         this.resolvedModel = want;
       } else if (this.t.local) {
         const prefs = TIER_PREFERENCES[hardwareTier().tier];
-        this.resolvedModel = prefs.map((p) => models.find((m) => m === p || m.startsWith(p + ":") || m.startsWith(p))).find(Boolean) ?? models[0];
+        this.resolvedModel = preferredLocalModel(models, prefs);
+        if (!this.resolvedModel && models.length) {
+          return (this.lastResult = { ok: false, models, error: "no preferred local chat model installed; choose a model in Settings > Models" });
+        }
       } else {
         this.resolvedModel = undefined;
         return (this.lastResult = { ok: false, models, error: "pick a model (neatroots llm models lists them)" });
