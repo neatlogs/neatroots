@@ -3,6 +3,7 @@ import type { RootsConfig } from "../config.js";
 import { isLocalUrl, LlmClient, LlmUnavailableError, type TokenLogprob } from "./llm.js";
 import { RedactionPatternError } from "../relay/redact.js";
 import { log } from "../util/log.js";
+import { trimSlash } from "../util/url.js";
 
 /**
  * Typed decisions: a state plus named questions in, probabilities out.
@@ -126,7 +127,7 @@ export class JevBackend implements DecisionBackend {
   }
 
   private url(path: string): string {
-    return this.ep.baseUrl().replace(/\/+$/, "") + path;
+    return trimSlash(this.ep.baseUrl()) + path;
   }
 
   /** Forget the cached liveness answer (after a restart or a settings change). */

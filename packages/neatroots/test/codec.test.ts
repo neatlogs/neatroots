@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeTraceJson, decodeTraceProtobuf, encodeTraceRequest } from "../src/otlp/codec.js";
+import { decodeLogsJson, decodeTraceJson, decodeTraceProtobuf, encodeTraceRequest } from "../src/otlp/codec.js";
 import type { ResourceSpansBatch } from "../src/otlp/types.js";
 import { batch, hex, s, span } from "./helpers.js";
 
@@ -115,6 +115,29 @@ describe("OTLP codec", () => {
     expect(() => decodeTraceJson(make("-1"))).toThrow(/invalid OTLP timestamp/);
     expect(() => decodeTraceJson(make("18446744073709551616"))).toThrow(/invalid OTLP timestamp/);
     expect(() => decodeTraceJson(make("9".repeat(100)))).toThrow(/invalid OTLP timestamp: 9{61}…/);
+  });
+
+  it("rejects attributes that aren't a list at every level instead of dropping them", () => {
+    const obj = { "gen_ai.request.model": "gpt-4o" };
+    const traces = (at: string) => {
+      const sp: any = { traceId: hex(16), spanId: hex(8), name: "op", startTimeUnixNano: "1", endTimeUnixNano: "2" };
+      const res: any = {};
+      const scope: any = { name: "x" };
+      if (at === "span") sp.attributes = obj;
+      if (at === "resource") res.attributes = obj;
+      if (at === "scope") scope.attributes = obj;
+      if (at === "event") sp.events = [{ name: "e", timeUnixNano: "1", attributes: obj }];
+      if (at === "link") sp.links = [{ traceId: hex(16), spanId: hex(8), attributes: obj }];
+      if (at === "kvlist") sp.attributes = [{ key: "m", value: { kvlistValue: { values: obj } } }];
+      return { resourceSpans: [{ resource: res, scopeSpans: [{ scope, spans: [sp] }] }] };
+    };
+    for (const at of ["span", "resource", "scope", "event", "link"]) expect(() => decodeTraceJson(traces(at)), at).toThrow(/attributes must be an array/);
+    expect(() => decodeTraceJson(traces("kvlist"))).toThrow(/kvlistValue\.values must be an array/);
+    const log = (attributes: unknown) => ({ resourceLogs: [{ scopeLogs: [{ logRecords: [{ timeUnixNano: "1", body: { stringValue: "hi" }, attributes }] }] }] });
+    expect(() => decodeLogsJson(log(obj))).toThrow(/attributes must be an array/);
+    // left out or null is still no attributes
+    expect(decodeTraceJson(traces("none"))[0].spans[0].attributes).toEqual([]);
+    expect(decodeLogsJson(log(null))[0].attributes).toEqual([]);
   });
 
   it("normalizes non-string status.message to string without dropping or throwing", () => {

@@ -131,3 +131,13 @@ export function attr(kvs: KeyValue[] | undefined, key: string): Plain | undefine
 export const STATUS_UNSET = 0;
 export const STATUS_OK = 1;
 export const STATUS_ERROR = 2;
+
+/** OTLP span flags: bit 8 says the parent's location was known at send time, bit 9 says it is remote. */
+export const FLAGS_CONTEXT_HAS_IS_REMOTE = 0x100;
+export const FLAGS_CONTEXT_IS_REMOTE = 0x200;
+
+/** A span whose parent lives in another process (the agent was called with a propagated traceparent). */
+export function hasRemoteParent(span: { flags?: number }): boolean {
+  const flags = span.flags ?? 0;
+  return (flags & FLAGS_CONTEXT_HAS_IS_REMOTE) !== 0 && (flags & FLAGS_CONTEXT_IS_REMOTE) !== 0;
+}

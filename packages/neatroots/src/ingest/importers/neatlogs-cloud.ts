@@ -63,7 +63,7 @@ export function cloudApiBase(ingest: string, override?: string): string {
   if (override) return trimSlash(override);
   try {
     const u = new URL(ingest);
-    if (u.hostname.endsWith("neatlogs.com")) u.hostname = u.hostname.replace(/(^|\.)ingest\./, "$1app.");
+    if (u.hostname === "neatlogs.com" || u.hostname.endsWith(".neatlogs.com")) u.hostname = u.hostname.replace(/(^|\.)ingest\./, "$1app.");
     return `${u.origin}/api/v1/public`;
   } catch {
     return "https://app.neatlogs.com/api/v1/public";
@@ -207,6 +207,11 @@ export function neatlogsCloudSource(base: () => string, auth: () => Promise<Clou
       }
       let failedInARow = 0;
       for (const id of ids) {
+        const kept = o.kept?.(id);
+        if (kept) {
+          yield { sourceId: id, batches: [], kept };
+          continue;
+        }
         let read: { nodes: SpanNode[]; workflow: string };
         try {
           read = await fetchCloudTrace(b, k, id, o.signal);

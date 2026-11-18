@@ -83,10 +83,10 @@ export function registerDataCommands(program: Command): void {
     process.stdout.write(`Importing from ${source.label}`);
     for (;;) {
       await new Promise((r) => setTimeout(r, 1000));
-      const { jobs } = await api<{ jobs: { id: string; state: string; traces: number; spans: number; failed: number; last_error: string | null }[] }>(p, "/api/imports");
+      const { jobs } = await api<{ jobs: { id: string; state: string; traces: number; spans: number; failed: number; skipped: number; last_error: string | null }[] }>(p, "/api/imports");
       const j = jobs.find((x) => x.id === job.id);
       if (!j) throw new Error("the import disappeared");
-      process.stdout.write(`\rImporting from ${source.label}: ${j.traces} runs, ${j.spans} spans${j.failed ? `, ${j.failed} failed` : ""}   `);
+      process.stdout.write(`\rImporting from ${source.label}: ${j.traces} runs, ${j.spans} spans${j.skipped ? `, ${j.skipped} already here` : ""}${j.failed ? `, ${j.failed} failed` : ""}   `);
       if (j.state === "running") continue;
       console.log();
       if (j.state === "failed") throw new Error(j.last_error ?? "import failed");

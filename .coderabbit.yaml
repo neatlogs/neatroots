@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit reviews each pull request before a maintainer does (CONTRIBUTING.md). The conventions
+# below come from AGENTS.md.
+language: en-US
+reviews:
+  profile: chill
+  # Never approve on its own: a maintainer's approval is the one that counts.
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!**/dist/**"
+    - "!pnpm-lock.yaml"
+    - "!**/package-lock.json"
+  path_instructions:
+    - path: "**/*"
+      instructions: >-
+        The product name is always lowercase: neatroots (code identifiers follow their language's
+        conventions). Keep files under 500 lines. Nothing may leave the user's machine unless they
+        turned it on (cloud forward, Jev cloud, a hosted LLM): flag any new network call, telemetry or
+        default that sends data.
+    - path: "packages/neatroots/src/**"
+      instructions: >-
+        The server logs to stderr only (stdout belongs to `neatroots mcp`). Keep /v1/traces and the
+        doctor read-back compatible with what the public Neatlogs SDKs send, and stored spans lossless.
+        better-sqlite3 is synchronous: flag queries that can scan a whole table on a hot path (ingest,
+        search, steering) and any unbounded work on the event loop. Code, prompts and schemas must not
+        come from Neatlogs' internal services.
+    - path: "packages/ui/src/**"
+      instructions: >-
+        Pages use the shared primitives (ListPageLayout and ListPageTable for lists, DetailLayout with a
+        property rail, Panel, Sheet, EmptyState). Tailwind v4 semantic tokens only, no raw colors.
+        Hugeicons only through components/ui/icon.tsx. StatusPill for state, NeatBadge for categories,
+        one primary (default) Button per view, PendingButton for actions that run, Verb + Noun labels.
+        Rows in a list share one fixed height; anything that can grow scrolls inside a fixed-height box.
+        The primitives in components/{ui,neat-ui,list-page,detail,kpi} are shared with the Neatlogs
+        app: don't restyle them here.
+    - path: "packages/ui/e2e/**"
+      instructions: >-
+        Tests must pass when repeated (--repeat-each=3), so none may depend on state another test changes.
+    - path: "packages/neatroots/library/**"
+      instructions: >-
+        Yes/no questions are phrased as failures.
+chat:
+  auto_reply: true
