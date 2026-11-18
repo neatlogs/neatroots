@@ -41,12 +41,22 @@ export class Roots {
   readonly replays: Replays;
   readonly chats: AgentChats;
   private sweeper?: NodeJS.Timeout;
+  private quietSweeper?: NodeJS.Timeout;
+  /** The first quiet-run sweep's claim pass; resumeUnfinished waits on it so a run is not rechecked twice at startup. */
+  private initialQuiet?: Promise<void>;
+  /** The retention sweep in progress, if any. */
+  private sweeping?: Promise<void>;
+  /** Retention starts a sweep; set by startRetention(). */
+  private retentionRun?: () => void;
+  /** A sweep is waiting for the search index's run ids, and the rebuild filling them in has finished. */
+  private retentionWaiting = false;
+  private searchSettled = false;
   /** When a coding agent last called neatroots over MCP. */
   mcpSeenMs: number | null = null;
   /** The run and span the app has in focus, for the MCP get_current_run tool. */
   focus: { trace_id: string; span_id: string | null; at: number } | null = null;
   /** Cloud pushes a coding agent asked for, waiting for the user to confirm in the app. */
-  readonly pushes = new Map<string, { id: string; trace_ids: string[]; requested_by: string; created_ms: number; status: "pending" | "sent" | "failed" | "declined"; forward_id?: string; error?: string }>();
+  readonly pushes = new Map<string, { id: string; trace_ids: string[]; requested_by: string; created_ms: number; status: "pending" | "sending" | "sent" | "failed" | "declined"; forward_id?: string; error?: string }>();
 
   constructor(opts: RootsOptions = {}) {
     this.home = opts.home ?? rootsHome();
@@ -67,13 +77,19 @@ export class Roots {
     this.imports = new ImportJobs(this);
     this.replays = new Replays(this);
     this.chats = new AgentChats(this);
-    this.store.reindexSearch((n, ok) => (ok ? n && log.info(`search now covers whole inputs and outputs (${n} spans re-indexed)`) : log.warn("couldn't finish re-indexing search; it starts over at the next start")));
-    this.store.rebuildSearchIds((n, ready) => (ready ? n && log.info(`search index ready for fast lookups (${n} rows)`) : log.warn("search index lookups couldn't be prepared; search works but is slower on a large store")));
+    this.store.maintainSearch(
+      (n, ready) => {
+        if (ready) n && log.info(`search index ready for fast lookups (${n} rows)`);
+        else log.warn("search index lookups couldn't be prepared; search works but is slower on a large store");
+        this.searchIdsSettled();
+      },
+      (n, ok) => (ok ? n && log.info(`search now covers whole inputs and outputs (${n} spans re-indexed)`) : log.warn("couldn't finish re-indexing search; it starts over at the next start")),
+    );
     if (!opts.noEngine) {
       const engine = new Engine(this, this.llm, this.decisions, this.checks, this.steering);
       this.engine = engine;
       // Finish check work a previous process accepted but didn't complete (a restart or a crash).
-      setTimeout(() => void resumeUnfinished(engine, this).catch((e: Error) => log.warn(`couldn't resume checks: ${e.message}`)), 1500).unref();
+      setTimeout(() => void (this.initialQuiet ?? Promise.resolve()).then(() => resumeUnfinished(engine, this)).catch((e: Error) => log.warn(`couldn't resume checks: ${e.message}`)), 1500).unref();
     }
   }
 
@@ -90,17 +106,75 @@ export class Roots {
 
   /** Applies retention now and every hour. */
   startRetention(): void {
+    // The sweep works a few runs at a time between turns of the event loop, so the server keeps
+    // answering during a large trim (#429). One sweep at a time: an hourly one waits for the last.
     const run = () => {
-      try {
-        const removed = this.store.sweep(this.config.retention.days, this.config.retention.maxGb * 1024 ** 3);
-        if (removed) log.info(`retention removed ${removed} old runs`);
-      } catch (err) {
-        log.warn(`retention failed: ${(err as Error).message}`);
+      // Until the search index's run ids are filled in (the first start after an update), a
+      // trim could only delete and size runs by scanning the whole index in one go. Wait for the
+      // rebuild, which takes seconds to minutes, and sweep as soon as it finishes or gives up.
+      if (!this.store.searchReady && !this.searchSettled) {
+        if (!this.retentionWaiting) log.info("retention waits until the search index is ready (the first start after an update)");
+        this.retentionWaiting = true;
+        return;
       }
+      if (this.sweeping) {
+        log.info("retention: the last sweep is still running, so this hour's is skipped");
+        return;
+      }
+      this.sweeping = this.store
+        .sweepAsync(this.config.retention.days, this.config.retention.maxGb * 1024 ** 3)
+        .then((removed) => {
+          if (removed) log.info(`retention removed ${removed} old runs`);
+        })
+        .catch((err: Error) => {
+          if (this.store.db.open) log.warn(`retention failed: ${err.message}`);
+        })
+        .finally(() => {
+          this.sweeping = undefined;
+        });
     };
+    this.retentionRun = run;
+    // Files a crash during ingest left behind; only a crash makes them, so once at startup is enough.
+    try {
+      const orphans = this.store.reclaimOrphanBlobs();
+      if (orphans.files) log.info(`removed ${orphans.files} payload files no run uses (${Math.round(orphans.bytes / 1024)} KB)`);
+    } catch (err) {
+      log.warn(`payload cleanup failed: ${(err as Error).message}`);
+    }
     run();
     this.sweeper = setInterval(run, 3_600_000);
     this.sweeper.unref();
+    // Runs whose end never arrives (agent died, root span lost) get ended once they go quiet (issue #569).
+    const quiet = async () => {
+      try {
+        await this.engine?.endQuietRuns();
+      } catch (err) {
+        log.warn(`quiet-run sweep failed: ${(err as Error).message}`);
+      }
+    };
+    // Claim the first sweep's quiet runs up front - one fast database pass - so startup recovery
+    // (resumeUnfinished) isn't held behind one model recheck per old quiet run (issue #673). The
+    // claimed runs are rechecked in the background; recovery leaves them to that loop.
+    this.initialQuiet = Promise.resolve().then(() => {
+      if (!this.engine) return;
+      try {
+        const claimed = this.engine.claimQuietRuns();
+        if (claimed.length)
+          void this.engine.recheckClaimedQuietRuns(claimed).catch((err: Error) => log.warn(`quiet-run recheck failed: ${err.message}`));
+      } catch (err) {
+        log.warn(`quiet-run sweep failed: ${(err as Error).message}`);
+      }
+    });
+    this.quietSweeper = setInterval(quiet, 60_000);
+    this.quietSweeper.unref();
+  }
+
+  /** The search index's run ids are filled in, or couldn't be: run a sweep that was waiting for them. */
+  private searchIdsSettled(): void {
+    this.searchSettled = true;
+    if (!this.retentionWaiting) return;
+    this.retentionWaiting = false;
+    this.retentionRun?.();
   }
 
   /** Installs (first run) and starts Laya in the background; checks use the LLM until it is ready. */
@@ -112,6 +186,8 @@ export class Roots {
 
   close(): void {
     clearInterval(this.sweeper);
+    this.chats.close();
+    clearInterval(this.quietSweeper);
     this.laya.stop();
     this.store.close();
   }

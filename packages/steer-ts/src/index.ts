@@ -13,6 +13,7 @@
  */
 
 import { SteeredRequest } from "./request.js";
+import { boundedFlush } from "./flush.js";
 
 export const GUIDANCE_OPEN = "<neatroots-guidance>";
 export const GUIDANCE_CLOSE = "</neatroots-guidance>";
@@ -34,9 +35,16 @@ export class NeatrootsHalt extends Error {
 
 const LOCAL = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
+/** `u` without its trailing slashes. A loop: `/\/+$/` is quadratic on a long run of slashes. */
+function trimSlash(u: string): string {
+  let end = u.length;
+  while (end > 0 && u[end - 1] === "/") end--;
+  return u.slice(0, end);
+}
+
 function defaultUrl(): string {
   const env = typeof process !== "undefined" ? process.env : ({} as Record<string, string | undefined>);
-  if (env.NEATROOTS_URL) return env.NEATROOTS_URL.replace(/\/+$/, "");
+  if (env.NEATROOTS_URL) return trimSlash(env.NEATROOTS_URL);
   if (env.NEATLOGS_ENDPOINT) {
     try {
       const u = new URL(env.NEATLOGS_ENDPOINT);
@@ -76,7 +84,7 @@ const state: State = {
  * supplies the current trace id yourself when you do not use the Neatlogs SDK's context.
  */
 export function configure(opts: { url?: string; disabled?: boolean; traceId?: () => string | undefined; neatlogs?: unknown }): void {
-  if (opts.url) state.url = opts.url.replace(/\/+$/, "");
+  if (opts.url) state.url = trimSlash(opts.url);
   if (opts.traceId) state.traceIdProvider = opts.traceId;
   // Passing the app's own `neatlogs` module avoids a second copy of the SDK
   // (ESM vs CommonJS, or a linked install) that would not see the active span.
@@ -187,13 +195,11 @@ export async function currentTrace(): Promise<[string | undefined, string | unde
   return [undefined, undefined];
 }
 
+/** Pushes finished spans to neatroots now, so gate mode and self-checks see the latest step (at most FLUSH_TIMEOUT_MS). */
 async function flushSdk(): Promise<void> {
   const nl = await neatlogs();
-  try {
-    await nl?.flush?.();
-  } catch {
-    /* ignore */
-  }
+  const flush = nl?.flush;
+  if (nl && flush) await boundedFlush(nl, () => flush.call(nl));
 }
 
 async function record(note: Note): Promise<void> {

@@ -1,5 +1,5 @@
 import type { RuleCheck } from "./types.js";
-import { finalOutput, selectSpans, type SpanInfo, type TraceSnapshot } from "../engine/trace.js";
+import { finalOutput, runRoot, selectSpans, type SpanInfo, type TraceSnapshot } from "../engine/trace.js";
 import { preview } from "../semantics/view.js";
 import { log } from "../util/log.js";
 import { testWithin } from "../util/regex.js";
@@ -15,6 +15,11 @@ const TIMED_OUT = Symbol("timed out");
 export interface RuleHit {
   /** Whether the condition holds now, looking at the latest spans. */
   firing: boolean;
+  /**
+   * The rule never held: a requires_before whose calls all had their prerequisite. Returned only so
+   * a live finding raised before a late span arrived can resolve; callers that judge a whole run skip it.
+   */
+  satisfied?: boolean;
   evidenceSpanIds: string[];
   params: Record<string, string>;
   title?: string;
@@ -222,11 +227,20 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       let hits: SpanInfo[];
       try {
         hits = selectSpans(t.spans, r.span).filter((s) => {
-          const v = r.field === "input" ? s.input : r.field === "output" ? s.output : r.field === "error" ? s.error : s.name;
+          const v =
+            r.field === "input"
+              ? s.input
+              : r.field === "output"
+                ? s.output
+                : r.field === "error"
+                  ? s.error
+                  : r.field === "finish_reason"
+                    ? s.finishReason
+                    : s.name;
           if (v === undefined || v === null) return false;
           const texts = matchTexts(v);
           if (!untrusted) return texts.some(test);
-          const memo = `${key}\u0000${t.run?.trace_id ?? ""}\u0000${s.id}\u0000${r.field}\u0000${texts.reduce((n, x) => n + x.length, 0)}`;
+          const memo = `${key}\u0000${t.run?.trace_id ?? ""}\u0000${s.id}\u0000${r.field}\u0000${texts.reduce((n, x) => n + x.length, 0)}\u0000${r.field === "finish_reason" ? jsonKey(v) : ""}`;
           const known = matchMemo.get(memo);
           if (known !== undefined) return known;
           const found = texts.some(test);
@@ -251,7 +265,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
       const missed = guarded.filter((g) => !needed.some((n) => n.id !== g.id && n.startMs <= g.startMs));
       // Spans can arrive out of order: once a late prerequisite covers every call, say so,
       // so a finding raised before it arrived resolves.
-      if (!missed.length) return { firing: false, evidenceSpanIds: guarded.map((s) => s.id), params: {} };
+      if (!missed.length) return { firing: false, satisfied: true, evidenceSpanIds: guarded.map((s) => s.id), params: {} };
       const first = missed[0];
       return {
         firing: true,
@@ -339,7 +353,7 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean,
     }
     case "run_end": {
       if (!atEnd || !t.run) return null;
-      const root = t.spans.find((s) => !s.parentId);
+      const root = runRoot(t.spans);
       if (r.when === "error" && t.run.status === "error") {
         return { firing: true, evidenceSpanIds: root ? [root.id] : [], params: { error: clip(root?.error ?? "error", 200) } };
       }

@@ -1,3 +1,4 @@
+import { pipeChild } from "./pipe.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -5,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import type { Roots } from "../core.js";
 import { findClient, clientStatus, listClients } from "../mcp/clients.js";
+import { READ_ONLY_TOOL_NAMES } from "../mcp/server.js";
 import { log } from "../util/log.js";
 
 // Claude Code and Codex inside the app. Each turn runs the agent's own CLI headless in the
@@ -46,7 +48,14 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
 CREATE TABLE IF NOT EXISTS chat_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY (session_id, seq));
 `;
 
-const READ_TOOLS = ["Read", "Grep", "Glob", "LS", "TodoWrite", "mcp__neatroots__*", "mcp__neatroots_app__*"];
+const READ_TOOLS = [
+  "Read",
+  "Grep",
+  "Glob",
+  "LS",
+  "TodoWrite",
+  ...["neatroots", "neatroots_app"].flatMap((server) => READ_ONLY_TOOL_NAMES.map((tool) => `mcp__${server}__${tool}`)),
+];
 const EDIT_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
 /** neatroots' MCP rerun runs the project's registered agent command, so it counts as a command. */
 const RERUN_TOOLS = ["mcp__neatroots__rerun", "mcp__neatroots_app__rerun"];
@@ -156,6 +165,8 @@ function endGroup(p: ChildProcess): void {
 export class AgentChats {
   private readonly running = new Map<string, ChildProcess>();
   private readonly stopping = new Set<string>();
+  /** Set when neatroots stops: a killed agent's late output is ignored (the store is closed). */
+  private closed = false;
 
   constructor(private readonly roots: Roots) {
     roots.store.db.exec(SCHEMA);
@@ -248,6 +259,26 @@ export class AgentChats {
   }
 
   /**
+   * Ends every agent still answering, and what it started, when neatroots stops (Ctrl-C, the
+   * service stopping, the terminal closing). neatroots exits right after, so endGroup's timer would
+   * never fire: give them a moment to exit on SIGTERM, then SIGKILL whatever is left.
+   */
+  close(): void {
+    this.closed = true;
+    const groups = [...this.running.values()];
+    this.running.clear();
+    if (process.platform === "win32") {
+      // No process groups on Windows: end each agent's whole process tree instead.
+      for (const p of groups) if (p.pid) spawnSync("taskkill", ["/pid", String(p.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+      return;
+    }
+    for (const p of groups) signalGroup(p, "SIGTERM");
+    const nap = new Int32Array(new SharedArrayBuffer(4));
+    for (let waited = 0; waited < 1000 && groups.some(groupAlive); waited += 50) Atomics.wait(nap, 0, 0, 50);
+    for (const p of groups) if (groupAlive(p)) signalGroup(p, "SIGKILL");
+  }
+
+  /**
    * The turn is over (the agent process closed). Its result event arrives a moment earlier, so an
    * open chat that refetched on the result can still have read "running"; this tells it to look again.
    */
@@ -282,39 +313,25 @@ export class AgentChats {
     log.debug(`chat ${id}: ${bin} ${args.slice(0, -1).join(" ")}`);
     const child = spawn(bin, args, { cwd: s.cwd, env: { ...process.env, NEATLOGS_ENDPOINT: `http://localhost:${this.roots.config.port}` }, stdio: ["ignore", "pipe", "pipe"], detached: true });
     this.running.set(id, child);
-    let buf = "";
-    let stderr = "";
     let sawResult = false;
-    child.stdout!.on("data", (b: Buffer) => {
-      if (!this.get(id)) return;
-      buf += b.toString();
-      let nl: number;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line) continue;
-        try {
-          const ev = JSON.parse(line) as Record<string, unknown>;
-          if ((s.agent === "claude" ? this.onClaude(id, ev) : this.onCodex(id, ev)) === "result") sawResult = true;
-        } catch {
-          /* not an event line */
-        }
-      }
-    });
-    child.stderr!.on("data", (b: Buffer) => {
-      stderr = (stderr + b.toString()).slice(-4000);
+    const tail = pipeChild(child, {
+      active: () => !this.closed && !!this.get(id),
+      onEvent: (ev) => {
+        if ((s.agent === "claude" ? this.onClaude(id, ev) : this.onCodex(id, ev)) === "result") sawResult = true;
+      },
     });
     await new Promise<void>((resolve) => {
       let done = false;
       const finish = (code: number | null, signal: NodeJS.Signals | null) => {
         if (done) return;
         done = true;
+        if (this.closed) return resolve();
         this.running.delete(id);
         // The turn is over: anything the CLI started and left running goes with it.
         endGroup(child);
         const stopped = this.stopping.delete(id) || !!signal;
         if (stopped) this.emit(id, { kind: "status", text: "Stopped" });
-        else if (code !== 0 && !sawResult) this.emit(id, { kind: "error", text: this.explainFailure(s.agent, stderr) });
+        else if (code !== 0 && !sawResult) this.emit(id, { kind: "error", text: this.explainFailure(s.agent, tail()) });
         this.ended(id, code === 0 || stopped || sawResult ? "idle" : "error");
         resolve();
       };
@@ -325,6 +342,7 @@ export class AgentChats {
       child.on("error", (err) => {
         if (done) return;
         done = true;
+        if (this.closed) return resolve();
         this.running.delete(id);
         this.stopping.delete(id);
         this.emit(id, { kind: "error", text: err.message });
@@ -369,7 +387,9 @@ export class AgentChats {
   }
 
   private codexArgs(s: ChatSession, prompt: string): { cmd: string; args: string[] } {
-    const mode = s.allow_edits || s.allow_commands ? "workspace-write" : "read-only";
+    // Codex has one workspace sandbox switch, not separate edit and shell permissions. Never let
+    // either permission silently grant the other; both must be on before it can write or execute.
+    const mode = s.allow_edits && s.allow_commands ? "workspace-write" : "read-only";
     const args = ["exec"];
     // `codex exec resume` rejects --sandbox; every codex takes the same setting as a -c override.
     if (s.agent_session_id) args.push("resume", s.agent_session_id, "--json", "--skip-git-repo-check", "-c", `sandbox_mode="${mode}"`);

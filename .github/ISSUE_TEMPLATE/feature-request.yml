@@ -1,0 +1,29 @@
+name: Feature request
+description: Something neatroots should do
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem first. A maintainer labels the issue `accepted` once the approach is agreed; please wait for that before opening a pull request. Ideas you want to talk through can start in [Discussions](https://github.com/neatlogs/neatroots/discussions).
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like neatroots to do
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+  - type: checkboxes
+    id: implement
+    attributes:
+      label: Contributing
+      options:
+        - label: I'd like to implement this once it's accepted

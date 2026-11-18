@@ -1,6 +1,6 @@
 {
   "name": "@neatlogs/neatroots",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "description": "Local, private checks for AI agents while they run. Collects traces from the public Neatlogs SDKs, checks them with local models, steers the agent and serves findings over MCP.",
   "license": "Apache-2.0",
   "type": "module",
@@ -41,7 +41,7 @@
     "hono": "^4.13.13",
     "protobufjs": "^8.8.0",
     "yaml": "^2.9.1",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",

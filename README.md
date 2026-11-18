@@ -290,13 +290,15 @@ pnpm --filter @neatlogs/neatroots-ui e2e     # UI end-to-end tests (Playwright; 
 (cd python/neatroots-steer && python -m pytest)
 pnpm typecheck                # all pnpm workspaces
 sh examples/run-all.sh        # agent and HTTP API examples against a running neatroots; browser, import-files, refund-agent, samples by hand
+node scripts/perf-smoke.mjs   # performance smoke test on a generated store (runs nightly)
 pnpm --filter @neatlogs/neatroots dev        # server with reload on 4100
 pnpm --filter @neatlogs/neatroots-ui dev     # UI on 5173 (set NEATROOTS_DEV_ORIGIN=http://localhost:5173 on the server)
 ```
 
 neatroots is built from public inputs: the public Neatlogs SDKs and their telemetry schema,
 OpenTelemetry, MCP, publicly documented APIs, and openly licensed models. Issues and pull requests
-are welcome; [AGENTS.md](AGENTS.md) has the conventions.
+are welcome: [CONTRIBUTING.md](CONTRIBUTING.md) says how, and [AGENTS.md](AGENTS.md) has the
+conventions. Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes.
 
 neatroots is maintained by [@akshay-neatlogs](https://github.com/akshay-neatlogs), with
 [@harshk-neatlogs](https://github.com/harshk-neatlogs) and [@taranum-neatlogs](https://github.com/taranum-neatlogs)

@@ -7,7 +7,7 @@ import { hexId, toBatches, toNs, type SpanNode } from "./build.js";
 
 export interface HttpTraceNode {
   name: string;
-  project?: string;
+  project?: string | number;
   kind?: string;
   input?: unknown;
   output?: unknown;
@@ -28,11 +28,11 @@ export interface HttpTraceNode {
   attributes?: Record<string, unknown>;
   logs?: { level?: string; message: string; timestamp?: string }[];
   children?: HttpTraceNode[];
-  session_id?: string;
-  sessionId?: string;
-  end_user_id?: string;
-  endUserId?: string;
-  user_id?: string;
+  session_id?: string | number;
+  sessionId?: string | number;
+  end_user_id?: string | number;
+  endUserId?: string | number;
+  user_id?: string | number;
   tags?: string[];
 }
 
@@ -49,6 +49,12 @@ export class HttpTraceError extends Error {
 // Real traces are shallow; cap well above any genuine depth so a pathological
 // payload becomes a clean validation error instead of a crash.
 const MAX_DEPTH = 256;
+
+// Fields the converter stores as text. Anything else (a JS Error sent as `error: err` arrives as {})
+// would fail the SQLite bind with a 500 or be stored as "[object Object]".
+const STRING_FIELDS = ["kind", "model", "provider", "tool_name", "error"] as const;
+// IDs and the project name may also be finite numbers (integer IDs are common); they are stored as their string form.
+const ID_FIELDS = ["project", "session_id", "sessionId", "end_user_id", "endUserId", "user_id"] as const;
 
 function validate(node: unknown, path: string, errors: Record<string, string>, depth = 0): void {
   if (!node || typeof node !== "object" || Array.isArray(node)) {
@@ -77,7 +83,11 @@ function validate(node: unknown, path: string, errors: Record<string, string>, d
   if (n.score !== undefined && (typeof n.score !== "number" || !Number.isFinite(n.score))) errors[`${path}score`] = "must be a finite number";
   if (n.duration_ms !== undefined && (typeof n.duration_ms !== "number" || !Number.isFinite(n.duration_ms))) errors[`${path}duration_ms`] = "must be a finite number";
   if (n.status !== undefined && !["OK", "ERROR", "ok", "error"].includes(String(n.status))) errors[`${path}status`] = "must be OK or ERROR";
-  if (n.kind !== undefined && typeof n.kind !== "string") errors[`${path}kind`] = "must be a string";
+  for (const k of STRING_FIELDS) if (n[k] !== undefined && n[k] !== null && typeof n[k] !== "string") errors[`${path}${k}`] = "must be a string";
+  for (const k of ID_FIELDS) {
+    const v: unknown = n[k];
+    if (v !== undefined && v !== null && typeof v !== "string" && !(typeof v === "number" && Number.isFinite(v))) errors[`${path}${k}`] = "must be a string or a finite number";
+  }
   if (n.tags !== undefined && (!Array.isArray(n.tags) || n.tags.some((t) => typeof t !== "string"))) errors[`${path}tags`] = "must be an array of strings";
   if (n.logs !== undefined) {
     if (!Array.isArray(n.logs)) errors[`${path}logs`] = "must be an array";
@@ -105,6 +115,10 @@ function inferKind(n: HttpTraceNode, isRoot: boolean): string {
  * stableIds: ids derived from the record itself (file imports), so importing the same file again
  * updates its runs instead of adding copies. Live traffic gets random ids.
  */
+function idString(v: string | number | null | undefined): string | undefined {
+  return v === undefined || v === null ? undefined : String(v);
+}
+
 export function httpTraceToBatches(body: unknown, fallbackProject = "http", opts: { stableIds?: boolean } = {}): { batches: ResourceSpansBatch[]; traceId: string; spans: number } {
   const errors: Record<string, string> = {};
   validate(body, "", errors);
@@ -114,8 +128,8 @@ export function httpTraceToBatches(body: unknown, fallbackProject = "http", opts
   const traceId = seed ? hexId(seed, 16) : crypto.randomBytes(16).toString("hex");
   let spanNo = 0;
   const nodes: SpanNode[] = [];
-  const sessionId = root.session_id ?? root.sessionId;
-  const userId = root.end_user_id ?? root.endUserId ?? root.user_id;
+  const sessionId = idString(root.session_id ?? root.sessionId);
+  const userId = idString(root.end_user_id ?? root.endUserId ?? root.user_id);
   const nowNs = BigInt(Date.now()) * 1_000_000n;
 
   // Returns the node's start and end, so a parent without times can span its children. `fromTrace` says
@@ -191,6 +205,6 @@ export function httpTraceToBatches(body: unknown, fallbackProject = "http", opts
   };
   walk(root, null, nowNs, false);
   // SpanNode times are numbers in ns here; buildSpan reads values above 1e17 as ns.
-  const batches = toBatches(nodes, { project: root.project ?? fallbackProject, source: "http" });
+  const batches = toBatches(nodes, { project: idString(root.project) ?? fallbackProject, source: "http" });
   return { batches, traceId, spans: nodes.length };
 }

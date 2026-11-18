@@ -1,0 +1,45 @@
+name: labeler
+
+# Labels pull requests: an area from the paths they change (.github/labeler.yml) and a type from the
+# title's prefix (fix → bug, feat → enhancement, docs → documentation, perf → performance).
+# pull_request_target with no checkout of the pull request: the write token never runs its code.
+# From 2026-11-02 GitHub blocks pull_request_target in public repositories unless an Actions policy
+# allows it. The policy (Settings → Actions → Policies) allows it for this file only.
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# A newer push cancels a run that hasn't finished, since it labels from the same files and title. An edit
+# keeps its own run: only the edit's event says what the title was before, which the type step needs.
+concurrency:
+  group: labeler-${{ github.event.pull_request.number }}-${{ github.event.action == 'edited' && github.run_id || 'push' }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/labeler@v5
+        with:
+          # Area labels follow the paths: one the pull request no longer touches is removed.
+          sync-labels: true
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const types = { fix: "bug", feat: "enhancement", docs: "documentation", perf: "performance" };
+            const typeOf = (title) => types[(title.match(/^(\w+)(?:\([^)]*\))?!?:/) || [])[1]?.toLowerCase()];
+            const pr = context.payload.pull_request;
+            const label = typeOf(pr.title);
+            // A retitled pull request loses the type its old prefix gave it; labels set by hand stay.
+            const before = context.payload.changes?.title?.from;
+            const old = before === undefined ? undefined : typeOf(before);
+            if (old && old !== label && pr.labels.some((l) => l.name === old)) {
+              await github.rest.issues.removeLabel({ ...context.repo, issue_number: pr.number, name: old });
+            }
+            if (label && !pr.labels.some((l) => l.name === label)) {
+              await github.rest.issues.addLabels({ ...context.repo, issue_number: pr.number, labels: [label] });
+            }

@@ -85,4 +85,6 @@ checked and replayed on your machine:
 
 neatroots fetches each trace's export and the full input, output and error of every span, and stores
 them like any other run (marked with where they came from). Imported runs are never sent back
-automatically.
+automatically. A trace that is already a run here (one you sent to Cloud from this machine) isn't
+imported over it: the local run, unredacted and complete, is kept. A trace imported before is
+imported again, so it picks up spans Cloud received since.

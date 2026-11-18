@@ -29,3 +29,8 @@ export async function body<T = Record<string, unknown>>(c: Context): Promise<T> 
   if (!v || typeof v !== "object" || Array.isArray(v)) throw new HTTPException(400, { message: "the request body must be a JSON object" });
   return v as T;
 }
+
+/** True for a non-empty array of non-empty strings, the only trace_ids shape a route should accept. */
+export function isTraceIds(v: unknown): v is string[] {
+  return Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === "string" && x.length > 0);
+}

@@ -1,0 +1,34 @@
+name: stale
+
+# Only issues and pull requests labeled waiting-on-author: a reminder after 14 days without a reply,
+# closed 7 days later. Everything else, including untriaged issues, is left alone.
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  # actions: write lets actions/stale keep its progress in the Actions cache between runs.
+  actions: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/stale@v9
+        with:
+          only-labels: waiting-on-author
+          days-before-stale: 14
+          days-before-close: 7
+          stale-issue-label: stale
+          stale-pr-label: stale
+          exempt-issue-labels: accepted,security
+          exempt-pr-labels: accepted,security
+          remove-stale-when-updated: true
+          operations-per-run: 100
+          stale-issue-message: This has been waiting on its author for two weeks. It will be closed in a week unless there's a reply.
+          stale-pr-message: This has been waiting on its author for two weeks. It will be closed in a week unless it's updated.
+          close-issue-message: Closed after three weeks without a reply. Comment if you'd like it reopened.
+          close-pr-message: Closed after three weeks without an update. Reopen it when you're ready to continue.

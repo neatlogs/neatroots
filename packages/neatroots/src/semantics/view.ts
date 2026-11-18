@@ -51,6 +51,7 @@ export interface SpanView {
   input?: Plain;
   output?: Plain;
   error?: string;
+  finishReason?: string;
   interrupted?: boolean;
   terminationReason?: string;
   /** Tool calls the LLM asked for (LLM spans only). */
@@ -248,6 +249,29 @@ function llmToolCalls(attrs: Attrs): SpanView["toolCalls"] {
   }));
 }
 
+function finishReasonOf(attrs: Attrs): string | undefined {
+  const sources: (Plain | undefined)[] = [
+    attrs["neatlogs.llm.finish_reason"],
+    attrs["gen_ai.response.finish_reasons"],
+    attrs["llm.finish_reason"],
+    attrs["ai.response.finishReason"],
+    attrs["gen_ai.response.finish_reasons.0"],
+  ];
+  for (const src of sources) {
+    if (src === undefined || src === null || src === "") continue;
+    const parsed = maybeJson(src);
+    if (Array.isArray(parsed)) {
+      if (!parsed.length) continue;
+      const s = str(parsed[0]);
+      if (s) return s;
+      continue;
+    }
+    const s = str(parsed);
+    if (s) return s;
+  }
+  return undefined;
+}
+
 function exceptionMessage(span: OtlpSpan): string | undefined {
   for (const e of span.events) {
     if (e.name !== "exception") continue;
@@ -276,6 +300,7 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
   view.provider = str(first(attrs, ["neatlogs.llm.provider", "neatlogs.provider", "gen_ai.system", "gen_ai.provider.name", "llm.provider", "ai.model.provider"]));
   view.promptTokens = int(first(attrs, ["neatlogs.llm.token_count.prompt", "gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens", "llm.token_count.prompt", "ai.usage.promptTokens", "ai.usage.inputTokens"]));
   view.completionTokens = int(first(attrs, ["neatlogs.llm.token_count.completion", "gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens", "llm.token_count.completion", "ai.usage.completionTokens", "ai.usage.outputTokens"]));
+  view.finishReason = finishReasonOf(attrs);
   view.totalTokens =
     int(first(attrs, ["neatlogs.llm.token_count.total", "gen_ai.usage.total_tokens", "llm.token_count.total"])) ??
     (view.promptTokens !== undefined || view.completionTokens !== undefined

@@ -2,7 +2,7 @@ import type { Hono } from "hono";
 import YAML from "yaml";
 import type { Roots } from "../core.js";
 import { AnyCheck, isQuestion, isRule, type Check } from "../checks/types.js";
-import { parseChecks, checkDirState } from "../checks/registry.js";
+import { parseChecks, checkDirState, CheckRemoveConflict } from "../checks/registry.js";
 import { checkWarnings } from "../checks/lint.js";
 import { draftCheckFromConcern } from "../engine/assist.js";
 import { err, body } from "./util.js";
@@ -91,7 +91,19 @@ export function mountChecksApi(app: Hono, roots: Roots): void {
     return c.json({ ok: true });
   });
 
-  app.delete("/api/checks/:id", (c) => (roots.checks.remove(c.req.param("id")) ? c.json({ ok: true }) : err(c, 400, "only user, project or planner checks can be deleted; disable library checks instead")));
+  app.delete("/api/checks/:id", (c) => {
+    let removed: boolean;
+    try {
+      removed = roots.checks.remove(c.req.param("id"));
+    } catch (e) {
+      // The file can't lose this check without changing another one (a shared YAML anchor, or a
+      // cut that would alter what the rest of the file loads); it is left as it is. Anything else
+      // (a file that can't be written, say) goes to the app's error handler.
+      if (e instanceof CheckRemoveConflict) return err(c, 409, e.message);
+      throw e;
+    }
+    return removed ? c.json({ ok: true }) : err(c, 400, "only user, project or planner checks can be deleted; disable library checks instead");
+  });
 
   app.post("/api/checks/draft", async (c) => {
     const b = await body<{ concern?: string; workflow?: string; project?: string }>(c);

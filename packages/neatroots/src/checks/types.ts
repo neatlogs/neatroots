@@ -97,7 +97,7 @@ export const RuleSpec = z.discriminatedUnion("type", [
     .object({
       type: z.literal("match"),
       span: SpanSelector.optional(),
-      field: z.enum(["input", "output", "error", "name"]).default("output"),
+      field: z.enum(["input", "output", "error", "name", "finish_reason"]).default("output"),
       pattern: z.string(),
       flags: z.string().optional(),
     })

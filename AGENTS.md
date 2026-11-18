@@ -22,6 +22,7 @@ pnpm test                                  # server and TypeScript steering test
 pnpm typecheck                            # all pnpm workspaces
 pnpm --filter @neatlogs/neatroots-ui e2e   # Playwright: builds nothing, so pnpm build first
 sh examples/run-all.sh                     # agent and HTTP API examples against a running neatroots; browser, import-files, refund-agent, samples by hand
+node scripts/perf-smoke.mjs                # performance smoke test on a generated store (runs nightly; pnpm build first)
 ```
 
 ## Conventions
