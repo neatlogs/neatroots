@@ -107,6 +107,16 @@ describe("OTLP codec", () => {
     expect(decodeTraceJson({ resourceSpans: [] } as any)).toEqual([]);
   });
 
+  it("rejects malformed OTLP timestamps before storage", () => {
+    const make = (startTimeUnixNano: unknown) => ({
+      resourceSpans: [{ scopeSpans: [{ spans: [{ traceId: hex(16), spanId: hex(8), name: "bad-time", startTimeUnixNano }] }] }],
+    });
+    expect(() => decodeTraceJson(make("not-a-time"))).toThrow(/invalid OTLP timestamp/);
+    expect(() => decodeTraceJson(make("-1"))).toThrow(/invalid OTLP timestamp/);
+    expect(() => decodeTraceJson(make("18446744073709551616"))).toThrow(/invalid OTLP timestamp/);
+    expect(() => decodeTraceJson(make("9".repeat(100)))).toThrow(/invalid OTLP timestamp: 9{61}…/);
+  });
+
   it("rejects attributes that aren't a list at every level instead of dropping them", () => {
     const obj = { "gen_ai.request.model": "gpt-4o" };
     const traces = (at: string) => {
