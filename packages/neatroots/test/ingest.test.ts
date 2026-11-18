@@ -303,6 +303,18 @@ describe("imports", () => {
     expect(toNs(" 1700000000.5 ")).toBeUndefined();
   });
 
+  it("preserves HTTP-trace file timestamps and converts numeric seconds once", () => {
+    const exact = "1700000000123456789";
+    const imported = parseTraceFile(JSON.stringify({ name: "exact", start: exact, end: exact }), "trace.json")[0].spans[0];
+    expect(imported.startTimeUnixNano).toBe(exact);
+    expect(imported.endTimeUnixNano).toBe(exact);
+
+    const seconds = httpTraceToBatches({ name: "seconds", start: 99, end: 101 }).batches[0].spans[0];
+    expect(seconds.startTimeUnixNano).toBe("99000000000");
+    expect(seconds.endTimeUnixNano).toBe("101000000000");
+    expect(BigInt(seconds.endTimeUnixNano) - BigInt(seconds.startTimeUnixNano)).toBe(2_000_000_000n);
+  });
+
   it("reads OTLP JSON, Neatlogs exports and HTTP traces from files, one per line too", () => {
     const tid = hex(16);
     const otlp = JSON.stringify({ resourceSpans: [{ resource: { attributes: [{ key: "service.name", value: { stringValue: "f" } }] }, scopeSpans: [{ scope: { name: "x" }, spans: [{ traceId: tid, spanId: hex(8), name: "root", kind: 1, startTimeUnixNano: "1", endTimeUnixNano: "2", status: {} }] }] }] });
