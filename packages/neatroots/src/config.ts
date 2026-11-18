@@ -91,6 +91,8 @@ export interface RootsConfig {
     apiBase?: string;
     /** The Neatlogs Cloud project imports read from (x-project-id), for a service account that sees several. */
     projectId?: string;
+    /** Send keys to a cloud endpoint outside *.neatlogs.com (https only), e.g. a self-hosted Neatlogs. */
+    trustEndpoint?: boolean;
     /** User regexes to redact before forwarding, in addition to the built-ins. */
     redactPatterns: string[];
   };
@@ -186,6 +188,8 @@ function deepMerge<T>(base: T, over: unknown, skipped: string[] = [], prefix = "
   const out: Record<string, unknown> = { ...(base as Record<string, unknown>) };
   for (const [k, v] of Object.entries(over)) {
     if (v === undefined || v === null) continue;
+    // No setting has these names; assigning them would change the object's prototype.
+    if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
     const cur = out[k];
     const key = prefix + k;
     if (isSection(cur)) {

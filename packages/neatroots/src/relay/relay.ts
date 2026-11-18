@@ -4,12 +4,14 @@ import type { Roots } from "../core.js";
 import { encodeTraceRequest } from "../otlp/codec.js";
 import { plainToAny, type KeyValue, type OtlpSpan, type ResourceSpansBatch } from "../otlp/types.js";
 import { COMPLETE_MARKER } from "../semantics/view.js";
-import { compileRules, redactBatches, type RedactionHit } from "./redact.js";
+import { compileRules, redactBatches, RedactionPatternError, type RedactionHit } from "./redact.js";
 import { getCloudKey } from "./keychain.js";
 import { projectSettings } from "../config.js";
 import type { ForwardRow } from "../types.js";
 import { log } from "../util/log.js";
+import { trimSlash } from "../util/url.js";
 import { VERSION } from "../version.js";
+import { endpointProblem } from "./endpoint.js";
 
 export interface ForwardPreview {
   trace_ids: string[];
@@ -25,6 +27,10 @@ export interface ForwardPreview {
  * without loss, redacted first, closed with the public neatlogs.trace.complete marker, and
  * carry neatroots findings as neatroots.* attributes.
  */
+const isRedirect = (res: Response) => res.status >= 300 && res.status < 400;
+const redirectError = (res: Response) =>
+  `the endpoint redirected to ${res.headers.get("location") ?? "another URL"}; neatroots doesn't follow redirects with your API key, so set the endpoint to the final URL`;
+
 /** How many times a completion marker is tried, and the first backoff (doubling) between tries. */
 const MARKER_ATTEMPTS = 3;
 const MARKER_BACKOFF_MS = 500;
@@ -58,7 +64,7 @@ export class Relay {
   }
 
   endpoint(): string {
-    return this.roots.config.cloud.endpoint.replace(/\/+$/, "").replace(/\/v1\/traces$/, "");
+    return trimSlash(this.roots.config.cloud.endpoint).replace(/\/v1\/traces$/, "");
   }
 
   private prepared(traceIds: string[]): { batches: ResourceSpansBatch[]; hits: RedactionHit[]; markers: ResourceSpansBatch[]; spanCount: number } {
@@ -179,9 +185,11 @@ export class Relay {
   }
 
   async forward(traceIds: string[], initiatedBy: string, opts: { endpoint?: string; apiKey?: string } = {}): Promise<ForwardRow> {
-    const endpoint = (opts.endpoint ?? this.endpoint()).replace(/\/+$/, "");
+    const endpoint = trimSlash(opts.endpoint ?? this.endpoint());
     const key = opts.apiKey ?? (await getCloudKey());
     const base = { trace_ids: traceIds, endpoint, initiated_by: initiatedBy };
+    const problem = endpointProblem(endpoint, !!this.roots.config.cloud.trustEndpoint);
+    if (problem) return this.roots.store.insertForward({ ...base, status: "error", http_status: null, span_count: 0, bytes: 0, redactions: 0, error: problem });
     const unknown = traceIds.filter((id) => !this.roots.store.getRun(id));
     if (unknown.length) {
       return this.roots.store.insertForward({ ...base, status: "error", http_status: null, span_count: 0, bytes: 0, redactions: 0, error: `no run with id ${unknown.join(", ")}` });
@@ -193,7 +201,8 @@ export class Relay {
     try {
       enc = this.encode(traceIds);
     } catch (err) {
-      return this.roots.store.insertForward({ ...base, status: "error", http_status: null, span_count: 0, bytes: 0, redactions: 0, error: `encode failed: ${(err as Error).message}` });
+      const error = err instanceof RedactionPatternError ? err.message : `encode failed: ${(err as Error).message}`;
+      return this.roots.store.insertForward({ ...base, status: "error", http_status: null, span_count: 0, bytes: 0, redactions: 0, error });
     }
     const send = async (body: Uint8Array) => {
       const gz = zlib.gzipSync(body);
@@ -201,6 +210,8 @@ export class Relay {
         method: "POST",
         headers: { "content-type": "application/x-protobuf", "content-encoding": "gzip", "x-api-key": key, "user-agent": `neatroots/${VERSION}` },
         body: gz,
+        // A redirect would carry x-api-key to another host (fetch drops only Authorization), so it's an error.
+        redirect: "manual",
         signal: AbortSignal.timeout(30_000),
       });
       return { res, bytes: gz.length };
@@ -215,7 +226,7 @@ export class Relay {
       const a = await send(enc.main);
       bytes += a.bytes;
       if (!a.res.ok) {
-        const text = (await a.res.text().catch(() => "")).slice(0, 300);
+        const text = isRedirect(a.res) ? redirectError(a.res) : (await a.res.text().catch(() => "")).slice(0, 300);
         return this.roots.store.insertForward({ ...base, status: "error", http_status: a.res.status, span_count: enc.spanCount, bytes, redactions: enc.redactions, error: `ingest returned HTTP ${a.res.status}${text ? `: ${text}` : ""}` });
       }
       accepted = a.res.status;
@@ -233,7 +244,7 @@ export class Relay {
               why = "";
               break;
             }
-            why = `HTTP ${b.res.status}`;
+            why = isRedirect(b.res) ? `HTTP ${b.res.status}: ${redirectError(b.res)}` : `HTTP ${b.res.status}`;
             if (b.res.status !== 408 && b.res.status < 500) break;
           } catch (err) {
             why = (err as Error).message;

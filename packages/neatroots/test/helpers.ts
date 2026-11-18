@@ -88,7 +88,7 @@ export function s(key: string, value: string | number | boolean): KeyValue {
 
 let clock = BigInt(Date.now()) * 1_000_000n;
 
-export function span(p: { traceId: string; spanId?: string; parent?: string; name: string; kind: string; attrs?: KeyValue[]; status?: number; message?: string; durMs?: number; events?: OtlpSpan["events"] }): OtlpSpan {
+export function span(p: { traceId: string; spanId?: string; parent?: string; name: string; kind: string; attrs?: KeyValue[]; status?: number; message?: string; durMs?: number; events?: OtlpSpan["events"]; flags?: number }): OtlpSpan {
   const start = clock;
   const end = start + BigInt(Math.round((p.durMs ?? 5) * 1_000_000));
   clock = end + 1_000_000n;
@@ -104,6 +104,7 @@ export function span(p: { traceId: string; spanId?: string; parent?: string; nam
     events: p.events ?? [],
     links: [],
     status: { code: p.status ?? 1, ...(p.message ? { message: p.message } : {}) },
+    ...(p.flags !== undefined ? { flags: p.flags } : {}),
   };
 }
 

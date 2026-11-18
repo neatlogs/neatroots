@@ -1,12 +1,16 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, post, type ForwardPreview, type Run, type RunDetail, type SpanDetail } from "../../../lib/api";
 import { appKeys, runKeys, type RunListParams } from "./run-keys";
 
+const RUNS_PAGE = 150;
+
+/** Runs, newest first, a page at a time: `loadMore` reaches older runs. */
 export function useRuns(p: RunListParams) {
-  return useQuery({
+  const query = useInfiniteQuery({
     queryKey: runKeys.list(p),
-    queryFn: () => {
-      const q = new URLSearchParams({ limit: "150" });
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) => {
+      const q = new URLSearchParams({ limit: String(RUNS_PAGE), offset: String(pageParam) });
       if (p.q) q.set("q", p.q);
       if (p.status) q.set("status", p.status);
       if (p.hasFinding) q.set("has_finding", "1");
@@ -14,8 +18,17 @@ export function useRuns(p: RunListParams) {
       if (p.check) q.set("check", p.check);
       return api<{ runs: Run[]; total: number; matching?: number }>(`/api/runs?${q}`);
     },
+    getNextPageParam: (last, pages) => (last.runs.length < RUNS_PAGE ? undefined : pages.length * RUNS_PAGE),
     placeholderData: keepPreviousData,
   });
+  const pages = query.data?.pages;
+  return {
+    data: pages ? { runs: pages.flatMap((pg) => pg.runs), total: pages[0]?.total ?? 0, matching: pages[0]?.matching } : undefined,
+    isLoading: query.isLoading,
+    hasMore: !!query.hasNextPage,
+    loadMore: () => void query.fetchNextPage(),
+    loadingMore: query.isFetchingNextPage,
+  };
 }
 
 export function useRunDetail(traceId: string | undefined) {

@@ -4,5 +4,6 @@
   "type": "module",
   "scripts": { "start": "tsx agent.ts" },
   "dependencies": { "neatlogs": "1.1.27", "ai": "7.0.136", "@ai-sdk/openai": "4.0.91", "zod": "4.1.12" },
-  "devDependencies": { "tsx": "4.23.15" }
+  "devDependencies": { "tsx": "4.23.15" },
+  "overrides": { "@opentelemetry/core@>=2.0.0 <2.8.0": "^2.8.0", "protobufjs@>=8.0.0 <8.6.6": "^8.8.0" }
 }

@@ -1,6 +1,6 @@
 name: Bug report
 description: Something in neatroots doesn't work
-labels: ["bug"]
+labels: ["bug", "needs-triage"]
 body:
   - type: markdown
     attributes:

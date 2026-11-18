@@ -356,7 +356,7 @@ export const TOOLS = [
     name: "create_check",
     title: "Create check",
     description:
-      "Add a check. Give either `concern` (plain language; the local LLM writes the question) or `check` (YAML or JSON in neatroots check format). Set save=false to only draft it. Saved checks go to ~/.neatroots/checks or a registered project directory.",
+      "Add a check. Give either `concern` (plain language; the local LLM writes the question) or `check` (YAML or JSON in neatroots check format). Set save=false to only draft it. Saved checks go to ~/.neatroots/checks or a registered project directory. Halt rules can't be saved or changed here: save a rule with action: flag, and the user can switch it to halt in the app or CLI.",
     input: {
       concern: z.string().optional(),
       check: z.string().optional().describe("YAML or JSON check definition"),

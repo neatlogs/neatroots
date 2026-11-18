@@ -121,4 +121,21 @@ describe("soft-tool-failure", () => {
     st.ingest([batch([spClean])]);
     expect(evaluateRule(rule, loadTrace(st, tClean), false)).toBeNull();
   });
+
+  it("fires on an error: line at the start of the output or of any line", () => {
+    // The alternative is `(^|\n)[^\S\n]*error:` rather than `(^|\n)\s*error:`, because `\s*` after
+    // `\n` is quadratic on a run of newlines. `[^\S\n]` is the same indentation without letting the
+    // scan cross a line break, so every form below must still fire.
+    expect(fires("error: connection refused")).toBe(true);
+    expect(fires("  error: connection refused")).toBe(true);
+    expect(fires("\nerror: connection refused")).toBe(true);
+    expect(fires("\n  error: connection refused")).toBe(true);
+    expect(fires("\n\t error: connection refused")).toBe(true);
+    expect(fires("result ok\n\nerror: connection refused")).toBe(true);
+    expect(fires("result ok\n\n   error: connection refused")).toBe(true);
+    expect(fires("result ok\r\n   error: connection refused")).toBe(true);
+    // Still quiet: `error` has to start the line, and a colon has to follow.
+    expect(fires("no error: nothing failed")).toBe(false);
+    expect(fires("the error: handling is fine")).toBe(false);
+  });
 });

@@ -52,13 +52,14 @@ Limits: one note per LLM call, three per run. Notes left unclaimed when the run 
 
 | Mode | Behavior |
 | --- | --- |
-| `off` | Nothing is sent (the default). |
+| `off` | Nothing is sent, not even a halt from your own rule (the default). |
 | `advisory` | Notes are added to the next LLM call once the spans that triggered them have arrived. |
 | `gate` | Each LLM call flushes the SDK and waits up to 300 ms for pending checks on the run. Use this when the agent loops faster than the SDK exports. |
 | `self-check` | Give the agent `CHECK_MY_WORK_TOOL`; it asks neatroots a yes/no question about its own run and gets a probability with evidence span ids. |
-| `halt` | A rule you wrote with `action: halt` makes the hook raise `NeatrootsHalt` before the next LLM call. Library rules never halt. |
 
-`neatroots steering stop` (or the switch in the app's sidebar) turns steering off everywhere at once.
+Halts work in every mode except `off`: a rule you wrote with `action: halt` makes the hook raise `NeatrootsHalt` before the next LLM call. Library rules never halt. With steering off, a halt rule still records its finding but doesn't stop the agent.
+
+`neatroots steering stop` (or the switch in the app's sidebar) turns steering off everywhere at once, halts included.
 
 ## Timing
 
