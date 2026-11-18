@@ -8,7 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { encodeTraceRequest, decodeTraceProtobuf } from "../src/otlp/codec.js";
 import { findUiDir } from "../src/server/app.js";
-import { batch, hex, llmSpan, makeRoots, markerSpan, s, span, toolSpan, until } from "./helpers.js";
+import { batch, hex, llmSpan, makeRoots, markerSpan, mockLlm, s, span, toolSpan, until } from "./helpers.js";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -257,6 +257,48 @@ describe("server", () => {
     const page = await get("limit=2");
     expect(page.runs).toHaveLength(2);
     expect(page).toMatchObject({ total: 3, matching: 3 });
+  });
+
+  it("rejects an explicit invalid insights window", async () => {
+    const tb = await served();
+    const origin = { origin: tb.url.replace("127.0.0.1", "localhost"), "content-type": "application/json" };
+    const get = await fetch(`${tb.url}/api/insights?window=30days`, { headers: origin });
+    expect(get.status).toBe(400);
+    expect(await get.json()).toEqual({ error: "window must be 24h, 7d or 30d" });
+    const inherited = await fetch(`${tb.url}/api/insights?window=toString`, { headers: origin });
+    expect(inherited.status).toBe(400);
+    const inheritedConstructor = await fetch(`${tb.url}/api/insights?window=constructor`, { headers: origin });
+    expect(inheritedConstructor.status).toBe(400);
+    const post = await fetch(`${tb.url}/api/insights/digest`, { method: "POST", headers: origin, body: JSON.stringify({ window: 30 }) });
+    expect(post.status).toBe(400);
+    expect(await post.json()).toEqual({ error: "window must be 24h, 7d or 30d" });
+    for (const window of ["toString", "constructor"]) {
+      const inheritedPost = await fetch(`${tb.url}/api/insights/digest`, { method: "POST", headers: origin, body: JSON.stringify({ window }) });
+      expect(inheritedPost.status).toBe(400);
+      expect(await inheritedPost.json()).toEqual({ error: "window must be 24h, 7d or 30d" });
+    }
+    const postDefault = await fetch(`${tb.url}/api/insights/digest`, { method: "POST", headers: origin, body: "{}" });
+    expect(postDefault.status).toBe(400);
+    expect(await postDefault.json()).toEqual({ error: "no runs in this period" });
+    const getDefault = await fetch(`${tb.url}/api/insights`, { headers: origin });
+    expect(getDefault.status).toBe(200);
+    expect(await getDefault.json()).toMatchObject({ window: { key: "7d" } });
+  });
+
+  it("uses the seven-day default for a non-empty digest request", async () => {
+    const llm = await mockLlm();
+    const tb = await makeRoots({ serve: true, noEngine: true, llmUrl: llm.url });
+    cleanup.push(tb.close, llm.close);
+    tb.roots.ingest(sampleRun().batches);
+
+    const origin = { origin: tb.url.replace("127.0.0.1", "localhost"), "content-type": "application/json" };
+    const get = await fetch(`${tb.url}/api/insights`, { headers: origin });
+    expect(get.status).toBe(200);
+    expect(await get.json()).toMatchObject({ window: { key: "7d" } });
+
+    const post = await fetch(`${tb.url}/api/insights/digest`, { method: "POST", headers: origin, body: "{}" });
+    expect(post.status).toBe(200);
+    expect(await post.json()).toMatchObject({ window: "7d", runs: 1 });
   });
 
   it("refuses an annotation for a run or span it does not have", async () => {

@@ -167,7 +167,9 @@ export async function mockLlm(
       let content = "{}";
       let logprobs: any;
       const isDecision = schema === "answer" && !!b.response_format?.json_schema?.schema?.properties?.answer?.enum;
-      if (schema === "answer" && !isDecision) {
+      if (schema === "digest") {
+        content = JSON.stringify({ not_working: [], working: ["One run completed."] });
+      } else if (schema === "answer" && !isDecision) {
         content = JSON.stringify({ answer: "The lookup_order tool returned 404 for order 4512.", evidence: [] });
       } else if (isDecision) {
         const q = (user.match(/Question: (.*)/)?.[1] ?? "").toLowerCase();
