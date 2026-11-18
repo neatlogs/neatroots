@@ -184,6 +184,8 @@ export interface ImportJob {
   traces: number;
   spans: number;
   failed: number;
+  /** Runs captured here that the import kept instead of storing Cloud's copy over them. */
+  skipped: number;
   last_error: string | null;
   trace_ids: string[];
 }
@@ -298,7 +300,7 @@ export interface Status {
   steering: { enabled: boolean; hooks_connected: number };
   mcp?: { last_seen_ms: number | null };
   install?: { mode: "bundle" | "source" | "other"; root: string | null; steer_python: string | null; steer_ts: string | null; examples?: string | null };
-  cloud: { endpoint: string; has_key: boolean; has_token?: boolean; project_id?: string | null };
+  cloud: { endpoint: string; has_key: boolean; has_token?: boolean; project_id?: string | null; redact_patterns?: string[] };
   classifier?: {
     /** consent: the answer to "download Laya?" (about 1.4 GB); null until asked. */
     laya: { state: string; message: string | null; progress: number | null; url: string | null; consent?: "yes" | "no" | null };
@@ -403,7 +405,7 @@ export interface Push {
   trace_ids: string[];
   requested_by: string;
   created_ms: number;
-  status: "pending" | "sent" | "failed" | "declined";
+  status: "pending" | "sending" | "sent" | "failed" | "declined";
   error?: string;
 }
 

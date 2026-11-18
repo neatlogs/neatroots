@@ -2,9 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { BlobStore } from "./blobs.js";
+import { compactSearchIndex, oldestRunsCovering, reclaimPayloads, runSteps, runStepsAsync, type Steps } from "./retention.js";
+import { deleteUnattachedLogsBefore, trimUnattachedLogs } from "./unattached-logs.js";
+import { SearchIds } from "./search-ids.js";
 import { sha256, newId } from "../util/ids.js";
 import { buildView, preview, type SpanView } from "../semantics/view.js";
-import { kvToPlain, type KeyValue, type OtlpResource, type OtlpScope, type OtlpSpan, type Plain, type ResourceSpansBatch } from "../otlp/types.js";
+import { hasRemoteParent, kvToPlain, type KeyValue, type OtlpResource, type OtlpScope, type OtlpSpan, type Plain, type ResourceSpansBatch } from "../otlp/types.js";
 import type {
   Annotation,
   DecisionRow,
@@ -58,6 +61,7 @@ CREATE TABLE IF NOT EXISTS runs (
   output_preview TEXT,
   interrupted INTEGER NOT NULL DEFAULT 0,
   termination_reason TEXT,
+  quiet_sweep_done INTEGER NOT NULL DEFAULT 0,
   finding_count INTEGER NOT NULL DEFAULT 0,
   open_finding_count INTEGER NOT NULL DEFAULT 0,
   pinned INTEGER NOT NULL DEFAULT 0,
@@ -67,6 +71,10 @@ CREATE TABLE IF NOT EXISTS runs (
   updated_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS runs_started ON runs (started_ms DESC);
+-- The run list and Insights sort and filter by this expression; an index on started_ms alone can't serve them.
+CREATE INDEX IF NOT EXISTS runs_sort ON runs (COALESCE(started_ms, received_ms) DESC);
+-- The quiet-run sweep filters on exactly these columns every 60 s (issue #673).
+CREATE INDEX IF NOT EXISTS runs_quiet ON runs (status, doctor, complete, updated_ms);
 CREATE INDEX IF NOT EXISTS runs_session ON runs (session_id);
 CREATE INDEX IF NOT EXISTS runs_workflow ON runs (workflow);
 CREATE INDEX IF NOT EXISTS runs_project ON runs (project);
@@ -114,6 +122,10 @@ CREATE INDEX IF NOT EXISTS spans_filter ON spans (span_kind, tool_name, model, i
 CREATE VIRTUAL TABLE IF NOT EXISTS span_fts USING fts5 (
   trace_id UNINDEXED, span_id UNINDEXED, name, tool_name, body, tokenize = 'porter unicode61'
 );
+-- The run and span of each span_fts row, by rowid, so span_fts rows are found by run or span
+-- without reading their text (see search-ids.ts).
+CREATE TABLE IF NOT EXISTS span_fts_ids (id INTEGER PRIMARY KEY, trace_id TEXT NOT NULL, span_id TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS span_fts_ids_span ON span_fts_ids (trace_id, span_id);
 
 CREATE TABLE IF NOT EXISTS logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +139,7 @@ CREATE TABLE IF NOT EXISTS logs (
   received_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS logs_trace ON logs (trace_id);
+CREATE INDEX IF NOT EXISTS logs_received ON logs (received_ms);
 
 CREATE TABLE IF NOT EXISTS plans (
   id TEXT PRIMARY KEY,
@@ -270,6 +283,8 @@ export interface TraceUpdate {
   spans: IngestedSpan[];
   runCreated: boolean;
   rootEnded: boolean;
+  /** A parentless span took the root back from one that only qualified through its remote parent (#157). */
+  rootHandedBack: boolean;
   completed: boolean;
 }
 
@@ -376,6 +391,8 @@ export const SEARCH_LIMIT = { head: 150_000, tail: 50_000 };
 const SEARCH_INDEX_VERSION = 2;
 /** A store over its size cap is trimmed to this share of the cap, so it isn't trimmed every hour. */
 export const RETENTION_LOW_WATER = 0.9;
+/** Runs a stepped retention sweep deletes per transaction, between turns of the event loop. */
+const RETENTION_DELETE_BATCH = 4;
 
 /** Free text as an FTS5 query: each word quoted, so operators and punctuation match literally. */
 function ftsQuery(text: string): string {
@@ -403,6 +420,7 @@ function searchText(v: Parameters<typeof preview>[0]): string {
 export class Store {
   readonly db: Database.Database;
   readonly blobs: BlobStore;
+  private readonly searchIds: SearchIds;
   private seq = 0;
   readonly dir: string;
   readonly file: string;
@@ -424,6 +442,7 @@ export class Store {
     this.db.pragma("busy_timeout = 5000");
     this.db.exec(SCHEMA);
     this.migrate();
+    this.searchIds = new SearchIds(this.db);
     this.blobs = new BlobStore(path.join(dir, "blobs"));
     const row = this.db.prepare("SELECT MAX(seq) AS s FROM spans").get() as { s: number | null };
     this.seq = row.s ?? 0;
@@ -440,6 +459,7 @@ export class Store {
       if (!cols.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     };
     ensure("plans", "body", "TEXT");
+    ensure("runs", "quiet_sweep_done", "INTEGER NOT NULL DEFAULT 0");
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
     this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
@@ -464,6 +484,12 @@ export class Store {
   getResource(id: string): OtlpResource {
     const r = this.db.prepare("SELECT json FROM resources WHERE id = ?").get(id) as { json: string } | undefined;
     return json<OtlpResource>(r?.json, { attributes: [] });
+  }
+
+  /** The resources a run's spans were sent with (one per sender, usually one). */
+  resourcesFor(traceId: string): OtlpResource[] {
+    const rows = this.db.prepare("SELECT DISTINCT resource_id FROM spans WHERE trace_id = ?").all(traceId) as { resource_id: string }[];
+    return rows.map((r) => this.getResource(r.resource_id));
   }
 
   getScope(id: string): OtlpScope {
@@ -497,14 +523,15 @@ export class Store {
           }
           let u = updates.get(span.traceId);
           if (!u) {
-            u = { traceId: span.traceId, spans: [], runCreated: false, rootEnded: false, completed: false };
+            u = { traceId: span.traceId, spans: [], runCreated: false, rootEnded: false, rootHandedBack: false, completed: false };
             updates.set(span.traceId, u);
           }
-          const row = this.writeSpan(span, view, resourceId, scopeId, now);
+          const row = this.writeSpan(span, view, resourceId, scopeId, now, !previous);
           u.spans.push({ row, view, isNew: !previous });
           const runFlags = this.updateRun(span, view, row, resAttrs, now, previous);
           if (runFlags.created) u.runCreated = true;
           if (runFlags.rootEnded) u.rootEnded = true;
+          if (runFlags.rootHandedBack) u.rootHandedBack = true;
           if (runFlags.completed) u.completed = true;
         }
       }
@@ -515,7 +542,7 @@ export class Store {
     return [...updates.values()];
   }
 
-  private writeSpan(span: OtlpSpan, view: SpanView, resourceId: string, scopeId: string, now: number): SpanRow {
+  private writeSpan(span: OtlpSpan, view: SpanView, resourceId: string, scopeId: string, now: number, isNew: boolean): SpanRow {
     const used = new Set<string>();
     const attributes = this.blobs.offload(span.attributes, used);
     const events = span.events.map((e) => ({ ...e, attributes: this.blobs.offload(e.attributes, used) }));
@@ -579,9 +606,23 @@ export class Store {
         blobs: used.size ? JSON.stringify([...used]) : null,
       });
     if (!view.isMarker) {
-      this.indexSpan(span.traceId, span.spanId, span.name, view);
+      this.indexSpan(span.traceId, span.spanId, span.name, view, !isNew);
     }
     return row;
+  }
+
+  /** Whether a span id is already stored for this trace. */
+  private spanStored(traceId: string, spanId: string): boolean {
+    return this.db.prepare("SELECT 1 FROM spans WHERE trace_id = ? AND span_id = ?").get(traceId, spanId) !== undefined;
+  }
+
+  /**
+   * Whether a stored span has a parent outside the trace, which means it only became the root
+   * through the remote-parent read (#157). A root without a parent id never qualifies.
+   */
+  private rootCameFromRemoteParent(traceId: string, spanId: string): boolean {
+    const row = this.db.prepare("SELECT parent_span_id FROM spans WHERE trace_id = ? AND span_id = ?").get(traceId, spanId) as { parent_span_id: string | null } | undefined;
+    return !!row?.parent_span_id;
   }
 
   private updateRun(
@@ -591,8 +632,8 @@ export class Store {
     resAttrs: Record<string, Plain>,
     now: number,
     previous: AggregateSpan | undefined,
-  ): { created: boolean; rootEnded: boolean; completed: boolean } {
-    const flags = { created: false, rootEnded: false, completed: false };
+  ): { created: boolean; rootEnded: boolean; rootHandedBack: boolean; completed: boolean } {
+    const flags = { created: false, rootEnded: false, rootHandedBack: false, completed: false };
     let run = this.getRun(span.traceId);
     if (!run) {
       const project = String(resAttrs["service.name"] ?? view.workflow ?? "unknown");
@@ -651,7 +692,31 @@ export class Store {
         p.reason = view.terminationReason;
       }
     }
-    if (!span.parentSpanId && !view.isMarker) {
+    // A span is the run's top when it has no parent, or when it declares a remote parent that never
+    // reached this trace (#157). A remote parent on its own isn't enough. With propagated context
+    // both processes export here, so the callee's top span carries a remote parent while the
+    // caller's parentless span sits in the same trace; taking the callee as the root ends the run on
+    // it while the caller is still open, which fires end-of-run work too early. A run that already
+    // has a root keeps it: only a parentless span can take that place, or the root itself being
+    // re-sent (a streaming exporter sends it open first, then with its end).
+    const isTop =
+      !span.parentSpanId ||
+      ((!run.root_span_id || run.root_span_id === span.spanId) && hasRemoteParent(span) && !this.spanStored(span.traceId, span.parentSpanId));
+    // Exporters that send a span when it ends (the OTel default) deliver the callee before the
+    // caller, so the run ended on a span whose parent simply had not arrived yet. The caller's own
+    // span is the real root, and taking it back has to undo that end: while the caller is open the
+    // run is running again, and once the caller ends the run ends on the full trace rather than on
+    // the callee's slice of it.
+    const handedBack = !span.parentSpanId && !!run.root_span_id && this.rootCameFromRemoteParent(span.traceId, run.root_span_id);
+    // A run the quiet sweep marked interrupted ("no end received") can still be alive: its late
+    // root span or completion marker clears the inferred interruption and the run is running again.
+    if (!view.interrupted && run.status === "interrupted" && run.termination_reason === "no end received" && (view.isMarker || isTop)) {
+      sets.push("status = 'running'", "interrupted = 0", "termination_reason = NULL", "ended_ms = NULL");
+      run = { ...run, status: "running", interrupted: 0, termination_reason: null, ended_ms: null };
+    }
+    if (isTop && !view.isMarker) {
+      // Reported only when the root is really replaced: a parentless marker doesn't take it.
+      if (handedBack) flags.rootHandedBack = true;
       sets.push("root_span_id = @root", "root_name = @rootName", "input_preview = @inp", "output_preview = @out");
       p.root = span.spanId;
       p.rootName = span.name;
@@ -668,17 +733,28 @@ export class Store {
           sets.push("status = @status");
           p.status = span.status.code === 2 ? "error" : "ok";
         }
-        if (!run.root_ended) flags.rootEnded = true;
+        // A hand-back reports the end again even though the run already had one: end-of-run checks
+        // and forwarding ran on the callee's spans, and they have to run on the full trace now.
+        if (handedBack || !run.root_ended) flags.rootEnded = true;
+      } else if (handedBack && !view.interrupted && run.status !== "interrupted") {
+        sets.push("root_ended = 0", "ended_ms = NULL", "status = 'running'");
       }
     }
-    if (view.sessionId && (!run.session_id || !span.parentSpanId)) {
-      sets.push("session_id = @session");
-      p.session = view.sessionId;
+    // A re-sent root reports the same session again (a streaming exporter sends it open, then with
+    // its end): the session's last-seen moves, but the run is not counted in it twice.
+    let sessionSeen = false;
+    if (view.sessionId && (!run.session_id || isTop)) {
+      if (view.sessionId !== run.session_id) {
+        sets.push("session_id = @session");
+        p.session = view.sessionId;
+      } else {
+        sessionSeen = true;
+      }
     }
     this.db.prepare(`UPDATE runs SET ${sets.join(", ")} WHERE trace_id = @trace`).run(p);
     const after = this.getRun(span.traceId)!;
     const sessionId = after.session_id ?? after.trace_id;
-    if (flags.created || p.session) this.touchSession(sessionId, after, now, flags.created || !!p.session);
+    if (flags.created || p.session || sessionSeen) this.touchSession(sessionId, after, now, flags.created || !!p.session);
     return flags;
   }
 
@@ -723,6 +799,56 @@ export class Store {
     return this.db.prepare("SELECT * FROM runs WHERE trace_id = ?").get(traceId) as RunRow | undefined;
   }
 
+  /** Runs still marked running, with no completion marker, that sent nothing for `quietMs` - their end never arrived (issue #213). The most recently active come first. */
+  quietRuns(quietMs: number, now = Date.now(), limit = -1): RunRow[] {
+    return this.db.prepare("SELECT * FROM runs WHERE status = 'running' AND doctor = 0 AND complete = 0 AND updated_ms < ? ORDER BY updated_ms DESC LIMIT ?").all(now - quietMs, limit) as RunRow[];
+
+  }
+
+  /**
+   * Marks a quiet run interrupted so the app can say "no end received" instead of showing it
+   * running forever. `cutoff` is the sweep's quiet threshold: a run that reported anything since
+   * the sweep listed it is left alone, so a live run is never marked interrupted.
+   */
+  markRunInterrupted(traceId: string, reason: string, cutoff: number, now = Date.now()): boolean {
+    const r = this.db
+      .prepare(
+        "UPDATE runs SET status = 'interrupted', interrupted = 1, quiet_sweep_done = 0, termination_reason = ?, ended_ms = COALESCE(ended_ms, last_span_ms, ?), updated_ms = ? WHERE trace_id = ? AND status = 'running' AND updated_ms < ?",
+      )
+      .run(reason, now, now, traceId, cutoff);
+    return r.changes > 0;
+  }
+
+  /**
+   * Runs a quiet-run sweep interrupted ("no end received") that no live sweep owns: a crashed
+   * sweep's leftovers, or a claimed run whose post-failure restore itself failed. Rechecking
+   * them resumes persisted decisions. Completed sweeps are excluded before the batch limit.
+   */
+  abandonedQuietRuns(limit: number): RunRow[] {
+    return this.db
+      .prepare("SELECT * FROM runs WHERE status = 'interrupted' AND termination_reason = 'no end received' AND quiet_sweep_done = 0 ORDER BY updated_ms ASC LIMIT ?")
+      .all(limit) as RunRow[];
+  }
+
+  /** Persists successful sweep completion without changing the run's interrupted display state. */
+  completeQuietRun(traceId: string): void {
+    this.db.prepare("UPDATE runs SET quiet_sweep_done = 1 WHERE trace_id = ? AND status = 'interrupted' AND termination_reason = 'no end received'").run(traceId);
+  }
+
+  /**
+   * Puts a sweep-claimed quiet run back the way the sweep found it, so the next sweep retries
+   * it after its recheck failed. Only a row this sweep interrupted ("no end received") is
+   * restored - a run interrupted any other way is left alone. The mark bumped updated_ms, so
+   * it goes back to the run's last activity and the retry is not delayed by another quietMs.
+   */
+  restoreQuietRun(traceId: string): void {
+    this.db
+      .prepare(
+        "UPDATE runs SET status = 'running', interrupted = 0, termination_reason = NULL, ended_ms = NULL, updated_ms = COALESCE(last_span_ms, received_ms) WHERE trace_id = ? AND status = 'interrupted' AND termination_reason = 'no end received'",
+      )
+      .run(traceId);
+  }
+
   /** The WHERE clauses and parameters for a run filter, shared by listing and counting. */
   private runFilter(f: RunFilter): { where: string[]; p: Record<string, unknown> } {
     const where: string[] = [];
@@ -744,7 +870,9 @@ export class Store {
       where.push("session_id = @session");
       p.session = f.sessionId;
     }
-    if (f.hasFinding) where.push("finding_count > 0");
+    if (f.hasFinding !== undefined) {
+      where.push(f.hasFinding ? "finding_count > 0" : "finding_count = 0");
+    }
     if (f.hasOpenFinding) where.push("open_finding_count > 0");
     if (f.checkId) {
       where.push("trace_id IN (SELECT trace_id FROM findings WHERE check_id = @check AND status NOT IN ('dismissed', 'failed', 'quiet'))");
@@ -782,12 +910,12 @@ export class Store {
         // With span filters the text must match a span that passes them: tool:issue_refund timeout means the
         // refund call mentions "timeout". Without the index there is no per-span text to match, as before.
         // INDEXED BY: probing the wide span rows for every text match is about twice as slow on a large store.
-        where.push(indexed ? `trace_id IN (SELECT s.trace_id FROM spans s INDEXED BY spans_filter WHERE ${span.join(" AND ")} AND (s.trace_id, s.span_id) IN (SELECT trace_id, span_id FROM span_fts WHERE span_fts MATCH @match))` : "0");
+        where.push(indexed ? `trace_id IN (SELECT s.trace_id FROM spans s INDEXED BY spans_filter WHERE ${span.join(" AND ")} AND (s.trace_id, s.span_id) IN (${this.searchIds.matching("trace_id, span_id")}))` : "0");
         if (indexed) p.match = match;
         return { where, p };
       }
       const like = likeText(f.text);
-      where.push(`(${indexed ? "trace_id IN (SELECT trace_id FROM span_fts WHERE span_fts MATCH @match) OR " : ""}root_name LIKE @like ESCAPE '\\' OR workflow LIKE @like ESCAPE '\\' OR input_preview LIKE @like ESCAPE '\\' OR output_preview LIKE @like ESCAPE '\\')`);
+      where.push(`(${indexed ? `trace_id IN (${this.searchIds.matching("trace_id")}) OR ` : ""}root_name LIKE @like ESCAPE '\\' OR workflow LIKE @like ESCAPE '\\' OR input_preview LIKE @like ESCAPE '\\' OR output_preview LIKE @like ESCAPE '\\')`);
       if (indexed) p.match = match;
       p.like = like;
     }
@@ -894,7 +1022,7 @@ export class Store {
       return this.db
         .prepare(
           `SELECT trace_id, span_id, name, snippet(span_fts, 4, '[', ']', '…', 12) AS snippet
-           FROM span_fts WHERE span_fts MATCH ? ${traceIds ? `AND trace_id IN (${traceIds.map(() => "?").join(",")})` : "ORDER BY rank"} LIMIT ?`,
+           FROM span_fts WHERE span_fts MATCH ? ${traceIds ? `AND ${this.searchIds.inRuns(traceIds.length)}` : "ORDER BY rank"} LIMIT ?`,
         )
         .all(q, ...(traceIds ?? []), limit) as { trace_id: string; span_id: string; name: string; snippet: string }[];
     } catch {
@@ -1054,6 +1182,20 @@ export class Store {
 
   setFindingStatus(id: string, status: FindingStatus): Finding | undefined {
     return this.updateFinding(id, { status });
+  }
+
+  /** A check's "could not run" rows on a run, newest first. */
+  failedFindingsFor(traceId: string, checkId: string): Finding[] {
+    return (
+      this.db.prepare("SELECT * FROM findings WHERE trace_id = ? AND check_id = ? AND status = 'failed' ORDER BY created_ms DESC").all(traceId, checkId) as Record<string, unknown>[]
+    ).map((r) => this.findingFromRow(r));
+  }
+
+  deleteFinding(id: string): void {
+    const cur = this.getFinding(id);
+    if (!cur) return;
+    this.db.prepare("DELETE FROM findings WHERE id = ?").run(id);
+    this.refreshFindingCounts(cur.trace_id);
   }
 
   // -------------------------------------------------------------- decisions
@@ -1286,9 +1428,44 @@ export class Store {
 
   // --------------------------------------------------------------- retention
 
-  /** Deletes the oldest unpinned runs past the age or size limit. Returns how many runs were removed. */
+  /** Whether the search index's run ids are filled in, so runs can be found in it without a scan. */
+  get searchReady(): boolean {
+    return this.searchIds.ready;
+  }
+
+  /** Deletes the oldest unpinned runs past the age or size limit, in one go. Returns how many runs were removed. */
   sweep(maxAgeDays: number, maxBytes: number): number {
+    return runSteps(this.sweepSteps(maxAgeDays, maxBytes, Number.POSITIVE_INFINITY));
+  }
+
+  /**
+   * The same sweep a few runs at a time, giving the event loop a turn every `sliceMs`, so ingest,
+   * the app and MCP keep answering while a large trim works (#429). A run that takes new spans or
+   * is pinned while it works is kept. Resolves to 0 if the store is closed partway.
+   */
+  async sweepAsync(maxAgeDays: number, maxBytes: number, opts: { sliceMs?: number } = {}): Promise<number> {
+    return (await runStepsAsync(this.sweepSteps(maxAgeDays, maxBytes, RETENTION_DELETE_BATCH), () => this.db.open, opts.sliceMs)) ?? 0;
+  }
+
+  private *sweepSteps(maxAgeDays: number, maxBytes: number, batch: number): Steps<number> {
+    const startedMs = Date.now();
     let removed = 0;
+    let logsRemoved = 0;
+    const shas = new Set<string>();
+    const self = this;
+    // Only a stepped sweep yields, so only it needs the guard against runs that changed meanwhile.
+    const notAfter = Number.isFinite(batch) ? startedMs : undefined;
+    function* remove(ids: string[]): Steps<void> {
+      // Until the search index's run ids are filled in, every delete scans the whole index, so
+      // delete in one go then rather than repeat that scan per batch.
+      const step = self.searchIds.ready ? batch : Number.POSITIVE_INFINITY;
+      for (let i = 0; i < ids.length; i += step) {
+        const r = self.deleteRunRows(ids.slice(i, i + step), notAfter);
+        removed += r.removed;
+        for (const sha of r.shas) shas.add(sha);
+        yield;
+      }
+    }
     // Skip the age sweep for a non-positive age: a cutoff of "now" (days = 0)
     // would delete every unpinned run. maxBytes pruning below still runs.
     if (Number.isFinite(maxAgeDays) && maxAgeDays >= 1) {
@@ -1296,8 +1473,12 @@ export class Store {
       const old = this.db
         .prepare("SELECT trace_id FROM runs WHERE pinned = 0 AND COALESCE(ended_ms, received_ms) < ?")
         .all(cutoff) as { trace_id: string }[];
-      this.deleteRuns(old.map((r) => r.trace_id));
-      removed += old.length;
+      yield* remove(old.map((r) => r.trace_id));
+      logsRemoved += deleteUnattachedLogsBefore(this.db, cutoff);
+      // Free those runs' payloads now: the size check below counts the files on disk, and would
+      // otherwise trim more runs to make room that's already free.
+      yield* reclaimPayloads(this.db, this.blobs, shas, () => this.seq);
+      shas.clear();
     }
     // Measure what the database holds, not the file size: SQLite keeps the file (and WAL) at its
     // high-water mark after a delete and reuses the freed pages, so the file size never drops
@@ -1306,66 +1487,30 @@ export class Store {
     if (size > maxBytes) {
       // Deleting from the full-text index leaves "deleted" markers until it is compacted, so the
       // size can read high. Compact (once per sweep, and only when over the cap) before trusting it.
-      this.compactSearchIndex();
+      yield* compactSearchIndex(this.db);
       size = this.storedBytes();
+    }
+    if (size > maxBytes) {
+      // Logs that belong to no run go first, down to the low-water mark: deleting runs can't free
+      // their space (#267). Row sizes understate the pages they use, so measure again and trim more.
+      for (let i = 0; i < 8 && size > maxBytes * RETENTION_LOW_WATER; i++) {
+        const n = trimUnattachedLogs(this.db, size - maxBytes * RETENTION_LOW_WATER);
+        if (!n) break;
+        logsRemoved += n;
+        size = this.storedBytes();
+        yield;
+      }
     }
     if (size > maxBytes) {
       // Trim the oldest unpinned runs down to a low-water mark below the cap, so a store sitting
       // at its cap isn't trimmed (and compacted) again on every hourly sweep.
-      const oldest = this.oldestRunsCovering(size - maxBytes * RETENTION_LOW_WATER, size);
-      this.deleteRuns(oldest);
-      removed += oldest.length;
+      const oldest = yield* oldestRunsCovering(this.db, this.blobs, this.searchIds.ready, size - maxBytes * RETENTION_LOW_WATER, size);
+      yield* remove(oldest);
     }
-    if (removed) this.db.pragma("wal_checkpoint(TRUNCATE)");
+    // The size trim's payloads, checked against every span then (new ones included).
+    yield* reclaimPayloads(this.db, this.blobs, shas, () => this.seq);
+    if (removed || logsRemoved) this.db.pragma("wal_checkpoint(TRUNCATE)");
     return removed;
-  }
-
-  /**
-   * The oldest unpinned runs whose share of storedBytes() adds up to `excess`. A run's span rows
-   * are scaled to the database's share of `stored` (which also holds the search index and table
-   * overhead). Blobs are shared between runs, so a blob counts only toward the run whose deletion
-   * actually frees it: the newest run that references it, and never one a pinned run still uses.
-   * Returns at least one run while any unpinned run exists.
-   */
-  private oldestRunsCovering(excess: number, stored: number): string[] {
-    const rowBytes = `octet_length(s.attributes) + octet_length(s.events) + octet_length(s.links) + IFNULL(octet_length(s.extra), 0) + IFNULL(octet_length(s.input_preview), 0) + IFNULL(octet_length(s.output_preview), 0) + octet_length(s.name)`;
-    // A big value lives in a blob file but its text is also in the search index, so the
-    // indexed text counts toward the run too.
-    const indexed = new Map(
-      (this.db.prepare("SELECT trace_id AS t, SUM(octet_length(name) + octet_length(tool_name) + octet_length(body)) AS f FROM span_fts GROUP BY trace_id").all() as { t: string; f: number }[]).map((r) => [r.t, r.f]),
-    );
-    const rows = (
-      this.db
-        .prepare(
-          `SELECT r.trace_id AS t, r.pinned AS pinned, COALESCE(SUM(${rowBytes}), 0) AS w, group_concat(s.blobs, '') AS b
-           FROM runs r LEFT JOIN spans s ON s.trace_id = r.trace_id
-           GROUP BY r.trace_id ORDER BY COALESCE(r.ended_ms, r.received_ms) ASC`,
-        )
-        .all() as { t: string; pinned: number; w: number; b: string | null }[]
-    ).map((r) => ({ ...r, w: r.w + (indexed.get(r.t) ?? 0) }));
-    const shas = rows.map((r) => (r.b ? [...new Set(r.b.match(/[0-9a-f]{64}/g) ?? [])] : []));
-    const lastRef = new Map<string, number>();
-    shas.forEach((list, i) => list.forEach((sha) => lastRef.set(sha, rows[i].pinned ? Infinity : Math.max(lastRef.get(sha) ?? -1, i))));
-    const blobTotal = this.blobs.size();
-    const rowTotal = rows.reduce((n, r) => n + r.w, 0);
-    // Every table and index keeps at least its root page however many runs are deleted.
-    const fixed = (this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_schema WHERE rootpage > 0").get() as { n: number }).n * (this.db.pragma("page_size", { simple: true }) as number);
-    const rowScale = rowTotal > 0 ? Math.max(0, stored - blobTotal - fixed) / rowTotal : 0;
-    const pick: string[] = [];
-    let freed = 0;
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i].pinned) continue;
-      pick.push(rows[i].t);
-      freed += rows[i].w * rowScale;
-      for (const sha of shas[i]) if (lastRef.get(sha) === i) freed += this.blobs.sizeOf(sha);
-      if (freed >= excess) break;
-    }
-    return pick;
-  }
-
-  /** Merges the full-text index so space held by deleted spans is actually released. */
-  private compactSearchIndex(): void {
-    this.db.prepare("INSERT INTO span_fts(span_fts) VALUES('optimize')").run();
   }
 
   /** Bytes of data actually stored: database pages in use (not free pages) plus payload blobs. */
@@ -1393,23 +1538,58 @@ export class Store {
   }
 
   /**
-   * Deletes runs in one go. The search index can't look rows up by run (trace_id is an unindexed
-   * column there), so each delete statement scans the whole index; doing it once for the batch,
-   * not once per run, is what keeps a large retention trim fast.
+   * Deletes runs in one go. Until the search index's run ids are filled in (the first start after
+   * an update), deleting from it by run scans the whole index; doing it once for the batch, not
+   * once per run, keeps a large retention trim fast.
    */
   deleteRuns(traceIds: string[]): void {
-    if (!traceIds.length) return;
-    const ids = JSON.stringify(traceIds);
+    this.reclaimUnreferencedBlobs(this.deleteRunRows(traceIds).shas);
+  }
+
+  /**
+   * Deletes the runs' rows in one transaction and returns the payloads they used, for the caller to
+   * reclaim. With `notAfter`, only runs still unpinned and not updated since then go: retention
+   * picks runs, then deletes them over several turns of the event loop.
+   */
+  private deleteRunRows(traceIds: string[], notAfter?: number): { removed: number; shas: string[] } {
+    if (!traceIds.length) return { removed: 0, shas: [] };
     const inIds = "trace_id IN (SELECT value FROM json_each(?))";
-    const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
-    const tx = this.db.transaction(() => {
-      for (const t of ["spans", "span_fts", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
+    return this.db.transaction(() => {
+      let list = traceIds;
+      if (notAfter !== undefined) {
+        list = (this.db.prepare(`SELECT trace_id FROM runs WHERE ${inIds} AND pinned = 0 AND updated_ms < ?`).all(JSON.stringify(traceIds), notAfter) as { trace_id: string }[]).map((r) => r.trace_id);
+        if (!list.length) return { removed: 0, shas: [] };
+      }
+      const ids = JSON.stringify(list);
+      const shas = (this.db.prepare(`SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.${inIds} AND spans.blobs IS NOT NULL`).all(ids) as { sha: string }[]).map((r) => r.sha);
+      this.searchIds.deleteRuns(ids);
+      for (const t of ["spans", "logs", "findings", "decisions", "explanations", "notes", "summaries", "annotations"]) {
         this.db.prepare(`DELETE FROM ${t} WHERE ${inIds}`).run(ids);
       }
       this.db.prepare(`DELETE FROM runs WHERE ${inIds}`).run(ids);
-    });
-    tx();
-    this.reclaimUnreferencedBlobs(shas);
+      return { removed: list.length, shas };
+    })();
+  }
+
+  /**
+   * Removes payload files no span references and temporary files from unfinished writes: what a
+   * crash during ingest leaves behind (#407). They stay on disk and count toward the size cap
+   * otherwise. Only files older than `minAgeMs` go, so a write still in progress (in another
+   * process using this store) is never touched. Run at startup, before the first sweep.
+   */
+  reclaimOrphanBlobs(minAgeMs = 3_600_000, now = Date.now()): { files: number; bytes: number } {
+    const old = this.blobs.files().filter((f) => now - f.mtimeMs >= minAgeMs);
+    if (!old.length) return { files: 0, bytes: 0 };
+    const used = new Set((this.db.prepare("SELECT DISTINCT j.value AS sha FROM spans, json_each(CASE WHEN json_valid(spans.blobs) THEN spans.blobs ELSE '[]' END) AS j WHERE spans.blobs IS NOT NULL").all() as { sha: string }[]).map((r) => r.sha));
+    let files = 0;
+    let bytes = 0;
+    for (const f of old) {
+      if (f.sha && used.has(f.sha)) continue;
+      fs.rmSync(f.path, { force: true });
+      files++;
+      bytes += f.size;
+    }
+    return { files, bytes };
   }
 
   /** Deletes candidate payloads only after checking every remaining span reference. */
@@ -1453,25 +1633,54 @@ export class Store {
   }
 
   /** Full-text index for a span: its input, output and error, as much as SEARCH_LIMIT allows. */
-  private indexSpan(traceId: string, spanId: string, name: string, view: SpanView): void {
-    this.db.prepare("DELETE FROM span_fts WHERE trace_id = ? AND span_id = ?").run(traceId, spanId);
+  private indexSpan(traceId: string, spanId: string, name: string, view: SpanView, replace = true): void {
+    // A span stored for the first time has no index rows yet (they are only deleted with the span).
+    if (replace) this.searchIds.deleteSpan(traceId, spanId);
     const body = [searchText(view.input), searchText(view.output), searchText(view.error ?? undefined)].join("\n");
-    this.db.prepare("INSERT INTO span_fts (trace_id, span_id, name, tool_name, body) VALUES (?, ?, ?, ?, ?)").run(traceId, spanId, name, view.toolName ?? "", body);
+    const { lastInsertRowid } = this.db.prepare("INSERT INTO span_fts (trace_id, span_id, name, tool_name, body) VALUES (?, ?, ?, ?, ?)").run(traceId, spanId, name, view.toolName ?? "", body);
+    this.searchIds.add(lastInsertRowid, traceId, spanId);
+  }
+
+  /** Fills in the run and span of each search-index row, for a store from an older version. */
+  rebuildSearchIds(onDone?: (rows: number, ready: boolean) => void): void {
+    this.searchIds.rebuild(onDone);
+  }
+
+  /**
+   * The search index's startup work, in order: fill in its run ids, then re-index spans stored
+   * before search covered whole values. Re-indexing replaces each span's rows, which goes through
+   * the run ids once they're in; without them, it scans the whole index for every span. So if the
+   * run ids can't be filled in (a locked or failing database), it tries again twice, a minute and
+   * then two later, and the re-index waits for them or for the next start.
+   */
+  maintainSearch(onIds?: (rows: number, ready: boolean) => void, onReindex?: (n: number, ok: boolean) => void, retryMs = 60_000): void {
+    const attempt = (tries: number) =>
+      this.rebuildSearchIds((rows, ready) => {
+        // These run on later turns of the event loop, by when the store may have been closed.
+        if (!this.db.open) return;
+        if (ready) {
+          onIds?.(rows, true);
+          if (this.db.open) this.reindexSearch(onReindex);
+        } else if (tries < 3) {
+          setTimeout(() => this.db.open && attempt(tries + 1), retryMs * tries).unref();
+        } else {
+          onIds?.(rows, false);
+        }
+      });
+    attempt(1);
   }
 
   /**
    * Re-indexes spans stored before the index covered whole values (it kept 4,000 characters of
    * each), a few hundred at a time so startup isn't held up. Runs once per database.
    */
-  reindexSearch(onDone?: (n: number) => void): void {
+  reindexSearch(onDone?: (n: number, ok: boolean) => void): void {
     if (this.getMeta("search_index") === String(SEARCH_INDEX_VERSION)) return;
     let after = 0;
     let n = 0;
-    const step = () => {
-      if (!this.db.open) return;
-      const rows = this.db.prepare("SELECT seq, trace_id, span_id FROM spans WHERE seq > ? ORDER BY seq LIMIT 300").all(after) as { seq: number; trace_id: string; span_id: string }[];
+    // Each chunk commits as one, so the index and its run ids (span_fts_ids) change together.
+    const chunk = this.db.transaction((rows: { seq: number; trace_id: string; span_id: string }[]) => {
       for (const r of rows) {
-        after = r.seq;
         const full = this.getOtlpSpan(r.trace_id, r.span_id);
         if (!full) continue;
         const view = buildView(full.span, full.resource.attributes);
@@ -1479,11 +1688,24 @@ export class Store {
         this.indexSpan(r.trace_id, r.span_id, full.span.name, view);
         n++;
       }
-      if (rows.length) setImmediate(step);
-      else {
+    });
+    const step = () => {
+      if (!this.db.open) return;
+      try {
+        const rows = this.db.prepare("SELECT seq, trace_id, span_id FROM spans WHERE seq > ? ORDER BY seq LIMIT 300").all(after) as { seq: number; trace_id: string; span_id: string }[];
+        chunk(rows);
+        if (rows.length) {
+          after = rows[rows.length - 1].seq;
+          setImmediate(step);
+          return;
+        }
         this.setMeta("search_index", String(SEARCH_INDEX_VERSION));
-        onDone?.(n);
+      } catch {
+        // A busy or failing database: stop (a failed chunk rolls back), and start over at the next start.
+        onDone?.(n, false);
+        return;
       }
+      onDone?.(n, true);
     };
     setImmediate(step);
   }

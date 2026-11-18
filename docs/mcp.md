@@ -43,7 +43,7 @@ The 23 tools, by what they are for:
 
 | Tool | Returns | Model |
 | --- | --- | --- |
-| `create_check`, `preview_check` | A new check from a concern or YAML, and its hit rate on recent runs | local LLM, then decision model |
+| `create_check`, `preview_check` | A new check from a concern or YAML, and its hit rate on recent runs. `create_check` won't save a rule with `action: halt` or change an existing halt rule; only you make halt rules, in the app or CLI | local LLM, then decision model |
 | `annotate` | Marks a run or span as issue, good, or a note | none |
 | `replay` | Re-sends one LLM span's messages (edited, or with another model or system prompt) and stores the answer as a new run | the configured LLM |
 | `rerun` | Re-runs the whole agent through its registered command or endpoint (`neatroots rerun add`), optionally with a new input, model or system prompt | none |

@@ -35,7 +35,7 @@ flowchart TB
 | --- | --- |
 | `otlp/codec.ts` | OTLP protobuf/JSON decode and lossless encode (vendored opentelemetry-proto) |
 | `semantics/view.ts` | Span kind, input/output, model, tokens from public `neatlogs.*`, OpenInference and GenAI attributes |
-| `store/db.ts`, `store/blobs.ts` | SQLite (WAL): sessions, runs, spans, findings, notes, plans, checks, decisions, explanations, summaries, annotations, forwards; FTS5 search; retention |
+| `store/db.ts`, `store/blobs.ts`, `store/search-ids.ts` | SQLite (WAL): sessions, runs, spans, findings, notes, plans, checks, decisions, explanations, summaries, annotations, forwards; FTS5 search (with each index row's run and span in a plain table, so lookups by run don't read the indexed text); retention |
 | `server/collector.ts`, `server/readback.ts` | `/v1/traces`, `/v1/logs`, `/v1/trace`, doctor read-back |
 | `ingest/` | The HTTP trace API and OTLP/gRPC (`http-trace.ts`, `grpc.ts`), span trees to OTLP (`build.ts`), and imports of trace files and Neatlogs Cloud traces (`importers/`; cloud imports run as cancellable jobs) |
 | `semantics/chat-view.ts` | A run as a conversation: system, user, assistant, tool and sub-agent items |

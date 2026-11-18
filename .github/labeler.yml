@@ -1,0 +1,56 @@
+# Area labels for pull requests, from the paths they change (actions/labeler, .github/workflows/labeler.yml).
+"area: store":
+  - changed-files:
+      - any-glob-to-any-file: ["packages/neatroots/src/store/**"]
+"area: ingest":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "packages/neatroots/src/ingest/**"
+          - "packages/neatroots/src/otlp/**"
+          - "packages/neatroots/src/semantics/**"
+          - "packages/neatroots/src/server/collector.ts"
+          - "packages/neatroots/src/server/readback.ts"
+          - "packages/neatroots/src/server/ingest-guard.ts"
+"area: checks":
+  - changed-files:
+      - any-glob-to-any-file: ["packages/neatroots/src/checks/**", "packages/neatroots/src/engine/**", "packages/neatroots/library/**"]
+"area: steering":
+  - changed-files:
+      - any-glob-to-any-file: ["packages/neatroots/src/steering/**", "packages/steer-ts/**", "python/neatroots-steer/**"]
+"area: ui":
+  - changed-files:
+      - any-glob-to-any-file: ["packages/ui/**"]
+"area: mcp":
+  - changed-files:
+      - any-glob-to-any-file: ["packages/neatroots/src/mcp/**"]
+"area: cli":
+  - changed-files:
+      - any-glob-to-any-file: ["packages/neatroots/src/cli.ts", "packages/neatroots/src/cli/**", "install.sh"]
+"area: models":
+  - changed-files:
+      - any-glob-to-any-file: ["packages/neatroots/src/models/**"]
+"area: cloud":
+  - changed-files:
+      - any-glob-to-any-file: ["packages/neatroots/src/relay/**"]
+"area: replay":
+  - changed-files:
+      - any-glob-to-any-file: ["packages/neatroots/src/replay/**"]
+"area: agents":
+  - changed-files:
+      - any-glob-to-any-file: ["packages/neatroots/src/agents/**"]
+"area: server":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "packages/neatroots/src/server/api*.ts"
+          - "packages/neatroots/src/server/app.ts"
+          - "packages/neatroots/src/server/util.ts"
+          - "packages/neatroots/src/server/coverage.ts"
+          - "packages/neatroots/src/{bus,config,core,index,types,version}.ts"
+          - "packages/neatroots/src/util/**"
+          - "packages/neatroots/src/dev/**"
+"area: docs":
+  - changed-files:
+      - any-glob-to-any-file: ["docs/**", "examples/**", "skills/**", "*.md"]
+"area: ci":
+  - changed-files:
+      - any-glob-to-any-file: [".github/**", "scripts/**"]

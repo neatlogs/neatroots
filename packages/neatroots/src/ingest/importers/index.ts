@@ -4,6 +4,9 @@ import { getCloudToken } from "../../relay/keychain.js";
 import { log } from "../../util/log.js";
 import { cloudApiBase, neatlogsCloudSource, type CloudAuth } from "./neatlogs-cloud.js";
 import { ImportError, type ImportSource } from "./types.js";
+import { endpointProblem } from "../../relay/endpoint.js";
+import { attr } from "../../otlp/types.js";
+import { hexId } from "../build.js";
 
 export { parseTraceFile } from "./file.js";
 
@@ -14,7 +17,11 @@ export async function cloudImportAuth(roots: Roots): Promise<CloudAuth | undefin
 }
 
 export function cloudImportBase(roots: Roots): string {
-  return cloudApiBase(roots.relay.endpoint(), roots.config.cloud.apiBase);
+  const base = cloudApiBase(roots.relay.endpoint(), roots.config.cloud.apiBase);
+  // The service-account token goes to this base: same rule as forwarding a key.
+  const problem = endpointProblem(base, !!roots.config.cloud.trustEndpoint);
+  if (problem) throw new ImportError(problem);
+  return base;
 }
 export { ImportError } from "./types.js";
 export type { ImportSource, ImportField } from "./types.js";
@@ -29,8 +36,10 @@ export interface ImportJob {
   traces: number;
   spans: number;
   failed: number;
+  /** Traces that are runs captured here (a run sent to Cloud from here, say): kept, not imported over. */
+  skipped: number;
   last_error: string | null;
-  /** Local trace ids of the first runs imported, for links. */
+  /** Local trace ids of the first runs imported (or kept), for links. */
   trace_ids: string[];
   project: string | null;
   window: { since_ms: number; until_ms: number };
@@ -63,6 +72,16 @@ export class ImportJobs {
     return this.jobs.get(id);
   }
 
+  /**
+   * A run with spans captured here (an SDK, OTLP, the HTTP API, a file), as opposed to one imported
+   * from Neatlogs Cloud before. A run sent to Cloud keeps its ids there, and Cloud's copy (redacted,
+   * with only the public API's fields) must not replace it; a Cloud import can be refreshed.
+   */
+  private capturedHere(traceId: string): boolean {
+    if (!this.roots.store.getRun(traceId)) return false;
+    return this.roots.store.resourcesFor(traceId).some((r) => attr(r.attributes, "neatroots.import.source") !== "neatlogs-cloud");
+  }
+
   cancel(id: string): boolean {
     const c = this.controllers.get(id);
     if (!c) return false;
@@ -92,6 +111,7 @@ export class ImportJobs {
       traces: 0,
       spans: 0,
       failed: 0,
+      skipped: 0,
       last_error: null,
       trace_ids: [],
       project: opts.project ?? null,
@@ -103,10 +123,19 @@ export class ImportJobs {
     this.controllers.set(job.id, controller);
     const done = (async () => {
       try {
-        for await (const t of source.traces({ values: filled, sinceMs: job.window.since_ms, untilMs, limit: opts.limit ?? 100, project: opts.project, signal: controller.signal })) {
+        const kept = (sourceId: string) => (this.capturedHere(hexId(sourceId, 16)) ? hexId(sourceId, 16) : undefined);
+        for await (const t of source.traces({ values: filled, sinceMs: job.window.since_ms, untilMs, limit: opts.limit ?? 100, project: opts.project, signal: controller.signal, kept })) {
           if (t.error) {
             job.failed += 1;
             job.last_error = `trace ${t.sourceId}: ${t.error}`;
+            this.roots.bus.emit("import", { ...job });
+            continue;
+          }
+          // Checked again right before storing: the run may have started arriving while it downloaded.
+          const here = t.kept ?? [...new Set(t.batches.flatMap((b) => b.spans.map((s) => s.traceId)))].find((id) => this.capturedHere(id));
+          if (here) {
+            job.skipped += 1;
+            if (job.trace_ids.length < 20 && !job.trace_ids.includes(here)) job.trace_ids.push(here);
             this.roots.bus.emit("import", { ...job });
             continue;
           }

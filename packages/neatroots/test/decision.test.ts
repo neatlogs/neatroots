@@ -161,3 +161,70 @@ describe("Laya trust", () => {
     await llm.close();
   });
 });
+
+describe("decision requests that leave the machine", () => {
+  const secrets = "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123 and Authorization: Basic dXNlcjpodW50ZXIy";
+
+  async function recorder() {
+    const bodies: string[] = [];
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        bodies.push(body);
+        const b = JSON.parse(body || "{}");
+        const answers = Object.fromEntries(Object.keys(b.questions ?? {}).map((k) => [k, { type: "noul", noul: 0.2 }]));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ model: "m", answers }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    return { bodies, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close: () => server.close() };
+  }
+
+  async function decideVia(baseUrl: (local: string) => string, redact?: "secrets" | "all" | "off") {
+    const { vi } = await import("vitest");
+    const { defaultConfig } = await import("../src/config.js");
+    const { LlmClient } = await import("../src/models/llm.js");
+    const { DecisionModel } = await import("../src/models/decision.js");
+    const rec = await recorder();
+    // A remote host can't be reached from a test, so its requests are delivered to the local recorder.
+    const realFetch = globalThis.fetch;
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const u = new URL(String(input));
+      return realFetch(u.hostname === "jev.example.com" ? `${rec.url}${u.pathname}` : input, init);
+    });
+    try {
+      const cfg = defaultConfig();
+      cfg.llm.enabled = false;
+      if (redact) cfg.llm.external.redact = redact;
+      cfg.classifier.laya.port = 1;
+      cfg.classifier.baseUrl = "";
+      cfg.classifier.backend = "jev-cloud";
+      cfg.classifier.jevCloud.enabled = true;
+      cfg.classifier.jevCloud.baseUrl = baseUrl(rec.url);
+      const dm = new DecisionModel(cfg.classifier, new LlmClient(cfg.llm), { laya: async () => undefined, jevCloud: async () => "cloud-key" });
+      const r = await dm.decide(`tool read_env returned: ${secrets}`, [{ name: "q", type: "yes_no", ask: `Did it leak sk-ant-abcdefghijklmnopqrstuvwxyz0123?` }]);
+      expect(r.backend).toBe("jev-cloud");
+      expect(rec.bodies).toHaveLength(1);
+      return rec.bodies[0];
+    } finally {
+      spy.mockRestore();
+      rec.close();
+    }
+  }
+
+  it("removes credentials from what Jev cloud receives", async () => {
+    const body = await decideVia(() => "https://jev.example.com");
+    expect(body).not.toContain("sk-proj-abcdefghijklmnopqrstuvwxyz0123");
+    expect(body).not.toContain("sk-ant-abcdefghijklmnopqrstuvwxyz0123");
+    expect(body).not.toContain("dXNlcjpodW50ZXIy");
+    expect(body).toContain("[redacted:api_key]");
+    expect(body).toContain("[redacted:basic_auth]");
+  });
+
+  it("sends the original text to a server on this machine, and when redaction is off", async () => {
+    expect(await decideVia((local) => local)).toContain(secrets);
+    expect(await decideVia(() => "https://jev.example.com", "off")).toContain(secrets);
+  });
+});

@@ -1,0 +1,85 @@
+name: nightly
+
+# Slower checks than CI runs on each pull request: the e2e suite three times over, so flaky tests
+# show up, and a performance smoke test on a generated store (scripts/perf-smoke.mjs). A scheduled
+# run that fails opens an issue, or comments on the one already open.
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      budget_factor:
+        description: Scale the performance budgets (0.001 makes them fail, to check the job can fail)
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-repeat:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm --filter @neatlogs/neatroots-ui exec playwright install --with-deps chromium
+      - name: UI end-to-end tests, three times over
+        run: pnpm --filter @neatlogs/neatroots-ui e2e --repeat-each=3
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-nightly
+          path: |
+            packages/ui/playwright-report
+            packages/ui/test-results
+          retention-days: 7
+
+  perf:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Performance smoke test (3,000 runs, 36,000 spans)
+        env:
+          PERF_BUDGET_FACTOR: ${{ inputs.budget_factor || '1' }}
+        run: node scripts/perf-smoke.mjs
+
+  report:
+    needs: [e2e-repeat, perf]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          E2E: ${{ needs.e2e-repeat.result }}
+          PERF: ${{ needs.perf.result }}
+        with:
+          script: |
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const failed = [
+              process.env.E2E === "failure" && "the e2e suite (run three times)",
+              process.env.PERF === "failure" && "the performance smoke test",
+            ].filter(Boolean);
+            const body = `Failed: ${failed.join(" and ")}. The [nightly run](${run}) has the logs and the report.`;
+            const title = "Nightly checks failed";
+            const open = await github.paginate(github.rest.issues.listForRepo, { ...context.repo, state: "open", labels: "area: ci", per_page: 100 });
+            const existing = open.find((i) => i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: existing.number, body });
+            } else {
+              const labels = ["area: ci", process.env.PERF === "failure" ? "performance" : "bug"];
+              await github.rest.issues.create({ ...context.repo, title, body, labels });
+            }

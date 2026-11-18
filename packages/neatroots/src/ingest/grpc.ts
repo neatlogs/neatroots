@@ -30,26 +30,37 @@ export function startGrpc(roots: Roots): Promise<grpc.Server | null> {
   const port = roots.config.grpcPort;
   if (!port) return Promise.resolve(null);
   const server = new grpc.Server({ "grpc.max_receive_message_length": 64 * 1024 * 1024 });
+  // A message that can't be decoded is INVALID_ARGUMENT; one that decoded but could not be stored
+  // is UNAVAILABLE, the code an OTLP exporter retries.
   const handler =
-    (fn: (body: Buffer) => void): grpc.handleUnaryCall<Buffer, Buffer> =>
+    <T>(decode: (body: Buffer) => T, store: (msg: T) => void): grpc.handleUnaryCall<Buffer, Buffer> =>
     (call, callback) => {
+      let msg: T;
       try {
-        fn(call.request);
-        callback(null, empty());
+        msg = decode(call.request);
       } catch (err) {
         log.warn(`rejected OTLP/gRPC payload: ${(err as Error).message}`);
         callback({ code: grpc.status.INVALID_ARGUMENT, details: (err as Error).message });
+        return;
       }
+      try {
+        store(msg);
+      } catch (err) {
+        log.error("ingest failed", err);
+        callback({ code: grpc.status.UNAVAILABLE, details: "neatroots could not store this batch; retry" });
+        return;
+      }
+      callback(null, empty());
     };
   server.addService(
     unary("/opentelemetry.proto.collector.trace.v1.TraceService/Export", () => {}),
-    { Export: handler((b) => roots.ingest(decodeTraceProtobuf(b) as ResourceSpansBatch[])) },
+    { Export: handler((b) => decodeTraceProtobuf(b) as ResourceSpansBatch[], (batches) => roots.ingest(batches)) },
   );
   server.addService(
     unary("/opentelemetry.proto.collector.logs.v1.LogsService/Export", () => {}),
-    { Export: handler((b) => roots.store.ingestLogs(decodeLogsProtobuf(b))) },
+    { Export: handler(decodeLogsProtobuf, (records) => roots.store.ingestLogs(records)) },
   );
-  server.addService(unary("/opentelemetry.proto.collector.metrics.v1.MetricsService/Export", () => {}), { Export: handler(() => {}) });
+  server.addService(unary("/opentelemetry.proto.collector.metrics.v1.MetricsService/Export", () => {}), { Export: handler(() => undefined, () => {}) });
   return new Promise((resolve) => {
     server.bindAsync(`${roots.config.host}:${port}`, grpc.ServerCredentials.createInsecure(), (err) => {
       if (err) {

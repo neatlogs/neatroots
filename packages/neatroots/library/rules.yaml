@@ -56,6 +56,17 @@
     metric: total_tokens
     at_least: 200000
 
+- id: reply-truncated
+  kind: rule
+  title: A model reply was cut off at its token limit
+  rule:
+    type: match
+    span: { type: llm }
+    field: finish_reason
+    pattern: '^(max_tokens|length|MAX_TOKENS)$'
+    flags: 'i'
+  guidance: The reply was truncated at the token limit and is incomplete. Raise max_tokens for this call or ask the model to continue before using the reply.
+
 - id: secret-in-output
   kind: rule
   title: Something that looks like a secret key in model output
@@ -69,7 +80,7 @@
 
 - id: unrecovered-tool-failure
   kind: rule
-  group: loop
+  group: tool-result
   title: A tool call failed and the run still ended with an answer
   rule:
     type: unrecovered_error
@@ -97,7 +108,7 @@
     type: match
     span: { type: [tool, mcp_tool], status: ok }
     field: output
-    pattern: '"(error|errors|exception)"\s*:\s*("[^"\s]|\{|\[\s*[^\]\s])|"(status|status_code|http_status)"\s*:\s*"?[45]\d\d\b|rate limit(ed)? exceeded|too many requests|internal server error|service unavailable|traceback \(most recent call last\)|(^|\n)\s*error:|\bHTTP [45]\d\d\b'
+    pattern: '"(error|errors|exception)"\s*:\s*("[^"\s]|\{|\[\s*[^\]\s])|"(status|status_code|http_status)"\s*:\s*"?[45]\d\d\b|rate limit(ed)? exceeded|too many requests|internal server error|service unavailable|traceback \(most recent call last\)|(^|\n)[^\S\n]*error:|\bHTTP [45]\d\d\b'
   guidance: >-
     The output of {span} looks like an error even though the call did not fail. Do not treat it as a
     result. Check it, retry or tell the user.

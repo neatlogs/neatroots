@@ -1,14 +1,5 @@
 import { z } from "zod";
 
-function compiles(pattern: string, flags: string): boolean {
-  try {
-    new RegExp(pattern, flags);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** Which spans a check looks at. Every field is optional; all given fields must match. */
 export const SpanSelector = z
   .object({
@@ -106,12 +97,21 @@ export const RuleSpec = z.discriminatedUnion("type", [
     .object({
       type: z.literal("match"),
       span: SpanSelector.optional(),
-      field: z.enum(["input", "output", "error", "name"]).default("output"),
+      field: z.enum(["input", "output", "error", "name", "finish_reason"]).default("output"),
       pattern: z.string(),
       flags: z.string().optional(),
     })
     .strict()
-    .refine((r) => compiles(r.pattern, r.flags ?? "i"), { message: "pattern is not a valid regular expression", path: ["pattern"] }),
+    .superRefine((r, ctx) => {
+      // Loading refuses only a pattern that doesn't compile. One that nests repeats, which checks
+      // saved before 0.2.9 can have, still loads and runs under a time limit (rules.ts); saving a
+      // new one is refused (checkFromInput).
+      try {
+        new RegExp(r.pattern, r.flags ?? "i");
+      } catch (e) {
+        ctx.addIssue({ code: "custom", path: ["pattern"], message: `not a valid regular expression (${(e as Error).message})` });
+      }
+    }),
   z
     .object({
       type: z.literal("unrecovered_error"),

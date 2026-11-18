@@ -20,6 +20,7 @@ export function PushBanner() {
     onSuccess: (r) => {
       if (r.status === "sent") toast.success("Runs sent to Neatlogs Cloud");
       else if (r.status === "failed") toast.error(`Couldn't send the runs: ${r.error ?? "unknown error"}`);
+      else if (r.status === "sending") toast("These runs are already being sent to Neatlogs Cloud");
       else toast("Push declined; nothing was sent");
     },
     onSettled: () => void qc.invalidateQueries({ queryKey: appKeys.pushes }),

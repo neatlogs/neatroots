@@ -28,7 +28,7 @@ export function ImportJobs() {
               )}
               <span className="flex min-w-0 flex-1 flex-col">
                 <span className="text-foreground tabular-nums">
-                  {j.label} · {j.traces} runs, {j.spans} spans{j.failed ? `, ${j.failed} failed` : ""}
+                  {j.label} · {j.traces} runs, {j.spans} spans{j.skipped ? `, ${j.skipped} already here` : ""}{j.failed ? `, ${j.failed} failed` : ""}
                 </span>
                 {j.last_error && <span className="truncate text-xs text-danger-fg">{j.last_error}</span>}
               </span>

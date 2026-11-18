@@ -1,4 +1,4 @@
-import { kvToPlain, type KeyValue, type OtlpSpan, type Plain } from "../otlp/types.js";
+import { kvToPlain, setOwn, type KeyValue, type OtlpSpan, type Plain } from "../otlp/types.js";
 
 /**
  * Span kinds from the public Neatlogs telemetry schema. The SDKs send them
@@ -51,6 +51,7 @@ export interface SpanView {
   input?: Plain;
   output?: Plain;
   error?: string;
+  finishReason?: string;
   interrupted?: boolean;
   terminationReason?: string;
   /** Tool calls the LLM asked for (LLM spans only). */
@@ -114,7 +115,7 @@ export function collectIndexed(attrs: Attrs, prefix: string): Record<string, Pla
     const row = rows.get(idx) ?? {};
     if (dot === -1) {
       const parsed = maybeJson(value);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) Object.assign(row, parsed);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) for (const [k, v] of Object.entries(parsed)) setOwn(row, k, v as Plain);
       else row.value = parsed ?? null;
     } else {
       setPath(row, rest.slice(dot + 1).split("."), value);
@@ -124,15 +125,16 @@ export function collectIndexed(attrs: Attrs, prefix: string): Record<string, Pla
   return [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([, r]) => r);
 }
 
+/** Keys come from span attributes, so only own properties are read and written (see setOwn). */
 function setPath(obj: Record<string, Plain>, parts: string[], value: Plain): void {
   let cur: Record<string, Plain> = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     const k = parts[i];
-    const next = cur[k];
-    if (!next || typeof next !== "object" || Array.isArray(next)) cur[k] = {};
+    const next = Object.prototype.hasOwnProperty.call(cur, k) ? cur[k] : undefined;
+    if (!next || typeof next !== "object" || Array.isArray(next)) setOwn(cur, k, {});
     cur = cur[k] as Record<string, Plain>;
   }
-  cur[parts[parts.length - 1]] = value;
+  setOwn(cur, parts[parts.length - 1], value);
 }
 
 function normKind(raw: string | undefined): SpanKind | undefined {
@@ -247,6 +249,29 @@ function llmToolCalls(attrs: Attrs): SpanView["toolCalls"] {
   }));
 }
 
+function finishReasonOf(attrs: Attrs): string | undefined {
+  const sources: (Plain | undefined)[] = [
+    attrs["neatlogs.llm.finish_reason"],
+    attrs["gen_ai.response.finish_reasons"],
+    attrs["llm.finish_reason"],
+    attrs["ai.response.finishReason"],
+    attrs["gen_ai.response.finish_reasons.0"],
+  ];
+  for (const src of sources) {
+    if (src === undefined || src === null || src === "") continue;
+    const parsed = maybeJson(src);
+    if (Array.isArray(parsed)) {
+      if (!parsed.length) continue;
+      const s = str(parsed[0]);
+      if (s) return s;
+      continue;
+    }
+    const s = str(parsed);
+    if (s) return s;
+  }
+  return undefined;
+}
+
 function exceptionMessage(span: OtlpSpan): string | undefined {
   for (const e of span.events) {
     if (e.name !== "exception") continue;
@@ -275,6 +300,7 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
   view.provider = str(first(attrs, ["neatlogs.llm.provider", "neatlogs.provider", "gen_ai.system", "gen_ai.provider.name", "llm.provider", "ai.model.provider"]));
   view.promptTokens = int(first(attrs, ["neatlogs.llm.token_count.prompt", "gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens", "llm.token_count.prompt", "ai.usage.promptTokens", "ai.usage.inputTokens"]));
   view.completionTokens = int(first(attrs, ["neatlogs.llm.token_count.completion", "gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens", "llm.token_count.completion", "ai.usage.completionTokens", "ai.usage.outputTokens"]));
+  view.finishReason = finishReasonOf(attrs);
   view.totalTokens =
     int(first(attrs, ["neatlogs.llm.token_count.total", "gen_ai.usage.total_tokens", "llm.token_count.total"])) ??
     (view.promptTokens !== undefined || view.completionTokens !== undefined

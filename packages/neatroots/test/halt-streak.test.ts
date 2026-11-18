@@ -49,6 +49,8 @@ async function setup(withUserRules = true) {
     await llm.close();
   });
   if (withUserRules) for (const c of rules) tb.roots.checks.save(c, "user");
+  // Halts reach the agent only while steering is on for the project (off sends nothing).
+  tb.roots.steering.setMode("test-agent", "advisory");
   const t = hex(16);
   const root = hex(8);
   tb.roots.ingest([batch([llmSpan(t, root, { system: "You are a billing agent.", user: "Charge order 4512" })])]);

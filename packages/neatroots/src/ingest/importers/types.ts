@@ -24,6 +24,8 @@ export interface ImportOptions {
   /** Local project name for the runs; defaults to the source's own project or name. */
   project?: string;
   signal: AbortSignal;
+  /** The local run a source trace must not replace (one captured here), so it isn't downloaded. */
+  kept?: (sourceId: string) => string | undefined;
 }
 
 /** One trace, ready to ingest. */
@@ -32,6 +34,8 @@ export interface ImportedTrace {
   batches: ResourceSpansBatch[];
   /** Set when this one trace couldn't be read; the import counts it as failed and carries on. */
   error?: string;
+  /** The local run this trace already is; it isn't imported over it. */
+  kept?: string;
 }
 
 export interface ImportSource {
@@ -64,6 +68,4 @@ export async function getJson<T>(url: string, init: RequestInit & { signal: Abor
 
 export const iso = (ms: number) => new Date(ms).toISOString();
 
-export function trimSlash(u: string): string {
-  return u.replace(/\/+$/, "");
-}
+export { trimSlash } from "../../util/url.js";

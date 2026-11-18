@@ -1,8 +1,14 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
+  - name: Questions and ideas
+    url: https://github.com/neatlogs/neatroots/discussions
+    about: Ask how to do something, or talk an idea through before opening a feature request.
+  - name: Report a security vulnerability
+    url: https://github.com/neatlogs/neatroots/security/advisories/new
+    about: Report it privately, never in a public issue. See SECURITY.md.
   - name: Getting started
     url: https://github.com/neatlogs/neatroots/blob/main/docs/getting-started.md
     about: Install, sending runs, replay, coding agents and troubleshooting.
-  - name: How contributions work
-    url: https://github.com/neatlogs/neatroots/blob/main/MAINTAINERS.md
-    about: Who maintains neatroots, and what to do before opening a pull request.
+  - name: How to contribute
+    url: https://github.com/neatlogs/neatroots/blob/main/CONTRIBUTING.md
+    about: Issues first, limits, tests, and what a pull request needs.
