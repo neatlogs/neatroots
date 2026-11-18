@@ -306,10 +306,17 @@ describe("imports", () => {
     const exp = JSON.stringify({ data: { schemaVersion: 1, trace: { traceId: tid, workflowName: "wf" }, spans: [{ traceId: tid, spanId: "1234567890abcdef", parentSpanId: null, spanName: "root", spanType: "workflow", startedAt: "2026-10-09T10:00:00Z", endedAt: null, durationMs: 5, status: "OK", model: null, provider: null, promptTokens: 0, completionTokens: 0, totalTokens: 0 }] } });
     expect(parseTraceFile(exp, "export.json")[0].spans[0].traceId).toBe(tid);
     const malformed = (span: Record<string, unknown>) => JSON.stringify({ data: { trace: { traceId: tid }, spans: [span] } });
+    expect(() => parseTraceFile(JSON.stringify({ data: { trace: { traceId: tid }, spans: null } }), "invalid-spans.json")).toThrow(/spans must be an array/);
+    expect(() => parseTraceFile(JSON.stringify({ data: { trace: { traceId: tid } } }), "missing-spans.json")).toThrow(/spans must be an array/);
+    expect(() => parseTraceFile(JSON.stringify({ data: { trace: {}, spans: [{ spanId: "s", startedAt: 1 }] } }), "missing-trace-id.json")).toThrow(/trace\.traceId is required/);
+    expect(() => parseTraceFile(JSON.stringify({ data: { trace: { traceId: "" }, spans: [{ spanId: "s", startedAt: 1 }] } }), "empty-trace-id.json")).toThrow(/trace\.traceId is required/);
     expect(() => parseTraceFile(malformed({ startedAt: 1 }), "missing-id.json")).toThrow(/spans\[0\]\.spanId is required/);
     expect(() => parseTraceFile(malformed({ spanId: "s" }), "missing-time.json")).toThrow(/spans\[0\]\.startedAt/);
+    expect(() => parseTraceFile(malformed({ spanId: "s", startedAt: "abc" }), "invalid-time.json")).toThrow(/spans\[0\]\.startedAt/);
     expect(() => parseTraceFile(JSON.stringify({ data: { trace: { traceId: tid }, spans: [null] } }), "null-span.json")).toThrow(/spans\[0\] must be an object/);
     expect(() => parseTraceFile(JSON.stringify({ data: { trace: { traceId: tid }, spans: [{ spanId: "s", startedAt: 1 }, { spanId: "s", startedAt: 2 }] } }), "duplicate.json")).toThrow(/spanId is duplicated/);
+    expect(() => parseTraceFile(JSON.stringify({ data: { trace: { traceId: tid }, spans: [{ spanId: "ABCDEF0123456789", startedAt: 1 }, { spanId: "abcdef0123456789", startedAt: 2 }] } }), "canonical-duplicate.json")).toThrow(/spanId is duplicated/);
+    expect(parseTraceFile(malformed({ spanId: "s", startedAt: 1e21 }), "numeric-time.json")[0].spans[0].startTimeUnixNano).toBe(toNs(1e21)?.toString());
     const lines = `${JSON.stringify({ name: "a" })}\n${JSON.stringify({ name: "b", children: [{ name: "c" }] })}\n`;
     expect(parseTraceFile(lines, "traces.jsonl").map((b) => b.spans.length)).toEqual([1, 2]);
     expect(() => parseTraceFile('{"foo":1}', "x.json")).toThrow(/not OTLP JSON/);
