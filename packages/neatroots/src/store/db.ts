@@ -275,6 +275,7 @@ CREATE TABLE IF NOT EXISTS uploads (
 export interface IngestedSpan {
   row: SpanRow;
   view: SpanView;
+  flags?: number;
   isNew: boolean;
 }
 
@@ -527,7 +528,7 @@ export class Store {
             updates.set(span.traceId, u);
           }
           const row = this.writeSpan(span, view, resourceId, scopeId, now, !previous);
-          u.spans.push({ row, view, isNew: !previous });
+          u.spans.push({ row, view, flags: span.flags, isNew: !previous });
           const runFlags = this.updateRun(span, view, row, resAttrs, now, previous);
           if (runFlags.created) u.runCreated = true;
           if (runFlags.rootEnded) u.rootEnded = true;

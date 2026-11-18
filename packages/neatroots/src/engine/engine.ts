@@ -16,6 +16,7 @@ import {
   resolveRefs,
   runGoal,
   selectSpans,
+  spanInfo,
   toolsOffered,
   type SpanInfo,
   type TraceSnapshot,
@@ -59,6 +60,11 @@ const SLOW_SPAN_CHECKS_PER_RUN = 4;
  */
 const RULE_GRACE_MS = 250;
 
+const MAX_SNAPSHOT_SPANS = 256;
+const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024;
+const MAX_LIVE_SNAPSHOT_BYTES = 16 * 1024 * 1024;
+const MAX_LIVE_SNAPSHOTS = 64;
+
 /** Triage at or above this expected level gets an LLM investigation. */
 const INVESTIGATE_AT = 2.5;
 
@@ -96,6 +102,9 @@ interface LiveRun {
   answered?: { traceChecks: Set<string>; toolSpans: Set<string> };
   /** Checks re-run on a stored run: steering never had a chance, so nothing counts as missed. */
   rechecked?: boolean;
+  snapshot?: TraceSnapshot;
+  snapshotBytes: number;
+  snapshotDisabled?: boolean;
 }
 
 export interface EngineStatus {
@@ -107,6 +116,32 @@ export interface EngineStatus {
 
 function clip(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+function estimateSnapshotBytes(snapshot: TraceSnapshot, limit: number): number {
+  const values: unknown[] = [];
+  let bytes = snapshot.spans.length * 256;
+  let visited = 0;
+  for (const span of snapshot.spans) values.push(span.input, span.output, span.toolCalls, span.tools, span.error, span.name);
+  while (values.length && bytes <= limit && visited++ < 100_000) {
+    const value = values.pop();
+    if (typeof value === "string") bytes += value.length * 2;
+    else if (typeof value === "number") bytes += 8;
+    else if (value && typeof value === "object") {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          values.push(item);
+          if (values.length + visited > 100_000) break;
+        }
+      } else for (const key in value) {
+        bytes += key.length * 2;
+        values.push((value as Record<string, unknown>)[key]);
+        if (values.length + visited > 100_000) break;
+      }
+    }
+  }
+  if (values.length) return limit + 1;
+  return bytes;
 }
 
 function toQuestion(c: QuestionCheck, params: Record<string, string>): DecisionQuestion {
@@ -285,6 +320,7 @@ export class Engine {
       endHandled: false,
       endPass: 0,
       doctor: row.doctor === 1,
+      snapshotBytes: 0,
     };
     this.live.set(traceId, r);
     return r;
@@ -296,6 +332,19 @@ export class Engine {
     if (run.doctor) {
       this.live.delete(u.traceId);
       return;
+    }
+    if (!run.snapshot && !run.snapshotDisabled) this.cacheSnapshot(run, loadTrace(this.roots.store, u.traceId));
+    else if (run.snapshot) {
+      const spans = new Map(run.snapshot.spans.map((s) => [s.id, s]));
+      for (const s of u.spans) {
+        if (s.row.name === "neatroots.guidance" || s.row.name === "roots.guidance") spans.delete(s.row.span_id);
+        else spans.set(s.row.span_id, spanInfo(s.row, s.view, s.flags));
+      }
+      this.cacheSnapshot(run, {
+        traceId: u.traceId,
+        run: this.roots.store.getRun(u.traceId),
+        spans: [...spans.values()].sort((a, b) => a.startMs - b.startMs || a.seq - b.seq),
+      });
     }
     // The caller's own span arrived after the run ended on a span that only qualified through its
     // remote parent (#157). End-of-run work already ran on the callee's slice of the trace, so it is
@@ -324,6 +373,20 @@ export class Engine {
       clearTimeout(run.endTimer);
       run.endTimer = setTimeout(() => void this.track(u.traceId, this.handleEnd(run)), 400);
     }
+  }
+
+  private cacheSnapshot(run: LiveRun, snapshot: TraceSnapshot): void {
+    const bytes = estimateSnapshotBytes(snapshot, MAX_SNAPSHOT_BYTES);
+    const otherBytes = [...this.live.values()].reduce((total, item) => total + (item === run ? 0 : item.snapshotBytes), 0);
+    const otherCount = [...this.live.values()].filter((item) => item !== run && item.snapshot).length;
+    if (snapshot.spans.length > MAX_SNAPSHOT_SPANS || bytes > MAX_SNAPSHOT_BYTES || otherBytes + bytes > MAX_LIVE_SNAPSHOT_BYTES || otherCount >= MAX_LIVE_SNAPSHOTS) {
+      run.snapshot = undefined;
+      run.snapshotBytes = 0;
+      run.snapshotDisabled = true;
+      return;
+    }
+    run.snapshot = snapshot;
+    run.snapshotBytes = bytes;
   }
 
   /** Checks in force for a run: its plan plus every user, project and MCP question that applies. */
@@ -359,7 +422,7 @@ export class Engine {
   }
 
   private async handleSpans(run: LiveRun, spanIds: string[]): Promise<void> {
-    const snap = loadTrace(this.roots.store, run.traceId);
+    const snap = run.snapshot ?? loadTrace(this.roots.store, run.traceId);
     const fresh = snap.spans.filter((s) => spanIds.includes(s.id));
     this.applyRules(run, snap, false, new Set(spanIds));
     this.ensurePlan(run, snap);
@@ -443,7 +506,7 @@ export class Engine {
   private async flushDirty(run: LiveRun): Promise<void> {
     const ids = [...run.dirty];
     run.dirty.clear();
-    const snap = loadTrace(this.roots.store, run.traceId);
+    const snap = run.snapshot ?? loadTrace(this.roots.store, run.traceId);
     for (const { check, params } of this.questionsFor(run)) {
       if (!ids.includes(check.id)) continue;
       await this.askTrace(run, check, params, snap);
@@ -534,7 +597,7 @@ export class Engine {
   // ------------------------------------------------------------- questions
 
   private async askSpan(run: LiveRun, check: QuestionCheck, params: Record<string, string>, spanId: string): Promise<void> {
-    const snap = loadTrace(this.roots.store, run.traceId);
+    const snap = run.snapshot ?? loadTrace(this.roots.store, run.traceId);
     const span = snap.spans.find((s) => s.id === spanId);
     if (!span) return;
     const ev = buildEvidence(snap, check.evidence, { focus: span });
@@ -1233,6 +1296,8 @@ ${library}`;
     run.deferred.push(...pending.slice(next));
     if (stale()) return;
     await this.summarize(run, snap, stale);
+    run.snapshot = undefined;
+    run.snapshotBytes = 0;
     this.scheduleLiveRelease(run);
   }
 

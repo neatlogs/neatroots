@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { checkFromInput } from "../src/server/api.js";
+import { evaluateRule } from "../src/checks/rules.js";
+import { loadTrace } from "../src/engine/trace.js";
 import { batch, hex, llmSpan, makeRoots, markerSpan, mockLlm, s, span, toolSpan, until, type TestRoots } from "./helpers.js";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -223,6 +225,62 @@ describe("engine", () => {
     expect(tb.roots.store.notesForTrace(t)).toEqual([]);
   });
 
+  it("matches a full reload after a corrected span and guidance span arrive", async () => {
+    const { tb } = await setup();
+    const check = checkFromInput(`
+id: corrected-output
+kind: rule
+title: Corrected output
+rule:
+  type: match
+  field: output
+  pattern: corrected
+  span: { type: tool }
+`).check;
+    if (!check) throw new Error("rule did not parse");
+    tb.roots.checks.save(check, "user");
+    const { t, root } = startRun(tb);
+    const toolId = hex(8);
+    tb.roots.ingest([batch([{ ...toolSpan(t, root, "lookup_order", "{}", "broken"), spanId: toolId }])]);
+    const corrected = { ...toolSpan(t, root, "lookup_order", "{}", "corrected"), spanId: toolId };
+    const guidance = span({ traceId: t, parent: root, name: "neatroots.guidance", kind: "workflow" });
+    tb.roots.ingest([batch([corrected, guidance])]);
+
+    const finding = await until(() => tb.roots.store.findingsForTrace(t).find((f) => f.check_id === "corrected-output"));
+    await tb.roots.engine!.waitIdle(t, 5000);
+    const incremental = (tb.roots.engine as any).live.get(t).snapshot;
+    const reloaded = loadTrace(tb.roots.store, t);
+    expect(incremental.spans).toEqual(reloaded.spans);
+    expect(incremental.spans.map((s: { id: string }) => s.id)).not.toContain(guidance.spanId);
+    const hit = evaluateRule(check as any, reloaded, false);
+    expect(evaluateRule(check as any, incremental, false)).toEqual(hit);
+    expect(hit?.evidenceSpanIds).toEqual(finding.evidence_span_ids);
+  });
+
+  it("keeps an incremental snapshot instead of reloading the full trace for every batch", async () => {
+    const tb = await makeRoots();
+    cleanup.push(tb.close);
+    const original = tb.roots.store.getSpans.bind(tb.roots.store);
+    let fullLoads = 0;
+    tb.roots.store.getSpans = ((...args: Parameters<typeof original>) => {
+      fullLoads++;
+      return original(...args);
+    }) as typeof tb.roots.store.getSpans;
+    const { t, root } = startRun(tb);
+    for (let i = 0; i < 12; i++) tb.roots.ingest([batch([toolSpan(t, root, `tool_${i}`, `{ "i": ${i} }`, "ok")])]);
+    expect(fullLoads).toBe(1);
+  });
+
+  it("drops the live snapshot when its span limit is exceeded", async () => {
+    const { tb } = await setup();
+    const { t, root } = startRun(tb);
+    const spans = Array.from({ length: 257 }, () => span({ traceId: t, parent: root, name: "child", kind: "workflow" }));
+    tb.roots.ingest([batch(spans)]);
+    const run = (tb.roots.engine as any).live.get(t);
+    expect(run.snapshot).toBeUndefined();
+    expect(run.snapshotDisabled).toBe(true);
+  });
+
   it("deduplicates a finding when question evaluations finish together", async () => {
     const { tb } = await setup(["did it fail"]);
     const { t } = startRun(tb);
@@ -310,6 +368,7 @@ describe("a run that ended on a span whose parent had not arrived yet (#157)", (
       engine.releaseLive(entry);
       return engine.live.get(t) === undefined;
     });
+    expect((entry as any).snapshot).toBeUndefined();
   });
 
   it("stays running when one update carries the callee's end and the caller's open span", async () => {
