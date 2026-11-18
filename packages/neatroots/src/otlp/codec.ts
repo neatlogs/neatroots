@@ -103,13 +103,15 @@ function normValue(v: any): AnyValue {
   }
   if ("kvlistValue" in v || "kvlist_value" in v) {
     const kv = pick("kvlistValue", "kvlist_value") ?? {};
-    return { kvlistValue: { values: normKvs(kv.values) } };
+    return { kvlistValue: { values: normKvs(kv.values, "kvlistValue.values") } };
   }
   return {};
 }
 
-function normKvs(kvs: any): KeyValue[] {
-  if (!Array.isArray(kvs)) return [];
+// Attributes that aren't a list would be dropped with a 200, like the lists objects() guards.
+function normKvs(kvs: any, name = "attributes"): KeyValue[] {
+  if (kvs === undefined || kvs === null) return [];
+  if (!Array.isArray(kvs)) throw new Error(`${name} must be an array`);
   return kvs.filter((k) => k && typeof k.key === "string").map((k) => ({ key: k.key, value: normValue(k.value) }));
 }
 

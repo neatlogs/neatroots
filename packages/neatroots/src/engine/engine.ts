@@ -80,6 +80,8 @@ interface LiveRun {
   /** Per question: flags the second look turned down; after a few, the question stops raising. */
   rejected: Map<string, number>;
   traceEvidence: Map<string, string>;
+  /** Per trace question: its calls, numbered in order, so an older one never writes over a newer one. */
+  traceAsks: Map<string, { last: number; written: number; out: Map<number, Promise<void>> }>;
   dirty: Set<string>;
   debounce?: NodeJS.Timeout;
   endTimer?: NodeJS.Timeout;
@@ -158,6 +160,13 @@ function pickSpans<S extends { id: string }>(spans: S[], ids: string[], traceId:
 export const QUIET_RUN_MS = 30 * 60_000;
 /** Quiet runs ended per sweep, so a backlog (the first start after an update) is worked off a batch a minute. */
 export const QUIET_SWEEP_LIMIT = 50;
+
+/**
+ * Most runs one quiet-run sweep claims at once. Claiming writes synchronously, so an
+ * unbounded pass (a long downtime's backlog) would block the event loop; the runs left
+ * over are still "running", so the next sweep claims them.
+ */
+
 
 export class Engine {
   private live = new Map<string, LiveRun>();
@@ -269,6 +278,7 @@ export class Engine {
       retrySpans: new Map(),
       rejected: new Map(),
       traceEvidence: new Map(),
+      traceAsks: new Map(),
       dirty: new Set(),
       ruleGrace: new Map(),
       ended: false,
@@ -544,7 +554,32 @@ export class Engine {
     const key = ev.spanIds.join(",") + (check.evidence?.final_output ? `|${finalOutput(snap) ?? ""}` : "");
     if (run.traceEvidence.get(check.id) === key) return;
     run.traceEvidence.set(check.id, key);
-    const outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null);
+    // Evidence can change while the model call is out and a newer call asks again. This call writes
+    // only if no newer one has written: it waits for newer calls still out, so a newer call that finds
+    // no model leaves this answer standing rather than losing it. Re-run checks replaces the live run,
+    // so a call from before it is stale.
+    const asks = run.traceAsks.get(check.id) ?? { last: 0, written: 0, out: new Map<number, Promise<void>>() };
+    run.traceAsks.set(check.id, asks);
+    const mine = ++asks.last;
+    let settle!: () => void;
+    asks.out.set(mine, new Promise<void>((r) => (settle = r)));
+    const current = async () => {
+      for (;;) {
+        if (this.live.get(run.traceId) !== run || asks.written > mine) return false;
+        const newer = [...asks.out].filter(([n]) => n > mine).map(([, p]) => p);
+        if (!newer.length) break;
+        await Promise.all(newer);
+      }
+      asks.written = mine;
+      return true;
+    };
+    let outcome: "unavailable" | void;
+    try {
+      outcome = await this.decideAndApply(run, check, params, ev.text, ev.spanIds, snap, null, current);
+    } finally {
+      asks.out.delete(mine);
+      settle();
+    }
     // Not asked after all, so the run-end pass asks again; unless an overlapping pass cached newer evidence.
     if (outcome === "unavailable" && run.traceEvidence.get(check.id) === key) run.traceEvidence.delete(check.id);
   }
@@ -557,6 +592,8 @@ export class Engine {
     spanIds: string[],
     snap: TraceSnapshot,
     spanId: string | null,
+    /** Asked right before each write: false when a newer call took over, so this result is dropped. */
+    current: () => boolean | Promise<boolean> = () => true,
   ): Promise<"unavailable" | void> {
     const dismissed = () => this.roots.store.latestFindingFor(run.traceId, check.id)?.status === "dismissed";
     if (dismissed()) return;
@@ -570,13 +607,13 @@ export class Engine {
         this.decisionDown = true;
         return "unavailable";
       }
-      if (dismissed()) return;
+      if (!(await current()) || dismissed()) return;
       // A model error or timeout is a failed check, never a "no".
       const f = recordFailure(this.roots.store, { traceId: run.traceId, checkId: check.id, title: checkTitle(check), spanId, spanIds, message: (err as Error).message });
       if (f) this.roots.bus.emit("finding", f);
       return;
     }
-    if (dismissed()) return;
+    if (!(await current()) || dismissed()) return;
     const answer = result.answers[check.id];
     const verdict = flagged(check, result);
     this.roots.store.insertDecision({
@@ -609,7 +646,7 @@ export class Engine {
       // A second look, with a quote that must be in the run, before anything is raised.
       if ((run.rejected.get(check.id) ?? 0) >= 3) return;
       const check2 = check.kind === "yes_no" ? await verifyFlag(this.llm, fillTemplate(check.ask, params) || check.ask, evidence) : undefined;
-      if (dismissed()) return;
+      if (!(await current()) || dismissed()) return;
       if (check2 && !check2.verified) {
         run.rejected.set(check.id, (run.rejected.get(check.id) ?? 0) + 1);
         log.debug(`${check.id}: flag not confirmed on a second look${check2.quote ? ` (quote: ${clip(check2.quote, 80)})` : ""}`);
@@ -1056,6 +1093,72 @@ ${library}`;
    * like any other ended run. One sweep at a time, at most `limit` runs each, most recent first,
    * so a large backlog doesn't stack up model calls.
    */
+  /** Ids a quiet-run sweep claimed and has not finished rechecking, so startup recovery leaves them to the sweep (issue #673). */
+  private readonly quietClaimed = new Set<string>();
+
+  /**
+   * Marks quiet runs interrupted and returns the ids this sweep claimed, without rechecking them
+   * yet. Claiming is one fast database pass, so a startup can finish it before resuming unrelated
+   * recovery work instead of waiting on one model recheck per old quiet run (issue #673).
+   */
+  claimQuietRuns(quietMs = QUIET_RUN_MS, now = Date.now(), limit = QUIET_SWEEP_LIMIT): string[] {
+    const cutoff = now - quietMs;
+    const claimed: string[] = [];
+    for (const run of this.roots.store.quietRuns(quietMs, now, limit)) {
+      // Only claim when this sweep actually marked the run - an overlapping sweep
+      // that already claimed it must not repeat the end-of-run model calls.
+      let marked: boolean;
+      try {
+        marked = this.roots.store.markRunInterrupted(run.trace_id, "no end received", cutoff);
+      } catch (err) {
+        // A failed mark leaves its row running for the next sweep. Stop here and return the
+        // ids already claimed: propagating would leave them claimed with no recheck coming.
+        log.warn(`quiet-run claim stopped at ${run.trace_id.slice(0, 8)}: ${(err as Error).message}`);
+        break;
+      }
+      if (marked) {
+        claimed.push(run.trace_id);
+        this.quietClaimed.add(run.trace_id);
+      }
+    }
+    return claimed;
+  }
+
+  /** Rechecks the runs a claimQuietRuns call marked, one at a time. */
+  async recheckClaimedQuietRuns(ids: string[]): Promise<void> {
+    for (const id of ids) {
+      try {
+        // A run that ended normally after the claim keeps its own end pass; rechecking it
+        // here would rebuild its live state and run a second one. The live entry can be
+        // gone once the end is a minute old (releaseLive), so check the persisted row too:
+        // a claimed row still reads interrupted until the real end lands.
+        const row = this.roots.store.getRun(id);
+        if (this.live.get(id)?.ended || !row || row.status !== "interrupted") continue;
+        await this.recheck(id, { resume: true });
+        this.roots.store.completeQuietRun(id);
+      } catch (err) {
+        // One failed recheck must not strand the rest of the batch: the remaining ids are
+        // already marked interrupted and startup recovery leaves them to this sweep, so
+        // propagating here would skip their rechecks until a restart. Put the failed run
+        // back to running so a later sweep retries it.
+        log.warn(`quiet-run recheck failed for ${id.slice(0, 8)}: ${(err as Error).message}`);
+        try {
+          this.roots.store.restoreQuietRun(id);
+        } catch (restoreErr) {
+          // The row stays interrupted (no retry) rather than stranding the rest of the batch.
+          log.warn(`quiet-run restore failed for ${id.slice(0, 8)}: ${(restoreErr as Error).message}`);
+        }
+      } finally {
+        this.quietClaimed.delete(id);
+      }
+    }
+  }
+
+  /** True while a quiet-run sweep is rechecking the run it claimed. */
+  isQuietClaimed(traceId: string): boolean {
+    return this.quietClaimed.has(traceId);
+  }
+
   endQuietRuns(quietMs = QUIET_RUN_MS, limit = QUIET_SWEEP_LIMIT): Promise<void> {
     this.quietSweep ??= this.sweepQuietRuns(quietMs, limit).finally(() => {
       this.quietSweep = undefined;
@@ -1064,13 +1167,13 @@ ${library}`;
   }
 
   private async sweepQuietRuns(quietMs: number, limit: number): Promise<void> {
-    const now = Date.now();
-    const cutoff = now - quietMs;
-    for (const run of this.roots.store.quietRuns(quietMs, now, limit)) {
-      // Only recheck when this sweep actually marked the run - one that reported since it
-      // was listed stays running, and one already claimed must not repeat the model calls.
-      if (this.roots.store.markRunInterrupted(run.trace_id, "no end received", cutoff)) await this.recheck(run.trace_id, { resume: true });
-    }
+    const claimed = this.claimQuietRuns(quietMs, Date.now(), limit);
+    await this.recheckClaimedQuietRuns(claimed);
+    const remaining = limit < 0 ? -1 : Math.max(0, limit - claimed.length);
+    if (remaining === 0) return;
+    const abandoned = this.roots.store.abandonedQuietRuns(remaining).filter((r) => !this.quietClaimed.has(r.trace_id));
+    for (const r of abandoned) this.quietClaimed.add(r.trace_id);
+    await this.recheckClaimedQuietRuns(abandoned.map((r) => r.trace_id));
   }
 
   private async handleEnd(run: LiveRun): Promise<void> {
@@ -1334,6 +1437,8 @@ const RESUME_LIMIT = 200;
 export async function resumeUnfinished(engine: Engine, roots: Roots): Promise<number> {
   const ids = engine.progress.unfinished();
   const ended = ids.filter((id) => {
+    // A quiet-run sweep claimed this run and is rechecking it: leave it to the sweep (issue #673).
+    if (engine.isQuietClaimed(id)) return false;
     const r = roots.store.getRun(id);
     if (!r) engine.progress.done(id);
     return !!r && r.status !== "running";
