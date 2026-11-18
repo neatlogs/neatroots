@@ -278,6 +278,8 @@ describe("imports", () => {
   it("parses ms, s, ns and ISO times", () => {
     expect(toNs(1_700_000_000_000)).toBe(1_700_000_000_000_000_000n);
     expect(toNs(1_700_000_000)).toBe(1_700_000_000_000_000_000n);
+    expect(toNs("1700000000123456789")).toBe(1_700_000_000_123_456_789n);
+    expect(toNs("1700000000123456")).toBe(1_700_000_000_123_456_000n);
     expect(toNs("2026-10-09T10:00:00.123456789Z")).toBe(BigInt(Date.parse("2026-10-09T10:00:00.123Z")) * 1_000_000n + 456789n);
     expect(buildSpan({ traceId: "x", spanId: "y", name: "n", start: 1 }).traceId).toHaveLength(32);
   });
@@ -287,6 +289,8 @@ describe("imports", () => {
     expect(toNs("1700000000.5")).toBe(toNs(1700000000.5));
     expect(BigInt(toNs("1700000000.5")!) / 1_000_000n).toBe(1_700_000_000_500n);
     expect(toNs("1700000000123.5")).toBe(toNs(1700000000123.5));
+    const exact = "1700000000123456789";
+    expect(httpTraceToBatches({ name: "exact", start: exact, end: exact }).batches[0].spans[0].startTimeUnixNano).toBe(exact);
     const { batches } = httpTraceToBatches({ name: "run", start: "1700000000.25", end: "1700000001.75" });
     const sp = batches[0].spans[0];
     // Same as sending the numbers (which keep ns only to ~1 µs), not the arrival time.
@@ -297,6 +301,18 @@ describe("imports", () => {
     // strings that aren't times are still not read as times
     expect(toNs("abc")).toBeUndefined();
     expect(toNs(" 1700000000.5 ")).toBeUndefined();
+  });
+
+  it("preserves HTTP-trace file timestamps and converts numeric seconds once", () => {
+    const exact = "1700000000123456789";
+    const imported = parseTraceFile(JSON.stringify({ name: "exact", start: exact, end: exact }), "trace.json")[0].spans[0];
+    expect(imported.startTimeUnixNano).toBe(exact);
+    expect(imported.endTimeUnixNano).toBe(exact);
+
+    const seconds = httpTraceToBatches({ name: "seconds", start: 99, end: 101 }).batches[0].spans[0];
+    expect(seconds.startTimeUnixNano).toBe("99000000000");
+    expect(seconds.endTimeUnixNano).toBe("101000000000");
+    expect(BigInt(seconds.endTimeUnixNano) - BigInt(seconds.startTimeUnixNano)).toBe(2_000_000_000n);
   });
 
   it("reads OTLP JSON, Neatlogs exports and HTTP traces from files, one per line too", () => {
