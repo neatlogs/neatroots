@@ -4,6 +4,8 @@ interface ResponseRequest {
   _thenUnwrap<T>(transform: (data: unknown, props: unknown) => T): unknown;
 }
 
+const missingResponse = () => new Error("response helpers are unavailable on this composed request");
+
 /** Wait for guidance without assimilating the SDK promise or consuming its response body. */
 export class SteeredRequest extends Promise<unknown> {
   private parsed?: Promise<unknown>;
@@ -32,16 +34,27 @@ export class SteeredRequest extends Promise<unknown> {
   }
 
   _thenUnwrap<T>(transform: (data: unknown, props: unknown) => T): SteeredRequest {
-    return new SteeredRequest(this.request.then(({ value }) => ({
-      value: (value as ResponseRequest)._thenUnwrap(transform),
-    })));
+    return new SteeredRequest(
+      this.request.then(({ value }) => ({
+        value:
+          typeof (value as Partial<ResponseRequest>)?._thenUnwrap === "function"
+            ? (value as ResponseRequest)._thenUnwrap(transform)
+            : Promise.resolve(value).then((data) => transform(data, {})),
+      })),
+    );
   }
 
   asResponse(): Promise<Response> {
-    return this.request.then(({ value }) => (value as ResponseRequest).asResponse());
+    return this.request.then(({ value }) =>
+      typeof (value as Partial<ResponseRequest>)?.asResponse === "function" ? (value as ResponseRequest).asResponse() : Promise.reject(missingResponse()),
+    );
   }
 
   withResponse(): Promise<unknown> {
-    return this.request.then(({ value }) => (value as ResponseRequest).withResponse());
+    return this.request.then(async ({ value }) =>
+      typeof (value as Partial<ResponseRequest>)?.withResponse === "function"
+        ? (value as ResponseRequest).withResponse()
+        : Promise.reject(missingResponse()),
+    );
   }
 }
