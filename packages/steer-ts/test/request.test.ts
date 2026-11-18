@@ -106,6 +106,17 @@ describe("OpenAI parse helpers", () => {
     await expect(parsed.asResponse()).rejects.toThrow("response helpers are unavailable");
   });
 
+  it("does not fabricate a response when a composed client strips withResponse", async () => {
+    const sdkRequest = Object.assign(Promise.resolve("ok"), {
+      withResponse: async () => ({ data: "ok", response: new Response("ok") }),
+    });
+    const client = { chat: { completions: { create: () => Promise.resolve(sdkRequest).then((data) => data) } } };
+    wrapOpenAI(client);
+    const request = client.chat.completions.create() as unknown as SteeredRequest;
+
+    await expect(request.withResponse()).rejects.toThrow("response helpers are unavailable");
+  });
+
   it.each(["request", "transform"])("preserves %s failures", async (stage) => {
     const error = new Error(stage);
     const original = sdkRequest(() => {
