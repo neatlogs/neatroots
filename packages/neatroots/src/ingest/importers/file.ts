@@ -1,6 +1,6 @@
 import { decodeTraceJson } from "../../otlp/codec.js";
 import type { ResourceSpansBatch } from "../../otlp/types.js";
-import { toBatches, type SpanNode } from "../build.js";
+import { hexId, toBatches, toNs, type SpanNode } from "../build.js";
 import { httpTraceToBatches } from "../http-trace.js";
 import { ImportError } from "./types.js";
 
@@ -14,22 +14,36 @@ function fromDoc(doc: unknown, project: string): ResourceSpansBatch[] {
   const o = doc as Record<string, unknown>;
   if (Array.isArray(o.resourceSpans) || Array.isArray(o.resource_spans)) return decodeTraceJson(o);
   const exp = (o.data && typeof o.data === "object" ? o.data : o) as Record<string, unknown>;
-  if (Array.isArray(exp.spans) && exp.trace && typeof exp.trace === "object") return fromNeatlogsExport(exp, project);
+  if ("trace" in exp || "spans" in exp) return fromNeatlogsExport(exp, project);
   if (typeof o.name === "string") return httpTraceToBatches(o, project, { stableIds: true }).batches;
   throw new ImportError("not OTLP JSON, a Neatlogs trace export or a Neatlogs HTTP trace");
 }
 
 function fromNeatlogsExport(exp: Record<string, unknown>, project: string): ResourceSpansBatch[] {
-  const trace = exp.trace as { traceId: string; workflowName?: string; traceName?: string; sessionId?: string };
+  if (!exp.trace || typeof exp.trace !== "object" || Array.isArray(exp.trace)) throw new Error("trace must be an object");
+  if (!Array.isArray(exp.spans)) throw new Error("spans must be an array");
+  const trace = exp.trace as { traceId?: unknown; workflowName?: string; traceName?: string; sessionId?: string };
   const spans = exp.spans as Record<string, unknown>[];
-  const ids = new Set(spans.map((s) => s.spanId));
+  if (typeof trace.traceId !== "string" || !trace.traceId) throw new Error("trace.traceId is required");
+  const seen = new Set<string>();
+  for (const [i, span] of spans.entries()) {
+    if (!span || typeof span !== "object" || Array.isArray(span)) throw new Error(`spans[${i}] must be an object`);
+    if (typeof span.spanId !== "string" || !span.spanId) throw new Error(`spans[${i}].spanId is required`);
+    const id = hexId(span.spanId, 8);
+    if (seen.has(id)) throw new Error(`spans[${i}].spanId is duplicated`);
+    seen.add(id);
+    if ((typeof span.startedAt !== "string" && typeof span.startedAt !== "number") || toNs(span.startedAt) === undefined) {
+      throw new Error(`spans[${i}].startedAt is required and must be a timestamp`);
+    }
+  }
+  const ids = new Set(spans.map((s) => hexId(s.spanId as string, 8)));
   const nodes = spans.map<SpanNode>((s) => ({
     traceId: String(s.traceId ?? trace.traceId),
     spanId: String(s.spanId),
-    parentSpanId: s.parentSpanId && ids.has(s.parentSpanId) ? String(s.parentSpanId) : null,
+    parentSpanId: typeof s.parentSpanId === "string" && ids.has(hexId(s.parentSpanId, 8)) ? s.parentSpanId : null,
     name: String(s.spanName ?? "span"),
     kind: (s.spanType as string) ?? null,
-    start: String(s.startedAt),
+    start: s.startedAt as string | number,
     end: (s.endedAt as string) ?? null,
     durationMs: (s.durationMs as number) ?? null,
     status: String(s.status ?? "OK").toUpperCase().startsWith("ERR") ? "ERROR" : "OK",
