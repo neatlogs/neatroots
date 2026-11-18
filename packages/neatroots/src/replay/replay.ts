@@ -8,7 +8,6 @@ import type { ChatMessage } from "../models/llm.js";
 import type { Plain } from "../otlp/types.js";
 import { attr } from "../otlp/types.js";
 import { isSystemRole, preview } from "../semantics/view.js";
-import { log } from "../util/log.js";
 
 // Replays. An LLM-call replay re-sends one LLM span's messages (as edited) to the configured LLM
 // and stores the answer as a new run; no agent needed. A run replay re-runs the whole agent with
@@ -241,6 +240,7 @@ export class Replays {
     });
     try {
       let tail = "";
+      let commandError: string | null = null;
       if (target.url) {
         const res = await fetch(target.url, {
           method: "POST",
@@ -288,7 +288,11 @@ export class Replays {
               : `couldn't start the rerun command: ${error.message}`,
           );
         }
-        if (code !== 0) log.info(`replay ${r.id}: the agent exited with ${code}`);
+        if (code !== 0) {
+          const detail = code === null ? "was terminated" : `exited with ${code}`;
+          const output = tail.trim();
+          commandError = `the agent command ${detail}${output ? `: ${output.slice(-300)}` : ""}`;
+        }
       }
       // Spans arrive on the SDK's flush interval; give the run a moment to land.
       for (let i = 0; i < 20 && !linked; i++) {
@@ -298,7 +302,7 @@ export class Replays {
           if (fresh.length && i >= 4) linked = fresh[fresh.length - 1].trace_id;
         }
       }
-      if (!linked) return this.finish(r, { state: "failed", error: "the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?", log_tail: tail || null });
+      if (!linked) return this.finish(r, { state: "failed", error: commandError ?? "the agent ran, but no new run reached neatroots. Is it pointed at neatroots (NEATLOGS_ENDPOINT)?", log_tail: tail || null });
       const run = this.roots.store.getRun(linked);
       return this.finish(r, { state: "succeeded", new_trace_id: linked, output_preview: run?.output_preview ?? null, log_tail: tail || null });
     } finally {
