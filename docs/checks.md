@@ -122,6 +122,11 @@ answer is also put to Laya in the background, and neatroots records whether Laya
 on at least 90% of 30 answers for a question, that question goes to Laya first (about 100 ms instead of
 seconds). With no local LLM, Laya answers everything. Settings → Models shows the agreement per question.
 
+When the local LLM answers questions, token log probabilities can provide confidence; without them,
+the response must include a numeric `confidence` from 0 to 1. If neither is usable, neatroots retries
+once; if the retry still has no usable confidence, the question is recorded as not checked. Local
+servers that consistently omit both cannot answer question checks; use a compatible model, Laya or Jev.
+
 ## Cost control
 
 When the local LLM stands in for the decision model, span-level questions are asked only about the

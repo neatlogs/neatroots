@@ -250,10 +250,18 @@ describe("local decision calibration", () => {
   });
 
   it("rejects missing and out-of-range confidence after the retry", async () => {
-    const srv = await mock((r) => (r.path.endsWith("/models") ? { json: { data: [{ id: "local-model" }] } } : { json: chatReply('{"answer":"yes","confidence":2}') }));
-    closers.push(srv.close);
-    const llm = new LlmClient(cfgWith((c) => Object.assign(c, { baseUrl: `${srv.url}/v1`, enabled: true })), { secret: async () => undefined });
-    await expect(new LlmDecisionBackend(llm).decide("evidence", [{ name: "q", type: "yes_no", ask: "Did it fail?" }])).rejects.toThrow(/no usable confidence/);
+    for (const answer of ['{"answer":"yes"}', '{"answer":"yes","confidence":2}']) {
+      let calls = 0;
+      const srv = await mock((r) => {
+        if (r.path.endsWith("/models")) return { json: { data: [{ id: "local-model" }] } };
+        calls++;
+        return { json: chatReply(answer) };
+      });
+      closers.push(srv.close);
+      const llm = new LlmClient(cfgWith((c) => Object.assign(c, { baseUrl: `${srv.url}/v1`, enabled: true })), { secret: async () => undefined });
+      await expect(new LlmDecisionBackend(llm).decide("evidence", [{ name: "q", type: "yes_no", ask: "Did it fail?" }])).rejects.toThrow(/no usable confidence/);
+      expect(calls).toBe(2);
+    }
   });
 });
 

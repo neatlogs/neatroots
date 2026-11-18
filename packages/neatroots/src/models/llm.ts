@@ -485,13 +485,6 @@ export class LlmClient {
     return this.local.model();
   }
 
-  /** Whether the active target reports token logprobs. */
-  get logprobs(): boolean {
-    // Local OpenAI-compatible servers vary: request logprobs, but also ask for a stated
-    // confidence so a server that omits them does not silently get a made-up probability.
-    return this.externalEnabled ? !!this.preset?.logprobs && this.preset.api === "openai" : false;
-  }
-
   async externalKey(): Promise<string | undefined> {
     const provider = this.cfg.external?.provider ?? "";
     if (this.keyCache && this.keyCache.provider === provider && Date.now() - this.keyCache.at < 30_000) return this.keyCache.key;
