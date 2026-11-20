@@ -323,7 +323,10 @@ export class LlmDecisionBackend implements DecisionBackend {
         );
         let parsed = (r.json as { answer?: string; confidence?: number } | undefined) ?? {};
         let stated = typeof parsed.confidence === "number" && parsed.confidence >= 0 && parsed.confidence <= 1 ? parsed.confidence : undefined;
-        if (!r.logprobs && stated === undefined) {
+        const initialSaid = String(parsed.answer ?? "").trim().toLowerCase();
+        const initialChosen = labels.find((l) => l.toLowerCase() === initialSaid) ?? "";
+        const initialTokenDist = r.logprobs && distributionFromLogprobs(labels, r.logprobs, initialChosen);
+        if (!initialTokenDist && stated === undefined) {
           r = await this.llm.chat(
             [
               { role: "system", content: SYSTEM },

@@ -263,6 +263,21 @@ describe("local decision calibration", () => {
     expect(calls).toBe(2);
   });
 
+  it("retries when empty logprobs give no usable confidence", async () => {
+    let calls = 0;
+    const srv = await mock((r) => {
+      if (r.path.endsWith("/models")) return { json: { data: [{ id: "local-model" }] } };
+      calls++;
+      if (calls === 1) return { json: { ...chatReply('{"answer":"yes"}'), choices: [{ message: { content: '{"answer":"yes"}' }, logprobs: { content: [] } }] } };
+      return { json: chatReply('{"answer":"no","confidence":0.9}') };
+    });
+    closers.push(srv.close);
+    const llm = new LlmClient(cfgWith((c) => Object.assign(c, { baseUrl: `${srv.url}/v1`, enabled: true })), { secret: async () => undefined });
+    const result = await new LlmDecisionBackend(llm).decide("evidence", [{ name: "q", type: "yes_no", ask: "Did it fail?" }]);
+    expect(result.answers.q.probability).toBeCloseTo(0.18, 2);
+    expect(calls).toBe(2);
+  });
+
   it("rejects an invalid answer returned by the confidence retry", async () => {
     let calls = 0;
     const srv = await mock((r) => {
