@@ -321,10 +321,7 @@ export class LlmDecisionBackend implements DecisionBackend {
             signal: opts.signal,
           },
         );
-        model = r.model;
         let parsed = (r.json as { answer?: string; confidence?: number } | undefined) ?? {};
-        const said = String(parsed.answer ?? "").trim().toLowerCase();
-        const chosen = labels.find((l) => l.toLowerCase() === said) ?? "";
         let stated = typeof parsed.confidence === "number" && parsed.confidence >= 0 && parsed.confidence <= 1 ? parsed.confidence : undefined;
         if (!r.logprobs && stated === undefined) {
           r = await this.llm.chat(
@@ -343,6 +340,9 @@ export class LlmDecisionBackend implements DecisionBackend {
           parsed = (r.json as { answer?: string; confidence?: number } | undefined) ?? {};
           stated = typeof parsed.confidence === "number" && parsed.confidence >= 0 && parsed.confidence <= 1 ? parsed.confidence : undefined;
         }
+        model = r.model;
+        const said = String(parsed.answer ?? "").trim().toLowerCase();
+        const chosen = labels.find((l) => l.toLowerCase() === said) ?? "";
         // No readable answer (prose instead of JSON): the check fails rather than reading as 50/50,
         // which would count as "yes".
         if (!labels.includes(chosen)) throw new Error(`invalid answer: the model's answer couldn't be read (${JSON.stringify(String(r.text ?? "").slice(0, 80))})`);
