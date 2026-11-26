@@ -37,6 +37,8 @@ action: flag              # or halt (your own rules only; needs steering on for 
 | `unrecovered_error` | at run end, the last call of a tool failed (no later success of that tool) and the run still produced a final answer that does not say anything failed (a words check, so it is a hint, not proof) |
 | `run_end` | the run ended with `error`, `no_output` or `interrupted` |
 
+`span` picks the spans a rule looks at by `type`, `name`, `tool`, `status` (`ok` means not failed) and `stream_cancelled` (`true` for streamed replies the SDK marked abandoned with `neatlogs.stream.cancelled`).
+
 ## Questions
 
 Answered by the decision model with a probability. Yes/no questions are phrased as failures, so a

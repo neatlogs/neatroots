@@ -6,6 +6,8 @@ export const SpanSelector = z
     type: z.union([z.string(), z.array(z.string())]).optional(),
     name: z.union([z.string(), z.array(z.string())]).optional(),
     tool: z.union([z.string(), z.array(z.string())]).optional(),
+    /** Only streamed replies the SDK marked abandoned (true), or only ones it didn't (false). */
+    stream_cancelled: z.boolean().optional(),
     status: z.enum(["ok", "error", "unset", "any"]).optional(),
   })
   .strict();

@@ -19,6 +19,7 @@ export interface SpanInfo {
   status: "ok" | "error" | "unset";
   error?: string;
   finishReason?: string;
+  streamCancelled?: boolean;
   toolName?: string;
   model?: string;
   tokens?: number;
@@ -92,6 +93,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
       status: statusOf(row),
       error: v.error,
       finishReason: v.finishReason,
+      streamCancelled: v.streamCancelled,
       toolName: v.toolName,
       model: v.model,
       tokens: v.totalTokens,
@@ -122,6 +124,7 @@ export function matchesSelector(s: SpanInfo, sel: SpanSelector | undefined): boo
   if (names && !names.includes(s.name.toLowerCase()) && !(s.toolName && names.includes(s.toolName.toLowerCase()))) return false;
   const tools = asList(sel.tool);
   if (tools && !(s.toolName && tools.includes(s.toolName.toLowerCase()))) return false;
+  if (sel.stream_cancelled !== undefined && Boolean(s.streamCancelled) !== sel.stream_cancelled) return false;
   if (sel.status && sel.status !== "any") {
     if (sel.status === "ok" ? s.status === "error" : s.status !== sel.status) return false;
   }

@@ -47,6 +47,8 @@ export interface Span {
   input_preview: string | null;
   output_preview: string | null;
   error: string | null;
+  /** 1 when the SDK marked this streamed reply abandoned before it finished. */
+  stream_cancelled?: number | null;
   tool_result: string | null;
 }
 
@@ -267,6 +269,7 @@ export interface SpanDetail {
     completionTokens?: number;
     totalTokens?: number;
     tools?: string[];
+    streamCancelled?: boolean;
   };
   attributes: Record<string, unknown>;
   events: { name: string; time_ns: string; attributes: Record<string, unknown> }[];

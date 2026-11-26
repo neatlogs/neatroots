@@ -60,6 +60,8 @@ export interface SpanRow {
   output_preview: string | null;
   error: string | null;
   is_marker: number;
+  /** 1 when the SDK marked the streamed reply abandoned; null for spans stored before neatroots read the flag. */
+  stream_cancelled?: number | null;
   resource_id: string;
   scope_id: string;
   received_ms: number;
