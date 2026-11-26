@@ -76,6 +76,11 @@ export function SpanSheet({
                 Failed
               </StatusPill>
             )}
+            {d?.status.code !== 2 && v?.streamCancelled && (
+              <StatusPill size="sm" tone="warning">
+                Abandoned
+              </StatusPill>
+            )}
           </SheetTitle>
           <SheetDescription className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs tabular-nums">
             {d && (

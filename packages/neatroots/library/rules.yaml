@@ -67,6 +67,18 @@
     flags: 'i'
   guidance: The reply was truncated at the token limit and is incomplete. Raise max_tokens for this call or ask the model to continue before using the reply.
 
+- id: stream-abandoned
+  kind: rule
+  title: A streamed model reply was abandoned before it finished
+  rule:
+    type: count
+    span: { type: llm, status: ok, stream_cancelled: true }
+    at_least: 1
+  guidance: >-
+    A streamed model reply was stopped before it finished ({count} in this run), so its tokens were
+    generated and thrown away. Check for an early break, a cancelled task or a timeout around the
+    stream, and read the reply to the end when you need it.
+
 - id: secret-in-output
   kind: rule
   title: Something that looks like a secret key in model output

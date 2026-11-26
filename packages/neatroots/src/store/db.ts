@@ -460,6 +460,7 @@ export class Store {
     };
     ensure("plans", "body", "TEXT");
     ensure("runs", "quiet_sweep_done", "INTEGER NOT NULL DEFAULT 0");
+    ensure("spans", "stream_cancelled", "INTEGER");
     // Tool-result labels recorded before the rename to neatroots.
     this.db.prepare("UPDATE decisions SET check_id = 'neatroots.tool-result' WHERE check_id IN ('bolts.tool-result', 'neatbolt.tool-result')").run();
     this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
@@ -581,6 +582,7 @@ export class Store {
       output_preview: view.output !== undefined ? preview(view.output, 600) : null,
       error: view.error ?? null,
       is_marker: view.isMarker ? 1 : 0,
+      stream_cancelled: view.streamCancelled ? 1 : 0,
       resource_id: resourceId,
       scope_id: scopeId,
       received_ms: now,
@@ -591,11 +593,11 @@ export class Store {
         `INSERT OR REPLACE INTO spans (trace_id, span_id, parent_span_id, name, span_kind, otel_kind, start_ns, end_ns,
           start_ms, end_ms, duration_ms, status_code, status_message, model, provider, tool_name, prompt_tokens,
           completion_tokens, total_tokens, input_preview, output_preview, error, attributes, events, links, extra, blobs,
-          is_marker, resource_id, scope_id, received_ms, seq)
+          is_marker, stream_cancelled, resource_id, scope_id, received_ms, seq)
          VALUES (@trace_id, @span_id, @parent_span_id, @name, @span_kind, @otel_kind, @start_ns, @end_ns, @start_ms,
           @end_ms, @duration_ms, @status_code, @status_message, @model, @provider, @tool_name, @prompt_tokens,
           @completion_tokens, @total_tokens, @input_preview, @output_preview, @error, @attributes, @events, @links,
-          @extra, @blobs, @is_marker, @resource_id, @scope_id, @received_ms, @seq)`,
+          @extra, @blobs, @is_marker, @stream_cancelled, @resource_id, @scope_id, @received_ms, @seq)`,
       )
       .run({
         ...row,
@@ -946,7 +948,7 @@ export class Store {
       .prepare(
         `SELECT trace_id, span_id, parent_span_id, name, span_kind, otel_kind, start_ns, end_ns, start_ms, end_ms,
           duration_ms, status_code, status_message, model, provider, tool_name, prompt_tokens, completion_tokens,
-          total_tokens, input_preview, output_preview, error, is_marker, resource_id, scope_id, received_ms, seq
+          total_tokens, input_preview, output_preview, error, is_marker, stream_cancelled, resource_id, scope_id, received_ms, seq
          FROM spans WHERE trace_id = ? ${includeMarker ? "" : "AND is_marker = 0"} ORDER BY start_ms, seq`,
       )
       .all(traceId) as SpanRow[];

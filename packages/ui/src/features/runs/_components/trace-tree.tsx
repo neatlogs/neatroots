@@ -61,6 +61,7 @@ export function TraceTree({ spans, flagged, selected, onSelect }: { spans: Span[
     <div role="tree" aria-label="Trace spans" className="h-full overflow-y-auto py-1">
       {rows.map(({ span: s, depth }) => {
         const failed = s.status_code === 2;
+        const abandoned = !failed && s.stream_cancelled === 1;
         const guidance = isGuidance(s);
         const isSel = selected === s.span_id;
         const left = ((s.start_ms - start) / total) * 100;
@@ -84,12 +85,13 @@ export function TraceTree({ spans, flagged, selected, onSelect }: { spans: Span[
               <Icon
                 icon={guidance ? FlashIcon : (KIND_ICON[s.span_kind] ?? CircleIcon)}
                 size="sm"
-                className={cn("shrink-0", guidance ? "text-brand-violet" : failed ? "text-danger-fg" : "text-muted-foreground")}
+                className={cn("shrink-0", guidance ? "text-brand-violet" : failed ? "text-danger-fg" : abandoned ? "text-warning-fg" : "text-muted-foreground")}
               />
               <span className={cn("truncate text-sm", guidance ? "text-brand-violet" : failed ? "text-danger-fg" : "text-foreground")}>
                 {guidance ? `Note to the agent: ${s.input_preview ?? ""}` : (s.tool_name ?? s.name)}
               </span>
               {!guidance && <span className="shrink-0 text-eyebrow text-2xs text-muted-foreground">{s.span_kind.toLowerCase().replace("_", " ")}</span>}
+              {abandoned && <span className="sr-only shrink-0 text-eyebrow text-2xs text-warning-fg sm:not-sr-only">abandoned</span>}
               {flagged.has(s.span_id) && <span role="img" aria-label="Evidence for an open problem" className="size-1.5 shrink-0 rounded-full bg-warning-fg" />}
             </span>
             <span aria-hidden className="relative h-1.5 rounded-full bg-muted">

@@ -52,6 +52,8 @@ export interface SpanView {
   output?: Plain;
   error?: string;
   finishReason?: string;
+  /** The SDK marked this streamed reply abandoned before it finished (neatlogs.stream.cancelled). */
+  streamCancelled?: boolean;
   interrupted?: boolean;
   terminationReason?: string;
   /** Tool calls the LLM asked for (LLM spans only). */
@@ -363,6 +365,7 @@ export function buildView(span: OtlpSpan, resourceAttrs: KeyValue[]): SpanView {
   if (span.status.code === 2) view.error = span.status.message || exceptionMessage(span) || "error";
   else view.error = exceptionMessage(span);
   if (attrs["neatlogs.trace.interrupted"] === true || attrs["neatlogs.trace.interrupted"] === "true") view.interrupted = true;
+  if (attrs["neatlogs.stream.cancelled"] === true || attrs["neatlogs.stream.cancelled"] === "true") view.streamCancelled = true;
   view.terminationReason = str(attrs["neatlogs.trace.termination.reason"]);
   return view;
 }
