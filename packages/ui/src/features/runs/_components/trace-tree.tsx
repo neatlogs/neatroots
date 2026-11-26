@@ -2,6 +2,7 @@ import { AiBrain01Icon, CircleIcon, DatabaseIcon, FlashIcon, GitForkIcon, Robot0
 import type { IconSvgElement } from "@hugeicons/react";
 import { useMemo } from "react";
 import { Icon } from "@/components/ui/icon";
+import { StatusPill } from "@/components/ui/status-pill";
 import type { Span } from "@/lib/api";
 import { dur } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -91,7 +92,11 @@ export function TraceTree({ spans, flagged, selected, onSelect }: { spans: Span[
                 {guidance ? `Note to the agent: ${s.input_preview ?? ""}` : (s.tool_name ?? s.name)}
               </span>
               {!guidance && <span className="shrink-0 text-eyebrow text-2xs text-muted-foreground">{s.span_kind.toLowerCase().replace("_", " ")}</span>}
-              {abandoned && <span className="sr-only shrink-0 text-eyebrow text-2xs text-warning-fg sm:not-sr-only">abandoned</span>}
+              {abandoned && (
+                <StatusPill size="sm" tone="warning" className="sr-only shrink-0 sm:not-sr-only">
+                  Abandoned
+                </StatusPill>
+              )}
               {flagged.has(s.span_id) && <span role="img" aria-label="Evidence for an open problem" className="size-1.5 shrink-0 rounded-full bg-warning-fg" />}
             </span>
             <span aria-hidden className="relative h-1.5 rounded-full bg-muted">

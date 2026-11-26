@@ -39,8 +39,8 @@ test("an abandoned streamed reply is labelled in the trace and the span sheet", 
   await views.getByRole("tab", { name: "Trace" }).click();
   const abandoned = views.getByRole("treeitem", { name: /abandoned-reply/ });
   const finished = views.getByRole("treeitem", { name: /finished-reply/ });
-  await expect(abandoned.getByText("abandoned", { exact: true })).toBeVisible();
-  await expect(finished.getByText("abandoned", { exact: true })).toHaveCount(0);
+  await expect(abandoned.getByText("Abandoned", { exact: true })).toBeVisible();
+  await expect(finished.getByText("Abandoned", { exact: true })).toHaveCount(0);
 
   await abandoned.click();
   await expect(page.getByRole("dialog").getByText("Abandoned", { exact: true })).toBeVisible();
